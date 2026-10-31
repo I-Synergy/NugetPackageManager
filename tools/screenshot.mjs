@@ -63,6 +63,11 @@ await shot('screenshot-consolidate.png');
 await clickTab('Vulnerabilities');
 await shot('screenshot-vulnerabilities.png');
 
+// Toolchain tab
+await clickTab('Toolchain');
+await waitForContent();
+await shot('screenshot-toolchain.png');
+
 // Cleanup tab (must be last)
 await clickTab('Cleanup');
 await shot('screenshot-cleanup.png');
