@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { existsSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -42,6 +43,24 @@ import type {
   GetOperationProgressResponse,
   GetOutdatedScanProgressRequest,
   GetOutdatedScanProgressResponse,
+  GetToolchainHealthRequest,
+  GetToolchainHealthResponse,
+  RunToolchainDiagnosticsRequest,
+  RunToolchainDiagnosticsResponse,
+  SetWorkspaceSdkRequest,
+  SetWorkspaceSdkResponse,
+  InstallSdkRequest,
+  InstallSdkResponse,
+  RunWorkloadCommandRequest,
+  RunWorkloadCommandResponse,
+  GetDependencyIssuesRequest,
+  GetDependencyIssuesResponse,
+  FixRestoreConflictRequest,
+  FixRestoreConflictResponse,
+  UpdateCentralVersionsRequest,
+  UpdateCentralVersionsResponse,
+  DependencyIssue,
+  ToolchainHealth,
 } from "@/common/rpc/types";
 import type { Result } from "@/common/rpc/result";
 import { ok, fail } from "@/common/rpc/result";
@@ -61,7 +80,23 @@ import {
 import nugetApiFactory from "./nuget/api-factory";
 import { SetUpdateBadge } from "./view-badge";
 import NuGetConfigResolver from "./utilities/nuget-config-resolver";
-import TaskExecutor, { DotnetError } from "./utilities/task-executor";
+import TaskExecutor, { CreateDotnetOptions, DotnetError } from "./utilities/task-executor";
+import { ToFailureInfo, type DotnetFailure } from "./utilities/dotnet-failure";
+import { BuildToolchainDiagnosticsAsync, ProbeToolchainAsync } from "./utilities/toolchain-health";
+import { GetSdkInstallRoot } from "./utilities/sdk-locations";
+import {
+  IsValidSdkVersion as IsValidGlobalJsonSdkVersion,
+  UpdateGlobalJsonSdkVersion,
+  UpdateGlobalJsonSdkVersionAsync,
+} from "./utilities/global-json";
+import { InstallSdkAsync, IsValidSdkVersion, SdkInstallError } from "./utilities/sdk-install";
+import { ResolveDotnetCommand, ResolveDotnetContext, ResolveWorkingDirectory } from "./utilities/dotnet-context";
+import { RunWorkloadCommandAsync } from "./utilities/workload-commands";
+import { AnalyzeProjectAsync } from "./utilities/dependency-graph";
+import { ScopeProjectFiles } from "./utilities/project-scope";
+import { ComputeRequirementClosureAsync, OrderRequirements } from "./utilities/requirement-closure";
+import { ReadAssetsAsync, ReadDirectDependencies } from "./utilities/dependency-graph";
+import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "../common/logger";
 import { getConfiguration, getSetting } from "../common/configuration";
@@ -610,6 +645,7 @@ async function finalizeTransactionalBatchAsync(params: {
 
   const response: BatchUpdateResponse = { Results: results, RolledBack: true };
   if (failedRestore) response.RestoreError = failedRestore;
+  if (restoreFailure?.failure) response.Failure = ToFailureInfo(restoreFailure.failure);
   const rollbackMessage = rollbackError ?? rollbackRestoreError;
   if (rollbackMessage) response.RollbackError = rollbackMessage;
   if (conflictingPackages.length > 0) response.ConflictingPackages = conflictingPackages;
@@ -783,7 +819,10 @@ async function applyProjectUpdateAsync(
         "dotnet",
         ["restore", request.ProjectPath.replace(/\\/g, "/")],
         request.OperationId ?? `restore-${request.PackageId}`,
-        signal
+        signal,
+        undefined,
+        undefined,
+        CreateDotnetOptions(request.ProjectPath)
       );
     }
     return;
@@ -809,7 +848,10 @@ async function buildProjectUpdateFailureAsync(
   report: JobReporter
 ): Promise<string> {
   const message = err instanceof Error ? err.message : String(err);
-  const detail = err instanceof DotnetError ? SummarizeRestoreFailure(err.output) : null;
+  const classified = err instanceof DotnetError ? err.failure : undefined;
+  let detail: string | null = null;
+  if (classified) detail = `${classified.Summary} ${classified.Hint}`;
+  else if (err instanceof DotnetError) detail = SummarizeRestoreFailure(err.output);
 
   report("Rolling back…", 90);
   let rollbackError = await rollbackFilesAsync(snapshots);
@@ -1070,7 +1112,11 @@ async function restoreConsolidatedProjectsAsync(
     await TaskExecutor.ExecuteCommandAsync(
       "dotnet",
       ["restore", projectPath.replace(/\\/g, "/")],
-      `restore-${request.PackageId}`
+      `restore-${request.PackageId}`,
+      undefined,
+      undefined,
+      undefined,
+      CreateDotnetOptions(projectPath)
     );
   }
 }
@@ -1142,7 +1188,9 @@ async function findBatchUpdateConflictsAsync(
   const conflicts: BatchUpdateConflict[] = [];
   const seen = new Set<string>();
   const addConflict = (conflict: BatchUpdateConflict): void => {
-    const key = `${conflict.PackageId.toLowerCase()}|${conflict.BlockedByPackageId.toLowerCase()}|${conflict.RequiredRange}`;
+    // The TFM is part of the identity: one package can be required at different
+    // versions per target framework, and the plan needs both.
+    const key = `${conflict.PackageId.toLowerCase()}|${conflict.BlockedByPackageId.toLowerCase()}|${conflict.RequiredRange}|${conflict.Tfm ?? ""}`;
     if (seen.has(key)) return;
     seen.add(key);
     conflicts.push(conflict);
@@ -1158,11 +1206,24 @@ async function findBatchUpdateConflictsAsync(
     const effective = new Map(graph?.packageVersions ?? []);
     for (const [id, entry] of selected) effective.set(id, entry.version);
 
+    const assets = await ReadAssetsAsync(projectPath);
+    const tfms = [...(graph?.tfms ?? [])];
+    const centralVersions = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
+    const constraints = {
+      directPackages: new Map(
+        tfms.map((tfm) => [tfm, assets ? ReadDirectDependencies(assets, tfm) : new Set<string>()])
+      ),
+      centralIds: new Set([...centralVersions.keys()].map((id) => id.toLowerCase())),
+      centralTransitivePinning: isCentralTransitivePinningEnabled(projectPath),
+      directKnown: Boolean(assets?.project?.frameworks && Object.keys(assets.project.frameworks).length > 0),
+    };
+
     await checkSelectedPackageRangesAsync({
       projectPath,
       selected,
       effective,
-      tfms: [...(graph?.tfms ?? [])],
+      tfms,
+      ...constraints,
       sources,
       detailsCache,
       signal,
@@ -1175,11 +1236,29 @@ async function findBatchUpdateConflictsAsync(
         graph,
         selected,
         effective,
+        ...constraints,
         sources,
         detailsCache,
         signal,
         addConflict,
       });
+    }
+  }
+
+  if (conflicts.length > 0) {
+    const order = OrderRequirements(
+      conflicts.map((conflict) => ({
+        PackageId: conflict.BlockedByPackageId,
+        RequiredBy: conflict.PackageId,
+        RequiredByVersion: conflict.RequestedVersion,
+        Range: conflict.RequiredRange,
+        RequiredVersion: conflict.RequiredVersion ?? conflict.RequiredRange,
+        Tfm: conflict.Tfm ?? "",
+      }))
+    );
+    for (const conflict of conflicts) {
+      const entry = order.get(conflict.BlockedByPackageId.toLowerCase());
+      if (entry) conflict.Order = entry.Order;
     }
   }
 
@@ -1202,6 +1281,17 @@ function buildSelectedByProject(
 
 type ConflictCheckContext = {
   projectPath: string;
+  /** Direct package ids per target framework (lower-cased). */
+  directPackages: Map<string, Set<string>>;
+  /** Central `PackageVersion` ids (lower-cased). */
+  centralIds: Set<string>;
+  /** `CentralPackageTransitivePinningEnabled` in Directory.Packages.props. */
+  centralTransitivePinning: boolean;
+  /**
+   * False when the assets file carries no direct-dependency section, so the
+   * direct/transitive split is unknown and every requirement must be reported.
+   */
+  directKnown: boolean;
   selected: Map<string, { id: string; version: string }>;
   effective: Map<string, string>;
   sources: Array<{ Url: string }>;
@@ -1213,50 +1303,51 @@ type ConflictCheckContext = {
 async function checkSelectedPackageRangesAsync(
   context: ConflictCheckContext & { tfms: string[] }
 ): Promise<void> {
-  // (1) Ranges declared by the target version of each selected package.
-  for (const entry of context.selected.values()) {
-    if (context.signal?.aborted) break;
-    const frameworks = await fetchDependencyFrameworksAsync(
-      entry.id,
-      entry.version,
-      context.sources,
-      context.detailsCache,
-      context.signal
-    );
-    if (!frameworks) continue;
-
-    const dependencies = selectDependencyGroup(frameworks, context.tfms);
-    if (!dependencies) continue;
-
-    for (const dependency of dependencies) {
-      addSelectedRangeConflict(context, entry, dependency);
-    }
-  }
-}
-
-function addSelectedRangeConflict(
-  context: ConflictCheckContext,
-  entry: { id: string; version: string },
-  dependency: PackageDependency
-): void {
-  const dependencyId = dependency.package.toLowerCase();
-  const resolved = context.effective.get(dependencyId);
-  if (!resolved) return;
-  if (satisfiesVersionRange(resolved, dependency.versionRange)) return;
-
-  const alsoSelected = context.selected.get(dependencyId);
-  context.addConflict({
-    PackageId: entry.id,
-    RequestedVersion: entry.version,
-    BlockedByPackageId: dependency.package,
-    BlockedByVersion: resolved,
-    RequiredRange: dependency.versionRange,
-    EffectiveVersion: resolved,
-    ProjectPath: context.projectPath,
-    Reason: alsoSelected
-      ? `${entry.id} ${entry.version} requires ${dependency.package} ${dependency.versionRange}, but the batch selects ${alsoSelected.version}`
-      : `${entry.id} ${entry.version} requires ${dependency.package} ${dependency.versionRange}, but the graph resolves ${resolved}`,
+  // (1) Ranges declared by the selected versions *and* by everything those
+  // requirements pull in — a one-level check reports an incomplete plan.
+  const closure = await ComputeRequirementClosureAsync({
+    Selected: [...context.selected.values()].map((entry) => ({ Id: entry.id, Version: entry.version })),
+    Tfms: context.tfms,
+    Effective: context.effective,
+    MaxInspected: 250,
+    // Only a direct reference or a transitive pin can hold a package back; a
+    // purely transitive package is resolved upward by NuGet.
+    IsConstrained: (id, tfm) => {
+      const key = id.toLowerCase();
+      if (context.selected.has(key)) return true;
+      if (!context.directKnown) return true;
+      if (context.directPackages.get(tfm)?.has(key)) return true;
+      return context.centralTransitivePinning && context.centralIds.has(key);
+    },
+    GetDependencies: async (id, version, tfm) => {
+      const frameworks = await fetchDependencyFrameworksAsync(
+        id,
+        version,
+        context.sources,
+        context.detailsCache,
+        context.signal
+      );
+      if (!frameworks) return null;
+      const dependencies = selectDependencyGroup(frameworks, [tfm]);
+      return dependencies?.map((dependency) => ({ Id: dependency.package, Range: dependency.versionRange })) ?? null;
+    },
   });
+
+  for (const conflict of closure.Conflicts) {
+    const resolved = context.effective.get(conflict.PackageId.toLowerCase()) ?? conflict.RequiredVersion;
+    context.addConflict({
+      PackageId: conflict.RequiredBy,
+      RequestedVersion: conflict.RequiredByVersion,
+      BlockedByPackageId: conflict.PackageId,
+      BlockedByVersion: resolved,
+      RequiredRange: conflict.Range,
+      RequiredVersion: conflict.RequiredVersion,
+      Tfm: conflict.Tfm,
+      EffectiveVersion: resolved,
+      ProjectPath: context.projectPath,
+      Reason: `${conflict.RequiredBy} ${conflict.RequiredByVersion} requires ${conflict.PackageId} ${conflict.Range}, but the graph resolves ${resolved}`,
+    });
+  }
 }
 
 async function checkInstalledPackageRangesAsync(
@@ -2753,7 +2844,449 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
     async consolidatePackagesAsync(request: ConsolidateRequest, signal?: AbortSignal): Promise<Result<void>> {
       return runConsolidateAsync(request, signal);
     },
+
+    async getDependencyIssuesAsync(
+      request: GetDependencyIssuesRequest,
+      _signal?: AbortSignal
+    ): Promise<Result<GetDependencyIssuesResponse>> {
+      try {
+        const projectPaths = request.ProjectPaths?.length
+          ? request.ProjectPaths
+          : await findProjectFilesForDiagnosticsAsync();
+
+        const issues: DependencyIssue[] = [];
+        const skippedPaths: string[] = [];
+        let projectsScanned = 0;
+        for (const projectPath of projectPaths) {
+          const analysis = await AnalyzeProjectAsync(projectPath);
+          if (analysis.Skipped) {
+            skippedPaths.push(projectPath);
+            Logger.debug(`getDependencyIssues: skipped ${projectPath} (${analysis.Reason ?? "unknown"})`);
+            continue;
+          }
+          projectsScanned++;
+          issues.push(...analysis.Issues);
+        }
+
+        Logger.info(
+          `getDependencyIssues: ${issues.length} issue(s) across ${projectsScanned} restored project(s), ${skippedPaths.length} skipped`
+        );
+        return ok({
+          Issues: issues,
+          ProjectsScanned: projectsScanned,
+          ProjectsSkipped: skippedPaths.length,
+          SkippedProjectPaths: skippedPaths,
+        });
+      } catch (err) {
+        Logger.error("getDependencyIssues: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async fixRestoreConflictAsync(
+      request: FixRestoreConflictRequest
+    ): Promise<Result<FixRestoreConflictResponse>> {
+      if (!isValidPackageId(request.PackageId)) {
+        return fail(`"${request.PackageId}" is not a valid package id.`);
+      }
+      if (!isValidNuGetVersion(request.Version)) {
+        return fail(`"${request.Version}" is not a valid version.`);
+      }
+
+      try {
+        let target = request.Target;
+        if (!target) {
+          const cpmVersions = await CpmResolver.GetPackageVersionsAsync(request.ProjectPath);
+          target = cpmVersions?.has(request.PackageId) ? "cpm" : "project";
+        }
+
+        if (target === "cpm") {
+          await CpmResolver.UpdatePackageVersionAsync(
+            request.ProjectPath,
+            request.PackageId,
+            request.Version
+          );
+        } else {
+          await TaskExecutor.ExecuteCommandAsync(
+            "dotnet",
+            [
+              "add",
+              request.ProjectPath.replace(/\\/g, "/"),
+              "package",
+              request.PackageId,
+              "--version",
+              request.Version,
+              "--no-restore",
+            ],
+            `fix-conflict-${request.PackageId}`,
+            undefined,
+            undefined,
+            undefined,
+            CreateDotnetOptions(request.ProjectPath)
+          );
+        }
+
+        // The fix is only useful if the graph restores; keep the restore
+        // authoritative and report its failure instead of claiming success.
+        const failure = await restoreProjectsInternalAsync([request.ProjectPath], undefined, false);
+        toolchainHealthCache = null;
+        Logger.info(
+          `fixRestoreConflict: ${request.PackageId} -> ${request.Version} (${target}) restored=${!failure}`
+        );
+        return ok({
+          Applied: true,
+          ...(failure ? { RestoreError: failure.message } : {}),
+        });
+      } catch (err) {
+        Logger.error("fixRestoreConflict: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async updateCentralVersionsAsync(
+      request: UpdateCentralVersionsRequest
+    ): Promise<Result<UpdateCentralVersionsResponse>> {
+      try {
+        const projectPaths = request.ProjectPaths?.length
+          ? request.ProjectPaths
+          : await findProjectFilesForDiagnosticsAsync();
+        const projectPath = projectPaths.find((candidate) => existsSync(candidate));
+        if (!projectPath) {
+          return fail("No project found to locate Directory.Packages.props.");
+        }
+
+        const propsFile = findDirectoryPackagesPropsPath(projectPath);
+        if (!propsFile) {
+          return fail("Central Package Management is not enabled in this workspace.");
+        }
+
+        const defined = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
+        const applied: string[] = [];
+        const skipped: string[] = [];
+        const changes: CpmVersionChange[] = [];
+        const conditional: Array<{ PackageId: string; Version: string; Condition: string }> = [];
+
+        for (const update of request.Updates) {
+          if (!isValidPackageId(update.PackageId) || !isValidNuGetVersion(update.Version)) {
+            skipped.push(update.PackageId);
+            continue;
+          }
+          const definedId = [...defined.keys()].find(
+            (id) => id.toLowerCase() === update.PackageId.toLowerCase()
+          );
+          if (update.Condition) {
+            // Per-TFM requirement: written into its own conditional group, even
+            // when no unconditional entry exists.
+            conditional.push({ PackageId: update.PackageId, Version: update.Version, Condition: update.Condition });
+            applied.push(update.PackageId);
+            continue;
+          }
+          if (!definedId) {
+            // Transitive requirement without a PackageVersion entry: NuGet
+            // resolves it on its own, nothing to raise.
+            skipped.push(update.PackageId);
+            continue;
+          }
+          changes.push({ packageId: definedId, version: update.Version, scope: "all" });
+          applied.push(update.PackageId);
+        }
+
+        if (changes.length === 0 && conditional.length === 0) {
+          return ok({ Applied: [], Skipped: skipped, PropsFile: propsFile });
+        }
+
+        // Snapshot before writing: the batch rolls back project files, but this
+        // props write is outside that snapshot, so a failed restore must undo it.
+        const originalContent = await fs.readFile(propsFile, "utf8");
+
+        if (changes.length > 0) {
+          await CpmResolver.UpdateCpmVersionsAsync(propsFile, changes);
+        }
+        if (conditional.length > 0) {
+          const before = await fs.readFile(propsFile, "utf8");
+          const written = ApplyConditionalPackageVersions(before, conditional, {
+            // Two PackageVersion items for one package (unconditional + conditional)
+            // make NuGet use the unconditional one, so it has to be replaced.
+            ReplaceUnconditional: [...new Set(conditional.map((entry) => entry.PackageId))],
+          });
+          if (written.Changed) {
+            await fs.writeFile(propsFile, written.Content, "utf8");
+          }
+          if (written.CreatedGroups.length > 0) {
+            Logger.info(
+              `updateCentralVersions: created conditional group(s) ${written.CreatedGroups.join(", ")}`
+            );
+          }
+        }
+        const failure = await restoreProjectsInternalAsync([projectPath], undefined, false);
+        if (failure) {
+          // Undo the central write so a failed restore cannot leave the props
+          // file in a half-applied state (the batch snapshot does not cover it).
+          await fs.writeFile(propsFile, originalContent, "utf8");
+          Logger.warn(`updateCentralVersions: restore failed, reverted ${propsFile}`);
+        }
+        toolchainHealthCache = null;
+        Logger.info(
+          `updateCentralVersions: raised ${applied.length} version(s) in ${propsFile}, restored=${!failure}`
+        );
+        return ok({
+          Applied: applied,
+          Skipped: skipped,
+          PropsFile: propsFile,
+          ...(failure ? { RestoreError: failure.message } : {}),
+        });
+      } catch (err) {
+        Logger.error("updateCentralVersions: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async getToolchainHealthAsync(
+      request: GetToolchainHealthRequest,
+      _signal?: AbortSignal
+    ): Promise<Result<GetToolchainHealthResponse>> {
+      try {
+        const health = await readToolchainHealthAsync(request.ProjectPaths ?? [], request.ForceRefresh === true);
+        return ok({ Health: health });
+      } catch (err) {
+        Logger.error("getToolchainHealth: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async setWorkspaceSdkAsync(
+      request: SetWorkspaceSdkRequest
+    ): Promise<Result<SetWorkspaceSdkResponse>> {
+      const version = request.Version?.trim() ?? "";
+      if (!IsValidGlobalJsonSdkVersion(version)) {
+        return fail(`"${version}" is not a valid .NET SDK version.`);
+      }
+
+      try {
+        const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
+        const projectPaths = request.ProjectPaths?.length
+          ? request.ProjectPaths
+          : await findProjectFilesForDiagnosticsAsync();
+        const projectPath = projectPaths.find((candidate) => existsSync(candidate));
+        const startDirectory = projectPath ? path.dirname(projectPath) : workspaceRoot;
+
+        const health = await readToolchainHealthAsync([], false);
+        if (!health.InstalledSdks.some((sdk) => sdk.Version === version)) {
+          return fail(`.NET SDK ${version} is not installed. Use "Install SDK" first.`);
+        }
+
+        const dotnetCommand = projectPath
+          ? ResolveDotnetContext(projectPath).Command
+          : ResolveDotnetCommand(workspaceRoot);
+        const result = await UpdateGlobalJsonSdkVersionAsync({
+          StartDirectory: startDirectory,
+          Version: version,
+          Command: dotnetCommand,
+        });
+        toolchainHealthCache = null;
+        Logger.info(
+          `setWorkspaceSdk: ${version} -> ${result.GlobalJsonPath} (created=${result.Created}, source=${result.Source})`
+        );
+        return ok({ GlobalJsonPath: result.GlobalJsonPath, Version: version, Notes: result.Notes });
+      } catch (err) {
+        Logger.error("setWorkspaceSdk: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async installSdkAsync(request: InstallSdkRequest): Promise<Result<InstallSdkResponse>> {
+      const version = request.Version?.trim() ?? "";
+      if (!IsValidSdkVersion(version)) {
+        return fail(`"${version}" is not a valid .NET SDK version.`);
+      }
+      if (!vscode.workspace.isTrusted) {
+        return fail("Installing a .NET SDK requires a trusted workspace.");
+      }
+      const storage = context?.globalStorageUri?.fsPath;
+      if (!storage) {
+        return fail("Extension storage is unavailable, so the SDK cannot be installed.");
+      }
+
+      StatusBarUtils.ShowText(`Installing .NET SDK ${version}...`);
+      try {
+        const result = await InstallSdkAsync({
+          Version: version,
+          InstallRoot: GetSdkInstallRoot(),
+          StagingDirectory: path.join(storage, "dotnet-install"),
+        });
+
+        // Pinning happens in global.json, the file dotnet itself reads.
+        const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
+        const projectPaths = await findProjectFilesForDiagnosticsAsync();
+        const projectPath = projectPaths.find((candidate) => existsSync(candidate));
+        UpdateGlobalJsonSdkVersion({
+          StartDirectory: projectPath ? path.dirname(projectPath) : workspaceRoot,
+          Version: version,
+        });
+        toolchainHealthCache = null;
+        Logger.info(`installSdk: ${version} -> ${result.InstallRoot}`);
+        return ok(result);
+      } catch (err) {
+        Logger.error("installSdk: failed", err);
+        const message = err instanceof SdkInstallError
+          ? [err.message, err.output].filter(Boolean).join(" ")
+          : err instanceof Error ? err.message : String(err);
+        return fail(message);
+      } finally {
+        StatusBarUtils.hide();
+      }
+    },
+
+    async runWorkloadCommandAsync(
+      request: RunWorkloadCommandRequest
+    ): Promise<Result<RunWorkloadCommandResponse>> {
+      if (!vscode.workspace.isTrusted) {
+        return fail("Running .NET workload commands requires a trusted workspace.");
+      }
+
+      try {
+        const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
+        const projectPaths = request.ProjectPaths?.length
+          ? request.ProjectPaths
+          : await findProjectFilesForDiagnosticsAsync();
+        const context = projectPaths[0]
+          ? ResolveDotnetContext(projectPaths[0])
+          : {
+            WorkingDirectory: ResolveWorkingDirectory(workspaceRoot),
+            Command: ResolveDotnetCommand(workspaceRoot),
+          };
+
+        StatusBarUtils.ShowText(`Running dotnet workload ${request.Action}...`);
+        const result = await RunWorkloadCommandAsync(request.Action, {
+          Command: context.Command,
+          WorkingDirectory: context.WorkingDirectory,
+        });
+        // The manifests (or the SDK selection) may have changed.
+        toolchainHealthCache = null;
+        Logger.info(
+          `runWorkloadCommand: ${request.Action} exit=${result.ExitCode} elevation=${result.NeedsElevation}`
+        );
+        return ok(result);
+      } catch (err) {
+        Logger.error("runWorkloadCommand: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      } finally {
+        StatusBarUtils.hide();
+      }
+    },
+
+    async runToolchainDiagnosticsAsync(
+      request: RunToolchainDiagnosticsRequest
+    ): Promise<Result<RunToolchainDiagnosticsResponse>> {
+      try {
+        const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
+        const projectPaths = request.ProjectPaths?.length
+          ? request.ProjectPaths
+          : await findProjectFilesForDiagnosticsAsync();
+        const extensionVersion: string | undefined = vscode.extensions
+          .getExtension("i-synergy.nugetpackagemanager")?.packageJSON?.version;
+        const report = await BuildToolchainDiagnosticsAsync({
+          WorkspaceRoot: workspaceRoot,
+          ProjectPaths: projectPaths,
+          ...(extensionVersion ? { ExtensionVersion: extensionVersion } : {}),
+        });
+        Logger.info(`Toolchain diagnostics requested\n${report}`);
+        return ok({ Report: report });
+      } catch (err) {
+        Logger.error("runToolchainDiagnostics: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
   };
+}
+
+// ============================================================
+// Toolchain health cache
+// ============================================================
+
+let toolchainHealthCache: { Key: string; Health: ToolchainHealth } | null = null;
+
+async function readToolchainHealthAsync(
+  requestedProjects: string[],
+  forceRefresh: boolean
+): Promise<ToolchainHealth> {
+  const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
+  const projectPaths = requestedProjects.length > 0
+    ? requestedProjects
+    : await findProjectFilesForDiagnosticsAsync();
+  const key = [workspaceRoot, projectPaths[0] ?? ""].join("\0");
+
+  if (!forceRefresh && toolchainHealthCache?.Key === key) {
+    return toolchainHealthCache.Health;
+  }
+
+  const health = await ProbeToolchainAsync({
+    WorkspaceRoot: workspaceRoot,
+    ProjectPaths: projectPaths,
+    ForceRefresh: forceRefresh,
+  });
+  toolchainHealthCache = { Key: key, Health: health };
+  if (health.Issues.length > 0) {
+    Logger.warn(`Toolchain health: ${health.Issues.map((issue) => issue.Summary).join(" | ")}`);
+  }
+  return health;
+}
+
+/** `CentralPackageTransitivePinningEnabled` from the project's CPM props file. */
+function isCentralTransitivePinningEnabled(projectPath: string): boolean {
+  const propsFile = findDirectoryPackagesPropsPath(projectPath);
+  if (!propsFile) return false;
+  try {
+    return /<CentralPackageTransitivePinningEnabled>\s*true\s*</i.test(
+      readFileSync(propsFile, "utf8")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Nearest `Directory.Packages.props` for a project. */
+function findDirectoryPackagesPropsPath(projectPath: string): string | null {
+  let directory = path.dirname(projectPath);
+  for (let depth = 0; depth < 32; depth++) {
+    const candidate = path.join(directory, "Directory.Packages.props");
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(directory);
+    if (parent === directory) return null;
+    directory = parent;
+  }
+  return null;
+}
+
+/**
+ * Project discovery for tooling that runs without a selection.
+ *
+ * Mirrors `getProjectsAsync`: when a solution exists only its projects are
+ * managed, and the configured exclude globs (which also drop hidden folders such
+ * as `.ai/tmp`) always apply. Without this, a vendored or cached project tree in
+ * the workspace would be analysed — and restored — by mistake.
+ */
+async function findProjectFilesForDiagnosticsAsync(): Promise<string[]> {
+  const settings = getCpmSettings();
+  const slnFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
+
+  let solutionProjectPaths: Set<string> | null = null;
+  if (slnFiles.length > 0) {
+    const allPaths = (
+      await Promise.all(slnFiles.map((file) => parseSolutionProjectPathsAsync(file.fsPath)))
+    ).flat().filter((candidate): candidate is string => candidate !== null);
+    if (allPaths.length > 0) {
+      solutionProjectPaths = new Set(allPaths.map((candidate) => path.normalize(candidate)));
+    }
+  }
+
+  let files = await vscode.workspace.findFiles(
+    "**/*.{csproj,fsproj,vbproj}",
+    "**/node_modules/**"
+  );
+  files = applyExcludeGlobs(files, settings.excludeGlobs);
+  files = ScopeProjectFiles(files, solutionProjectPaths);
+  return files.map((file) => file.fsPath);
 }
 
 // ============================================================
@@ -2764,6 +3297,8 @@ type RestoreFailure = {
   projectPaths: string[];
   conflicts: RestoreConflict[];
   message: string;
+  /** First classified cause, so the UI can explain the failure. */
+  failure?: DotnetFailure;
 };
 
 type RestoreProgress = {
@@ -2821,6 +3356,7 @@ async function restoreProjectsInternalAsync(
   const failedPaths: string[] = [];
   const conflicts: RestoreConflict[] = [];
   const summaries: string[] = [];
+  const failures: DotnetFailure[] = [];
   const uniquePaths = [...new Set(projectPaths)];
 
   for (const [index, projectPath] of uniquePaths.entries()) {
@@ -2837,7 +3373,7 @@ async function restoreProjectsInternalAsync(
     try {
       await restoreOneProjectAsync(projectPath, signal, allowConflictResolution, reportProgress);
     } catch (err) {
-      recordRestoreFailure(err, projectPath, failedPaths, conflicts, summaries);
+      recordRestoreFailure(err, projectPath, failedPaths, conflicts, summaries, failures);
     }
   }
 
@@ -2847,10 +3383,12 @@ async function restoreProjectsInternalAsync(
     ? FormatRestoreConflicts(conflicts)
     : [...new Set(summaries)].slice(0, 3).join(" | ");
   const detailsSuffix = details ? `: ${details}` : ".";
+  const firstFailure = failures[0];
   return {
     projectPaths: failedPaths,
     conflicts,
     message: `Restore failed for ${failedPaths.length} project(s)${detailsSuffix}`,
+    ...(firstFailure ? { failure: firstFailure } : {}),
   };
 }
 
@@ -2870,7 +3408,8 @@ async function restoreOneProjectAsync(
     `rollback-restore-${projectPath}`,
     signal,
     undefined,
-    reportProgress
+    reportProgress,
+    CreateDotnetOptions(projectPath)
   );
 }
 
@@ -2879,12 +3418,20 @@ function recordRestoreFailure(
   projectPath: string,
   failedPaths: string[],
   conflicts: RestoreConflict[],
-  summaries: string[]
+  summaries: string[],
+  failures: DotnetFailure[]
 ): void {
   Logger.error(`restoreProjectsInternal: Failed to restore ${projectPath}`, err);
   failedPaths.push(projectPath);
   if (err instanceof DotnetError) {
     conflicts.push(...ParseRestoreConflicts(err.output));
+    if (err.failure) {
+      failures.push(err.failure);
+      // A classified cause is more useful than the raw error block; the detail
+      // stays available through the diagnostics panel.
+      summaries.push(err.failure.Summary);
+      return;
+    }
     const summary = SummarizeRestoreFailure(err.output);
     if (summary) summaries.push(summary);
     return;
@@ -3045,7 +3592,8 @@ async function restoreWithConflictResolutionAsync(
       `restore-${projectPath}`,
       signal,
       undefined,
-      onProgress
+      onProgress,
+      CreateDotnetOptions(projectPath)
     );
   } catch (err) {
     await resolveRestoreConflictAsync(err, projectPath, attempt, signal);
@@ -3099,7 +3647,11 @@ async function applyConflictFixesAsync(
     await TaskExecutor.ExecuteCommandAsync(
       "dotnet",
       ["add", projectPath.replace(/\\/g, "/"), "package", packageId, "--version", requiredVersion, "--no-restore"],
-      `fix-conflict-${packageId}`
+      `fix-conflict-${packageId}`,
+      undefined,
+      undefined,
+      undefined,
+      CreateDotnetOptions(projectPath)
     );
     fixedAny = true;
   }
@@ -3110,7 +3662,15 @@ async function applyConflictFixesAsync(
 async function executeRemovePackage(packageId: string, projectPath: string, operationId?: string, signal?: AbortSignal): Promise<void> {
   StatusBarUtils.ShowText(`Removing package ${packageId}...`);
   const args = ["remove", projectPath.replace(/\\/g, "/"), "package", packageId];
-  await TaskExecutor.ExecuteCommandAsync("dotnet", args, operationId ?? `remove-${packageId}`, signal);
+  await TaskExecutor.ExecuteCommandAsync(
+    "dotnet",
+    args,
+    operationId ?? `remove-${packageId}`,
+    signal,
+    undefined,
+    undefined,
+    CreateDotnetOptions(projectPath)
+  );
 }
 
 async function executeAddPackage(
@@ -3135,7 +3695,15 @@ async function executeAddPackage(
     args.push("-s", sourceUrl);
   }
 
-  await TaskExecutor.ExecuteCommandAsync("dotnet", args, operationId ?? `add-${packageId}`, signal);
+  await TaskExecutor.ExecuteCommandAsync(
+    "dotnet",
+    args,
+    operationId ?? `add-${packageId}`,
+    signal,
+    undefined,
+    undefined,
+    CreateDotnetOptions(projectPath)
+  );
 }
 
 async function getLatestVersion(

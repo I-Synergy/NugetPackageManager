@@ -74,6 +74,11 @@
         "command": "nugetpackagemanager.reportProblem",
         "title": "Report Problem",
         "icon": "$(report)"
+      },
+      {
+        "command": "nugetpackagemanager.copyToolchainDiagnostics",
+        "title": "Copy dotnet Toolchain Diagnostics",
+        "icon": "$(copy)"
       }
     ],
     "menus": {

@@ -5,7 +5,7 @@ import { UpdatesView } from '@/web/components/updates-view';
 import { OutdatedPackageViewModel } from '@/web/types';
 import { ok } from '@/common/rpc/result';
 import * as registrations from '@/web/registrations';
-import type { BatchUpdateRequest, GetOutdatedPackagesRequest, HostAPI } from '@/common/rpc/types';
+import type { BatchUpdateRequest, GetOutdatedPackagesRequest, HostAPI, UpdateCentralVersionsRequest } from '@/common/rpc/types';
 
 /** Waits for an async UI effect instead of assuming a fixed delay. */
 async function waitForAsync(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -164,6 +164,218 @@ suite('UpdatesView', () => {
         assert.strictEqual(started, 0, 'a declined preflight must not write anything');
         assert.match(view.statusText, /cancelled before writing/);
         assert.strictEqual(view.packages.length, 1);
+    });
+
+    test('offers to include the sibling packages a preview set requires', async () => {
+        const requests: BatchUpdateRequest[] = [];
+        let checks = 0;
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                checkBatchUpdateAsync: async (request: BatchUpdateRequest) => {
+                    checks += 1;
+                    const ids = request.Updates.map((update) => update.PackageId);
+                    // First pass: the sibling is missing. Second pass: it is included.
+                    return ok(ids.includes('Pkg.Required')
+                        ? { Conflicts: [] }
+                        : {
+                            Conflicts: [{
+                                PackageId: 'Pkg.Main',
+                                RequestedVersion: '2.0.0-preview',
+                                BlockedByPackageId: 'Pkg.Required',
+                                BlockedByVersion: '1.0.0',
+                                RequiredRange: '[2.0.0-preview, )',
+                                EffectiveVersion: '1.0.0',
+                                ProjectPath: '/ws/A.csproj',
+                                Reason: 'Pkg.Main 2.0.0-preview requires Pkg.Required [2.0.0-preview, )',
+                            }],
+                        });
+                },
+                showConfirmationAsync: async () => ok({ Confirmed: true }),
+                startBatchUpdateAsync: async (request: BatchUpdateRequest) => {
+                    requests.push(request);
+                    return ok({ JobId: 'job-expanded' });
+                },
+                getJobAsync: async () => ok({
+                    Kind: 'batchUpdate',
+                    State: 'completed',
+                    Stage: 'Completed',
+                    Percent: 100,
+                    Response: { Results: [{ PackageId: 'Pkg.Main', Success: true }] },
+                }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        const main = makePackage('', '');
+        main.Id = 'Pkg.Main';
+        main.LatestVersion = '2.0.0-preview';
+        const required = makePackage('', '');
+        required.Id = 'Pkg.Required';
+        required.LatestVersion = '2.0.0-preview';
+        view.packages = [main, required];
+
+        await (view as unknown as {
+            updatePackagesSequentiallyAsync(packages: OutdatedPackageViewModel[]): Promise<void>;
+        }).updatePackagesSequentiallyAsync([main]);
+
+        assert.strictEqual(checks, 2, 'the preflight runs again with the included package');
+        assert.strictEqual(requests.length, 1);
+        assert.deepStrictEqual(
+            requests[0]!.Updates.map((update) => update.PackageId).sort(),
+            ['Pkg.Main', 'Pkg.Required']
+        );
+        assert.strictEqual(
+            requests[0]!.Updates.find((update) => update.PackageId === 'Pkg.Required')?.Version,
+            '2.0.0-preview'
+        );
+    });
+
+    test('raises central versions required by a preview set', async () => {
+        const centralRequests: Array<{ ProjectPaths?: string[]; Updates: Array<{ PackageId: string; Version: string }> }> = [];
+        let checks = 0;
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                checkBatchUpdateAsync: async () => {
+                    checks += 1;
+                    return ok(checks === 1
+                        ? {
+                            Conflicts: [{
+                                PackageId: 'Pkg.Main',
+                                RequestedVersion: '2.0.0-preview',
+                                BlockedByPackageId: 'Pkg.Central',
+                                BlockedByVersion: '1.0.0',
+                                RequiredRange: '[2.0.0-preview, )',
+                                EffectiveVersion: '1.0.0',
+                                ProjectPath: '/ws/A.csproj',
+                                Reason: 'Pkg.Main 2.0.0-preview requires Pkg.Central [2.0.0-preview, )',
+                            }],
+                        }
+                        : { Conflicts: [] });
+                },
+                updateCentralVersionsAsync: async (request: UpdateCentralVersionsRequest) => {
+                    centralRequests.push({
+                        ...(request.ProjectPaths ? { ProjectPaths: request.ProjectPaths } : {}),
+                        Updates: request.Updates,
+                    });
+                    return ok({ Applied: ['Pkg.Central'], Skipped: [], PropsFile: '/ws/Directory.Packages.props' });
+                },
+                showConfirmationAsync: async () => ok({ Confirmed: true }),
+                startBatchUpdateAsync: async () => ok({ JobId: 'job-central' }),
+                getJobAsync: async () => ok({
+                    Kind: 'batchUpdate',
+                    State: 'completed',
+                    Stage: 'Completed',
+                    Percent: 100,
+                    Response: { Results: [{ PackageId: 'Pkg.Main', Success: true }] },
+                }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        const main = makePackage('', '');
+        main.Id = 'Pkg.Main';
+        main.LatestVersion = '2.0.0-preview';
+        view.packages = [main];
+        view.projectPaths = ['/ws/A.csproj'];
+
+        await (view as unknown as {
+            updatePackagesSequentiallyAsync(packages: OutdatedPackageViewModel[]): Promise<void>;
+        }).updatePackagesSequentiallyAsync([main]);
+
+        assert.deepStrictEqual(centralRequests, [{
+            ProjectPaths: ['/ws/A.csproj'],
+            Updates: [{ PackageId: 'Pkg.Central', Version: '2.0.0-preview' }],
+        }]);
+        assert.strictEqual(checks, 2, 'the preflight is retried after raising the central version');
+    });
+
+    test('writes conditional groups when target frameworks disagree', async () => {
+        const centralRequests: Array<{
+            Updates: Array<{ PackageId: string; Version: string; Condition?: string }>;
+        }> = [];
+        let checks = 0;
+
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                checkBatchUpdateAsync: async () => {
+                    checks += 1;
+                    if (checks > 1) return ok({ Conflicts: [] });
+                    return ok({
+                        Conflicts: [
+                            {
+                                PackageId: 'Pkg.Main',
+                                RequestedVersion: '2.0.0-preview',
+                                BlockedByPackageId: 'Pkg.Central',
+                                BlockedByVersion: '1.0.0',
+                                RequiredRange: '[2.0.0-preview, )',
+                                RequiredVersion: '2.0.0-preview',
+                                Tfm: 'net10.0',
+                                EffectiveVersion: '1.0.0',
+                                ProjectPath: '/ws/Net10.csproj',
+                                Reason: 'net10 needs 2.0.0-preview',
+                            },
+                            {
+                                PackageId: 'Pkg.Main',
+                                RequestedVersion: '2.0.0-preview',
+                                BlockedByPackageId: 'Pkg.Central',
+                                BlockedByVersion: '1.0.0',
+                                RequiredRange: '[3.0.0-preview, )',
+                                RequiredVersion: '3.0.0-preview',
+                                Tfm: 'net11.0',
+                                EffectiveVersion: '1.0.0',
+                                ProjectPath: '/ws/Net11.csproj',
+                                Reason: 'net11 needs 3.0.0-preview',
+                            },
+                        ],
+                    });
+                },
+                updateCentralVersionsAsync: async (request: {
+                    Updates: Array<{ PackageId: string; Version: string; Condition?: string }>;
+                }) => {
+                    centralRequests.push({ Updates: request.Updates });
+                    return ok({
+                        Applied: request.Updates.map((update) => update.PackageId),
+                        Skipped: [],
+                        PropsFile: '/ws/Directory.Packages.props',
+                    });
+                },
+                showConfirmationAsync: async () => ok({ Confirmed: true }),
+                startBatchUpdateAsync: async () => ok({ JobId: 'job-conditional' }),
+                getJobAsync: async () => ok({
+                    Kind: 'batchUpdate',
+                    State: 'completed',
+                    Stage: 'Completed',
+                    Percent: 100,
+                    Response: { Results: [{ PackageId: 'Pkg.Main', Success: true }] },
+                }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        const main = makePackage('', '');
+        main.Id = 'Pkg.Main';
+        main.LatestVersion = '2.0.0-preview';
+        view.packages = [main];
+        view.projectPaths = ['/ws/A.csproj'];
+
+        await (view as unknown as {
+            updatePackagesSequentiallyAsync(packages: OutdatedPackageViewModel[]): Promise<void>;
+        }).updatePackagesSequentiallyAsync([main]);
+
+        assert.deepStrictEqual(centralRequests[0]!.Updates, [
+            { PackageId: 'Pkg.Central', Version: '2.0.0-preview', Condition: "'$(TargetFramework)' == 'net10.0'" },
+            { PackageId: 'Pkg.Central', Version: '3.0.0-preview', Condition: "'$(TargetFramework)' == 'net11.0'" },
+        ]);
+        assert.strictEqual(checks, 2, 'the preflight is retried after writing the groups');
     });
 
     test('cancels the running job from the progress banner', async () => {

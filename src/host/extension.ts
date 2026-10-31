@@ -20,11 +20,13 @@ const COMMAND_IDS = {
   remove: "nugetpackagemanager.remove",
   reportProblem: "nugetpackagemanager.reportProblem",
   openSettings: "nugetpackagemanager.openSettings",
+  copyToolchainDiagnostics: "nugetpackagemanager.copyToolchainDiagnostics",
 } as const;
 
 export function activate(context: vscode.ExtensionContext) {
   Logger.configure(context);
   Logger.info("Extension.activate: Extension activated");
+
 
   nugetApiFactory.SetHttpCacheDirectory(path.join(context.globalStorageUri.fsPath, "nuget-http"));
 
@@ -156,6 +158,17 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand(COMMAND_IDS.openSettings, () => {
       webviews.openPanel();
       webviews.sendNavigateToRoute("SETTINGS");
+    }),
+    vscode.commands.registerCommand(COMMAND_IDS.copyToolchainDiagnostics, async () => {
+      const result = await createHostAPI(context).runToolchainDiagnosticsAsync({});
+      if (!result.ok) {
+        void vscode.window.showErrorMessage(`Could not collect toolchain diagnostics: ${result.error}`);
+        return;
+      }
+      await vscode.env.clipboard.writeText(result.value.Report);
+      void vscode.window.showInformationMessage(
+        "dotnet toolchain diagnostics copied to the clipboard (credentials redacted)."
+      );
     })
   );
 

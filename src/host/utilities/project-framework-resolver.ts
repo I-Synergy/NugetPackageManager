@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { DOMParser } from "@xmldom/xmldom";
 import xpath from "xpath";
 import { Logger } from "../../common/logger";
+import { ResolveDotnetContext } from "./dotnet-context";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,12 @@ export type TargetFrameworkSource = "msbuild" | "xml" | "assets" | "override";
 export type TargetFrameworkInfo = {
   Frameworks: string[];
   Source: TargetFrameworkSource;
+  /**
+   * Set when `dotnet msbuild` could not evaluate the project (broken SDK,
+   * missing workload, timeout). `Source: "xml"` then means "fallback", not
+   * "the project declares its frameworks literally".
+   */
+  EvaluationFailed?: boolean;
 };
 
 type CacheEntry = {
@@ -101,10 +108,10 @@ export default class ProjectFrameworkResolver {
           info = await this.ParseProjectFileAsync(projectPath);
         }
       } catch (error) {
-        Logger.debug(
+        Logger.warn(
           `ProjectFrameworkResolver: MSBuild evaluation failed for ${projectPath}; falling back to XML (${String(error)})`
         );
-        info = await this.ParseProjectFileAsync(projectPath);
+        info = { ...(await this.ParseProjectFileAsync(projectPath)), EvaluationFailed: true };
       }
     }
 
@@ -242,6 +249,8 @@ export default class ProjectFrameworkResolver {
         timeout: 60_000,
         maxBuffer: 1024 * 1024,
         windowsHide: true,
+        // SDK selection reads global.json from the working directory.
+        cwd: ResolveDotnetContext(projectPath).WorkingDirectory,
       }
     );
 

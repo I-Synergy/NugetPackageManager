@@ -1,11 +1,12 @@
 import { LitElement, css, html, nothing } from "lit";
-import { customElement, state } from "lit/decorators.js";
+import { customElement, property, state } from "lit/decorators.js";
 import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
 import { runCleanupJobAsync } from "@/web/jobs";
 import type { CleanupReport } from "@/common/rpc/types";
+import "./dependency-issues";
 
 @customElement("cleanup-view")
 export class CleanupView extends LitElement {
@@ -97,11 +98,15 @@ export class CleanupView extends LitElement {
     `,
   ];
 
+  /** Projects to analyse for transitive duplicates; empty = discover them. */
+  @property({ attribute: false }) projectPaths: string[] = [];
+
   @state() private report: CleanupReport | null = null;
   @state() private isLoading = false;
   @state() private isRemoving = false;
   @state() private statusText = "";
   @state() private errorMessage = "";
+  @state() private dependencyCount = 0;
   private _jobId = "";
 
   async LoadCleanupReportAsync(): Promise<void> {
@@ -115,15 +120,26 @@ export class CleanupView extends LitElement {
         return;
       }
       this.report = result.value;
-      this.dispatchEvent(new CustomEvent<number>("count-changed", {
-        detail: result.value.Unused.length,
-        bubbles: true,
-        composed: true,
-      }));
+      this.reportCount();
     } finally {
       this.isLoading = false;
       this.requestUpdate();
     }
+  }
+
+  /** The Cleanup badge covers unused props entries plus removable duplicates. */
+  private reportCount(): void {
+    this.dispatchEvent(new CustomEvent<number>("count-changed", {
+      detail: (this.report?.Unused.length ?? 0) + this.dependencyCount,
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private async onDependencyCountChangedAsync(event: CustomEvent<number>): Promise<void> {
+    this.dependencyCount = event.detail;
+    this.reportCount();
+    await Promise.resolve();
   }
 
   private async cancelCleanupAsync(): Promise<void> {
@@ -198,7 +214,7 @@ export class CleanupView extends LitElement {
           <div>
             <div class="list-title">Cleanup unused packages</div>
             <div class="list-subtitle">
-              Compare <code>PackageVersion</code> entries with actual <code>PackageReference</code> usage
+              Remove unused <code>PackageVersion</code> entries and direct references that are already transitive
               ${this.statusText ? html` · ${this.statusText}` : nothing}
             </div>
           </div>
@@ -218,6 +234,15 @@ export class CleanupView extends LitElement {
             </button>
           </div>
         </div>
+
+        <dependency-issues
+          .projectPaths=${this.projectPaths}
+          @dependency-count-changed=${async (e: CustomEvent<number>) => await this.onDependencyCountChangedAsync(e)}
+          @project-updated=${async () => {
+            await this.LoadCleanupReportAsync();
+            this.dispatchEvent(new CustomEvent("cleanup-completed", { bubbles: true, composed: true }));
+          }}
+        ></dependency-issues>
 
         ${report
           ? html`<div class="stat-grid">

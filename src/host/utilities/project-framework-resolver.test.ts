@@ -120,6 +120,27 @@ suite('ProjectFrameworkResolver Tests', () => {
         assert.strictEqual(info.Source, 'xml');
     });
 
+    test('marks the XML fallback when MSBuild evaluation fails', async () => {
+        const projectPath = path.join(tmpDir, 'Broken.csproj');
+        fs.writeFileSync(
+            projectPath,
+            '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>$(BaseTfms);net10.0</TargetFrameworks></PropertyGroup></Project>'
+        );
+
+        ProjectFrameworkResolver.SetEvaluatorForTests(async () => {
+            throw new Error('error MSB4242: SDK Resolver Failure');
+        });
+
+        const info = await ProjectFrameworkResolver.GetTargetFrameworksAsync(projectPath);
+
+        assert.strictEqual(info.Source, 'xml');
+        assert.strictEqual(
+            info.EvaluationFailed,
+            true,
+            'a failed evaluation must be distinguishable from literal XML'
+        );
+    });
+
     test('fallback ignores unresolved MSBuild property expressions', async () => {
         const projectPath = path.join(tmpDir, 'App.csproj');
         fs.writeFileSync(

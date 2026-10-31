@@ -735,7 +735,7 @@ suite('PackagesView Component', () => {
             assert.strictEqual(packagesView.selectedPackage, null);
         });
 
-        test('keeps Cleanup as the last tab', async () => {
+        test('keeps Toolchain as the last tab', async () => {
             const visited: string[] = [];
             sandbox.stub(packagesView, 'setTabAsync').callsFake(async (tab) => { visited.push(tab); });
             const event = { key: 'End', preventDefault: () => undefined } as KeyboardEvent;
@@ -744,7 +744,7 @@ suite('PackagesView Component', () => {
                 handleTabKeydownAsync(e: KeyboardEvent): Promise<void>;
             }).handleTabKeydownAsync(event);
 
-            assert.deepStrictEqual(visited, ['cleanup']);
+            assert.deepStrictEqual(visited, ['toolchain']);
         });
     });
 });

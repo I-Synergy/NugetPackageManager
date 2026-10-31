@@ -1,17 +1,57 @@
 import { Mutex } from "async-mutex";
 import { spawn } from "node:child_process";
 import { Logger } from "../../common/logger";
+import { ClassifyDotnetFailure, type DotnetFailure, type DotnetFailureContext } from "./dotnet-failure";
+import { ResolveDotnetContext } from "./dotnet-context";
 
 export interface OperationProgress {
   stage: string;
   percent: number;
 }
 
+export interface ExecuteCommandOptions {
+  /**
+   * Working directory for the child. `dotnet` selects its SDK (and therefore
+   * the `global.json` it honours) from this directory, never from the project
+   * path passed in `args`.
+   */
+  cwd?: string;
+  /**
+   * Executable to run instead of the logical command — e.g. the `dotnet` host
+   * installed by the extension rather than the one on PATH.
+   */
+  command?: string;
+  /** Extra facts used to classify a failure into a user-facing cause. */
+  failureContext?: DotnetFailureContext;
+}
+
 export class DotnetError extends Error {
-  constructor(message: string, public readonly output: string) {
+  constructor(
+    message: string,
+    public readonly output: string,
+    public readonly failure?: DotnetFailure
+  ) {
     super(message);
     this.name = "DotnetError";
   }
+}
+
+function IsDotnetCommand(command: string): boolean {
+  return /(^|[\\/])dotnet(\.exe)?$/i.test(command);
+}
+
+/**
+ * Options for running `dotnet` against `projectPath`: the SDK context (project
+ * pin or workspace override), the executable it selects, the working directory
+ * it implies, and the facts needed to classify a failure.
+ */
+export function CreateDotnetOptions(projectPath: string): ExecuteCommandOptions {
+  const context = ResolveDotnetContext(projectPath);
+  return {
+    cwd: context.WorkingDirectory,
+    command: context.Command,
+    failureContext: { ProjectPath: projectPath, Context: context },
+  };
 }
 
 export class TaskExecutor {
@@ -24,7 +64,8 @@ export class TaskExecutor {
     operationId: string,
     signal?: AbortSignal,
     timeoutMs: number = 10 * 60 * 1000,
-    onProgress?: (progress: OperationProgress) => void
+    onProgress?: (progress: OperationProgress) => void,
+    options?: ExecuteCommandOptions
   ): Promise<void> {
     Logger.info(`TaskExecutor.ExecuteCommandAsync: ${command} ${args.join(" ")}`);
     if (signal?.aborted) {
@@ -42,7 +83,11 @@ export class TaskExecutor {
       }
 
       await new Promise<void>((resolve, reject) => {
-        const child = spawn(command, args);
+        const executable = options?.command ?? command;
+        const spawnOptions = options?.cwd
+          ? { cwd: options.cwd, windowsHide: true }
+          : { windowsHide: true };
+        const child = spawn(executable, args, spawnOptions);
         let stdoutBuf = "";
         let stderrBuf = "";
         const allLines: string[] = [];
@@ -112,13 +157,21 @@ export class TaskExecutor {
             finish();
           } else {
             Logger.error(`TaskExecutor.ExecuteCommandAsync: Exited with code ${code}`);
-            finish(new DotnetError(`dotnet exited with code ${code}`, allLines.join("\n")));
+            const output = allLines.join("\n");
+            const failure = IsDotnetCommand(command)
+              ? ClassifyDotnetFailure(output, options?.failureContext)
+              : undefined;
+            finish(new DotnetError(`dotnet exited with code ${code}`, output, failure));
           }
         });
 
         child.on("error", (err) => {
           Logger.error(`TaskExecutor.ExecuteCommandAsync: Process error`, err);
-          finish(err instanceof Error ? err : new Error(String(err)));
+          const message = err instanceof Error ? err.message : String(err);
+          const failure = IsDotnetCommand(command)
+            ? ClassifyDotnetFailure(message, { ...options?.failureContext, SpawnFailed: true })
+            : undefined;
+          finish(new DotnetError(message, message, failure));
         });
 
         state.timer = setTimeout(() => {
