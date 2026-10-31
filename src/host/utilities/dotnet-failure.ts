@@ -9,7 +9,8 @@
  * that matches the kind, so callers never have to show the stack.
  */
 
-import type { DotnetFailureInfo, DotnetFailureKind } from "../../common/rpc/types";
+import type { DotnetFailureInfo } from "../../common/rpc/types";
+import { StripTrailingPunctuation } from "../../common/text";
 import type { DotnetContext } from "./dotnet-context";
 import {
     ParseRestoreConflicts,
@@ -17,7 +18,7 @@ import {
     type RestoreConflict,
 } from "./restore-diagnostics";
 
-export type { DotnetFailureKind };
+export type { DotnetFailureKind } from "../../common/rpc/types";
 
 /** Host-side failure record: the wire shape plus the parsed conflict chains. */
 export interface DotnetFailure extends Omit<DotnetFailureInfo, "Conflicts"> {
@@ -44,9 +45,33 @@ const SOURCE_UNAVAILABLE_RE =
 const PASSWORD_SCRIPT_RE = /password script|credential provider .*failed/i;
 const DOTNET_MISSING_RE = /ENOENT|not recognized as an internal or external command|command not found|No such file or directory/i;
 
+/** `10.0.403` or `11.0.100-rc.3.26522.148`: digits, dots and an optional suffix. */
+function IsSdkVersionSegment(value: string): boolean {
+    let dots = 0;
+    let digits = 0;
+    for (const char of value) {
+        const isDigit = char >= "0" && char <= "9";
+        const isLetter = (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
+        if (isDigit) {
+            digits += 1;
+        } else if (char === ".") {
+            dots += 1;
+        } else if (!isLetter && char !== "-" && char !== "_") {
+            return false;
+        }
+    }
+    return digits > 0 && dots >= 2;
+}
+
 function extractSdkVersion(output: string): string | undefined {
-    const match = /[\\/]sdk[\\/]+(\d+\.\d+\.\d+[^\\/"\s]*?)[\\/]+Sdks/i.exec(output);
-    return match?.[1];
+    // MSBuild paths mix separators; split them instead of backtracking over them.
+    const segments = output.replace(/\\/g, "/").split("/");
+    for (let index = 0; index < segments.length - 1; index++) {
+        if ((segments[index] ?? "").toLowerCase() !== "sdk") continue;
+        const candidate = segments[index + 1] ?? "";
+        if (IsSdkVersionSegment(candidate)) return candidate;
+    }
+    return undefined;
 }
 
 function extractConflictingPack(output: string): string | undefined {
@@ -78,26 +103,47 @@ function pinnedSuffix(pinned: string | undefined): string {
  * Builds the failure record for `output`. `context` supplies the project path
  * and the SDK pinned by the project's `global.json`, if any.
  */
+type FailureBase = Omit<DotnetFailure, "Kind" | "Summary" | "Hint">;
+
 export function ClassifyDotnetFailure(
     output: string,
     context: DotnetFailureContext = {}
 ): DotnetFailure {
+    const base = BuildFailureBase(output, context);
+    return (
+        ClassifySdkFailure(output, base, context) ??
+        ClassifyVulnerabilityAudit(output, base) ??
+        ClassifyRestoreFailure(output, base) ??
+        ClassifyEnvironmentFailure(output, base) ??
+        UnknownFailure(output, base)
+    );
+}
+
+function BuildFailureBase(output: string, context: DotnetFailureContext): FailureBase {
     const projectPath = context.ProjectPath;
     const pinned = context.Context?.PinnedSdkVersion;
     const globalJsonPath = context.Context?.GlobalJsonPath;
     const sdkVersion = extractSdkVersion(output);
-    const conflicts = ParseRestoreConflicts(output);
-
-    const base = {
+    return {
         Detail: detailFrom(output),
-        Conflicts: conflicts,
+        Conflicts: ParseRestoreConflicts(output),
         ...(sdkVersion ? { SdkVersion: sdkVersion } : {}),
         ...(globalJsonPath ? { GlobalJsonPath: globalJsonPath } : {}),
         ...(pinned ? { PinnedSdkVersion: pinned } : {}),
         ...(projectPath ? { ProjectPath: projectPath } : {}),
     };
+}
 
-    if (context.SpawnFailed || DOTNET_MISSING_RE.test(output) && !SDK_RESOLUTION_RE.test(output)) {
+/** SDK-level causes, in the order they must be recognised. */
+function ClassifySdkFailure(
+    output: string,
+    base: FailureBase,
+    context: DotnetFailureContext
+): DotnetFailure | null {
+    const pinned = context.Context?.PinnedSdkVersion;
+    const sdkLabel = base.SdkVersion ? ` ${base.SdkVersion}` : "";
+
+    if (context.SpawnFailed || (DOTNET_MISSING_RE.test(output) && !SDK_RESOLUTION_RE.test(output))) {
         return {
             ...base,
             Kind: "DotnetMissing",
@@ -108,7 +154,6 @@ export function ClassifyDotnetFailure(
 
     if (WORKLOAD_CONFLICT_RE.test(output)) {
         const pack = extractConflictingPack(output);
-        const sdkLabel = sdkVersion ? ` ${sdkVersion}` : "";
         const packLabel = pack ? ` (${pack})` : "";
         return {
             ...base,
@@ -119,57 +164,60 @@ export function ClassifyDotnetFailure(
     }
 
     if (SDK_RESOLUTION_RE.test(output)) {
-        const resolutionSdkLabel = sdkVersion ? ` ${sdkVersion}` : "";
         return {
             ...base,
             Kind: "SdkResolutionFailure",
-            Summary: `The .NET SDK${resolutionSdkLabel} could not resolve its SDK components.`,
+            Summary: `The .NET SDK${sdkLabel} could not resolve its SDK components.`,
             Hint: `Run \`dotnet workload repair\` or reinstall the SDK used by this solution.${pinnedSuffix(pinned)}`,
         };
     }
 
     const missingPinned = PINNED_SDK_MISSING_RE.exec(output);
-    if (missingPinned) {
-        const version = missingPinned[1] ?? pinned;
-        const versionLabel = version ? ` ${version}` : "";
-        return {
-            ...base,
-            Kind: "PinnedSdkMissing",
-            Summary: `The .NET SDK${versionLabel} required by global.json is not installed.`,
-            Hint: "Install that SDK version, or update `sdk.version` in global.json to one that is installed.",
-        };
-    }
+    if (!missingPinned) return null;
+    const version = missingPinned[1] ?? pinned;
+    const versionLabel = version ? ` ${version}` : "";
+    return {
+        ...base,
+        Kind: "PinnedSdkMissing",
+        Summary: `The .NET SDK${versionLabel} required by global.json is not installed.`,
+        Hint: "Install that SDK version, or update `sdk.version` in global.json to one that is installed.",
+    };
+}
 
-    if (VULNERABILITY_AUDIT_RE.test(output)) {
-        const packages: string[] = [];
-        const advisories: string[] = [];
-        for (const match of output.matchAll(VULNERABLE_PACKAGE_RE)) {
-            packages.push(`${match[1]} ${match[2]} (${match[3]})`);
-            if (match[4]) advisories.push(match[4].replace(/[.,;]+$/, ""));
-        }
-        const listed = [...new Set(packages)].slice(0, 5).join(", ");
-        const advisory = [...new Set(advisories)][0];
-        return {
-            ...base,
-            Kind: "VulnerabilityAudit",
-            Summary: `The vulnerability audit fails the build${
-                listed ? `: ${listed}` : ""
-            }.`,
-            Hint: `NuGetAudit is enabled and NU190x is promoted to an error by WarningsAsErrors. Update the affected package (as a transitive dependency, raise the direct parent or add a central pin to a patched version), or stop promoting NU190x${
-                advisory ? `. Advisory: ${advisory}` : ""
-            }.`,
-        };
-    }
+function ClassifyVulnerabilityAudit(output: string, base: FailureBase): DotnetFailure | null {
+    if (!VULNERABILITY_AUDIT_RE.test(output)) return null;
 
-    if (conflicts.length > 0) {
-        return {
-            ...base,
-            Kind: "RestoreConflict",
-            Summary: SummarizeRestoreFailure(output) ?? "Package restore failed with a dependency conflict.",
-            Hint: "Pin the contested package to a single version (the Consolidate tab can do this) and restore again.",
-        };
+    const packages: string[] = [];
+    const advisories: string[] = [];
+    for (const match of output.matchAll(VULNERABLE_PACKAGE_RE)) {
+        packages.push(`${match[1]} ${match[2]} (${match[3]})`);
+        if (match[4]) advisories.push(StripTrailingPunctuation(match[4]));
     }
+    const listed = [...new Set(packages)].slice(0, 5).join(", ");
+    const advisory = [...new Set(advisories)][0];
+    const listedSuffix = listed ? `: ${listed}` : "";
+    const advisorySuffix = advisory ? `. Advisory: ${advisory}` : "";
 
+    return {
+        ...base,
+        Kind: "VulnerabilityAudit",
+        Summary: `The vulnerability audit fails the build${listedSuffix}.`,
+        Hint: `NuGetAudit is enabled and NU190x is promoted to an error by WarningsAsErrors. Update the affected package (as a transitive dependency, raise the direct parent or add a central pin to a patched version), or stop promoting NU190x${advisorySuffix}.`,
+    };
+}
+
+function ClassifyRestoreFailure(output: string, base: FailureBase): DotnetFailure | null {
+    if (base.Conflicts.length === 0) return null;
+    return {
+        ...base,
+        Kind: "RestoreConflict",
+        Summary: SummarizeRestoreFailure(output) ?? "Package restore failed with a dependency conflict.",
+        Hint: "Pin the contested package to a single version (the Consolidate tab can do this) and restore again.",
+    };
+}
+
+/** Feed and credential causes: the restore never reached package resolution. */
+function ClassifyEnvironmentFailure(output: string, base: FailureBase): DotnetFailure | null {
     if (SOURCE_UNAVAILABLE_RE.test(output)) {
         return {
             ...base,
@@ -178,16 +226,16 @@ export function ClassifyDotnetFailure(
             Hint: "Check the source URL, network/proxy settings and feed credentials, then restore again.",
         };
     }
+    if (!PASSWORD_SCRIPT_RE.test(output)) return null;
+    return {
+        ...base,
+        Kind: "PasswordScriptFailed",
+        Summary: "The password script did not supply a usable credential.",
+        Hint: "Run the script manually, check that the allowlist path is correct, and confirm it prints the password to stdout.",
+    };
+}
 
-    if (PASSWORD_SCRIPT_RE.test(output)) {
-        return {
-            ...base,
-            Kind: "PasswordScriptFailed",
-            Summary: "The password script did not supply a usable credential.",
-            Hint: "Run the script manually, check that the allowlist path is correct, and confirm it prints the password to stdout.",
-        };
-    }
-
+function UnknownFailure(output: string, base: FailureBase): DotnetFailure {
     return {
         ...base,
         Kind: "Unknown",

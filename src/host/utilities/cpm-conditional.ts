@@ -125,64 +125,85 @@ export function ApplyConditionalPackageVersions(
     changes: ConditionalVersionChange[],
     options: ConditionalWriteOptions = {}
 ): ConditionalWriteResult {
-    let updated = content;
-    let changed = false;
+    const replaced = ReplaceUnconditionalEntries(content, options.ReplaceUnconditional ?? []);
+    let updated = replaced.Content;
+    let changed = replaced.Changed;
     const createdGroups: string[] = [];
 
-    for (const packageId of options.ReplaceUnconditional ?? []) {
-        const removed = removeUnconditionalEntries(updated, packageId);
-        if (removed.removed) {
-            updated = removed.content;
-            changed = true;
-        }
-    }
-
-    // Group the changes so one group is created per condition.
-    const byCondition = new Map<string, ConditionalVersionChange[]>();
-    for (const change of changes) {
-        const list = byCondition.get(change.Condition) ?? [];
-        list.push(change);
-        byCondition.set(change.Condition, list);
-    }
-
-    for (const [condition, groupChanges] of byCondition) {
+    for (const [condition, groupChanges] of GroupChangesByCondition(changes)) {
         const group = findConditionalGroup(updated, condition);
         if (group) {
             const slice = updated.slice(group.start, group.end);
-            let nextSlice = slice;
-            for (const change of groupChanges) {
-                if (containsPackage(nextSlice, change.PackageId)) {
-                    nextSlice = nextSlice.replace(
-                        packageVersionPattern(change.PackageId),
-                        `$1${escapeXml(change.Version)}$3`
-                    );
-                } else {
-                    nextSlice = nextSlice.replace(
-                        /<\/ItemGroup>/i,
-                        `  <PackageVersion Include="${escapeXml(change.PackageId)}" Version="${escapeXml(change.Version)}" />\n  </ItemGroup>`
-                    );
-                }
-            }
+            const nextSlice = ApplyToExistingGroup(slice, groupChanges);
             if (nextSlice !== slice) {
                 updated = updated.slice(0, group.start) + nextSlice + updated.slice(group.end);
                 changed = true;
             }
             continue;
         }
-
-        const entries = groupChanges
-            .map(
-                (change) =>
-                    `    <PackageVersion Include="${escapeXml(change.PackageId)}" Version="${escapeXml(change.Version)}" />`
-            )
-            .join("\n");
-        const block = `  <ItemGroup Condition="${escapeXml(condition)}">\n${entries}\n  </ItemGroup>\n`;
-        const closing = updated.lastIndexOf("</Project>");
-        if (closing < 0) continue;
-        updated = updated.slice(0, closing) + block + updated.slice(closing);
+        const appended = AppendGroup(updated, condition, groupChanges);
+        if (appended === null) continue;
+        updated = appended;
         createdGroups.push(condition);
         changed = true;
     }
 
     return { Content: updated, Changed: changed, CreatedGroups: createdGroups };
+}
+
+function ReplaceUnconditionalEntries(
+    content: string,
+    packageIds: string[]
+): { Content: string; Changed: boolean } {
+    let updated = content;
+    let changed = false;
+    for (const packageId of packageIds) {
+        const removed = removeUnconditionalEntries(updated, packageId);
+        if (!removed.removed) continue;
+        updated = removed.content;
+        changed = true;
+    }
+    return { Content: updated, Changed: changed };
+}
+
+/** One entry per condition, so a single group is created per condition. */
+function GroupChangesByCondition(
+    changes: ConditionalVersionChange[]
+): Map<string, ConditionalVersionChange[]> {
+    const byCondition = new Map<string, ConditionalVersionChange[]>();
+    for (const change of changes) {
+        const list = byCondition.get(change.Condition) ?? [];
+        list.push(change);
+        byCondition.set(change.Condition, list);
+    }
+    return byCondition;
+}
+
+function ApplyToExistingGroup(slice: string, changes: ConditionalVersionChange[]): string {
+    let nextSlice = slice;
+    for (const change of changes) {
+        nextSlice = containsPackage(nextSlice, change.PackageId)
+            ? nextSlice.replace(packageVersionPattern(change.PackageId), `$1${escapeXml(change.Version)}$3`)
+            : nextSlice.replace(
+                /<\/ItemGroup>/i,
+                `  <PackageVersion Include="${escapeXml(change.PackageId)}" Version="${escapeXml(change.Version)}" />\n  </ItemGroup>`
+            );
+    }
+    return nextSlice;
+}
+
+function AppendGroup(
+    content: string,
+    condition: string,
+    changes: ConditionalVersionChange[]
+): string | null {
+    const closing = content.lastIndexOf("</Project>");
+    if (closing < 0) return null;
+    const entries = changes.map(FormatPackageVersionEntry).join("\n");
+    const block = `  <ItemGroup Condition="${escapeXml(condition)}">\n${entries}\n  </ItemGroup>\n`;
+    return content.slice(0, closing) + block + content.slice(closing);
+}
+
+function FormatPackageVersionEntry(change: ConditionalVersionChange): string {
+    return `    <PackageVersion Include="${escapeXml(change.PackageId)}" Version="${escapeXml(change.Version)}" />`;
 }

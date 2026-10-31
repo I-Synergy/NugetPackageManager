@@ -92,10 +92,9 @@ import {
 import { InstallSdkAsync, IsValidSdkVersion, SdkInstallError } from "./utilities/sdk-install";
 import { ResolveDotnetCommand, ResolveDotnetContext, ResolveWorkingDirectory } from "./utilities/dotnet-context";
 import { RunWorkloadCommandAsync } from "./utilities/workload-commands";
-import { AnalyzeProjectAsync } from "./utilities/dependency-graph";
+import { AnalyzeProjectAsync, ReadAssetsAsync, ReadDirectDependencies } from "./utilities/dependency-graph";
 import { ScopeProjectFiles } from "./utilities/project-scope";
 import { ComputeRequirementClosureAsync, OrderRequirements } from "./utilities/requirement-closure";
-import { ReadAssetsAsync, ReadDirectDependencies } from "./utilities/dependency-graph";
 import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "../common/logger";
@@ -109,6 +108,78 @@ import { AxiosError } from "axios";
  * Parses a .sln or .slnx file and returns the absolute paths of all project files it references.
  * Returns null if the file cannot be read or parsed.
  */
+/** Flattens an SDK install failure into one line: message plus script output. */
+interface CentralUpdatePlan {
+  Applied: string[];
+  Skipped: string[];
+  Changes: CpmVersionChange[];
+  Conditional: Array<{ PackageId: string; Version: string; Condition: string }>;
+}
+
+/** Splits the requested raises into unconditional, conditional and ignored ones. */
+function PlanCentralUpdates(
+  updates: UpdateCentralVersionsRequest["Updates"],
+  defined: Map<string, string>
+): CentralUpdatePlan {
+  const plan: CentralUpdatePlan = { Applied: [], Skipped: [], Changes: [], Conditional: [] };
+  for (const update of updates) {
+    if (!isValidPackageId(update.PackageId) || !isValidNuGetVersion(update.Version)) {
+      plan.Skipped.push(update.PackageId);
+      continue;
+    }
+    if (update.Condition) {
+      // Per-TFM requirement: written into its own conditional group, even when
+      // no unconditional entry exists.
+      plan.Conditional.push({
+        PackageId: update.PackageId,
+        Version: update.Version,
+        Condition: update.Condition,
+      });
+      plan.Applied.push(update.PackageId);
+      continue;
+    }
+    const definedId = [...defined.keys()].find((id) => id.toLowerCase() === update.PackageId.toLowerCase());
+    if (!definedId) {
+      // Transitive requirement without a PackageVersion entry: NuGet resolves
+      // it on its own, nothing to raise.
+      plan.Skipped.push(update.PackageId);
+      continue;
+    }
+    plan.Changes.push({ packageId: definedId, version: update.Version, scope: "all" });
+    plan.Applied.push(update.PackageId);
+  }
+  return plan;
+}
+
+async function WriteCentralVersionsAsync(propsFile: string, plan: CentralUpdatePlan): Promise<void> {
+  if (plan.Changes.length > 0) {
+    await CpmResolver.UpdateCpmVersionsAsync(propsFile, plan.Changes);
+  }
+  if (plan.Conditional.length === 0) return;
+
+  const before = await fs.readFile(propsFile, "utf8");
+  const written = ApplyConditionalPackageVersions(before, plan.Conditional, {
+    // Two PackageVersion items for one package (unconditional + conditional)
+    // make NuGet use the unconditional one, so it has to be replaced.
+    ReplaceUnconditional: [...new Set(plan.Conditional.map((entry) => entry.PackageId))],
+  });
+  if (written.Changed) {
+    await fs.writeFile(propsFile, written.Content, "utf8");
+  }
+  if (written.CreatedGroups.length > 0) {
+    Logger.info(`updateCentralVersions: created conditional group(s) ${written.CreatedGroups.join(", ")}`);
+  }
+}
+
+/** Flattens an SDK install failure into one line: message plus script output. */
+function DescribeSdkInstallFailure(err: unknown): string {
+  if (err instanceof SdkInstallError) {
+    return [err.message, err.output].filter(Boolean).join(" ");
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 async function parseSolutionProjectPathsAsync(slnPath: string): Promise<string[] | null> {
   try {
     const content = await fs.readFile(slnPath, "utf-8");
@@ -1198,71 +1269,83 @@ async function findBatchUpdateConflictsAsync(
 
   for (const [projectPath, selected] of buildSelectedByProject(updates)) {
     if (signal?.aborted) break;
-    const graph = await loadProjectDependencyGraphAsync(projectPath);
-    // Without a restored graph there is nothing to compare a single update
-    // against; only a multi-package selection can still conflict with itself.
-    if (!graph && selected.size < 2) continue;
-
-    const effective = new Map(graph?.packageVersions ?? []);
-    for (const [id, entry] of selected) effective.set(id, entry.version);
-
-    const assets = await ReadAssetsAsync(projectPath);
-    const tfms = [...(graph?.tfms ?? [])];
-    const centralVersions = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
-    const constraints = {
-      directPackages: new Map(
-        tfms.map((tfm) => [tfm, assets ? ReadDirectDependencies(assets, tfm) : new Set<string>()])
-      ),
-      centralIds: new Set([...centralVersions.keys()].map((id) => id.toLowerCase())),
-      centralTransitivePinning: isCentralTransitivePinningEnabled(projectPath),
-      directKnown: Boolean(assets?.project?.frameworks && Object.keys(assets.project.frameworks).length > 0),
-    };
-
-    await checkSelectedPackageRangesAsync({
-      projectPath,
-      selected,
-      effective,
-      tfms,
-      ...constraints,
-      sources,
-      detailsCache,
-      signal,
-      addConflict,
-    });
-
-    if (graph) {
-      await checkInstalledPackageRangesAsync({
-        projectPath,
-        graph,
-        selected,
-        effective,
-        ...constraints,
-        sources,
-        detailsCache,
-        signal,
-        addConflict,
-      });
-    }
+    await checkProjectConflictsAsync({ projectPath, selected, sources, detailsCache, signal, addConflict });
   }
 
-  if (conflicts.length > 0) {
-    const order = OrderRequirements(
-      conflicts.map((conflict) => ({
-        PackageId: conflict.BlockedByPackageId,
-        RequiredBy: conflict.PackageId,
-        RequiredByVersion: conflict.RequestedVersion,
-        Range: conflict.RequiredRange,
-        RequiredVersion: conflict.RequiredVersion ?? conflict.RequiredRange,
-        Tfm: conflict.Tfm ?? "",
-      }))
-    );
-    for (const conflict of conflicts) {
-      const entry = order.get(conflict.BlockedByPackageId.toLowerCase());
-      if (entry) conflict.Order = entry.Order;
-    }
-  }
-
+  ApplyRequirementOrder(conflicts);
   return conflicts;
+}
+
+interface ProjectConflictInput {
+  projectPath: string;
+  selected: Map<string, { id: string; version: string }>;
+  sources: Array<{ Url: string }>;
+  detailsCache: Map<string, Promise<Record<string, PackageDependency[]> | null>>;
+  signal: AbortSignal | undefined;
+  addConflict: (conflict: BatchUpdateConflict) => void;
+}
+
+async function checkProjectConflictsAsync(input: ProjectConflictInput): Promise<void> {
+  const { projectPath, selected } = input;
+  const graph = await loadProjectDependencyGraphAsync(projectPath);
+  // Without a restored graph there is nothing to compare a single update
+  // against; only a multi-package selection can still conflict with itself.
+  if (!graph && selected.size < 2) return;
+
+  const effective = new Map(graph?.packageVersions ?? []);
+  for (const [id, entry] of selected) effective.set(id, entry.version);
+
+  const assets = await ReadAssetsAsync(projectPath);
+  const tfms = [...(graph?.tfms ?? [])];
+  const centralVersions = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
+  const shared = {
+    projectPath,
+    selected,
+    effective,
+    ...BuildConflictConstraints(tfms, assets, centralVersions, projectPath),
+    sources: input.sources,
+    detailsCache: input.detailsCache,
+    signal: input.signal,
+    addConflict: input.addConflict,
+  };
+
+  await checkSelectedPackageRangesAsync({ ...shared, tfms });
+  if (graph) await checkInstalledPackageRangesAsync({ ...shared, graph });
+}
+
+function BuildConflictConstraints(
+  tfms: string[],
+  assets: Awaited<ReturnType<typeof ReadAssetsAsync>>,
+  centralVersions: Map<string, string>,
+  projectPath: string
+): Omit<ConflictCheckContext, "projectPath" | "selected" | "effective" | "sources" | "detailsCache" | "signal" | "addConflict"> {
+  return {
+    directPackages: new Map(
+      tfms.map((tfm) => [tfm, assets ? ReadDirectDependencies(assets, tfm) : new Set<string>()])
+    ),
+    centralIds: new Set([...centralVersions.keys()].map((id) => id.toLowerCase())),
+    centralTransitivePinning: isCentralTransitivePinningEnabled(projectPath),
+    directKnown: Boolean(assets?.project?.frameworks && Object.keys(assets.project.frameworks).length > 0),
+  };
+}
+
+/** Adds the dependency step to each conflict so the plan can be applied in order. */
+function ApplyRequirementOrder(conflicts: BatchUpdateConflict[]): void {
+  if (conflicts.length === 0) return;
+  const order = OrderRequirements(
+    conflicts.map((conflict) => ({
+      PackageId: conflict.BlockedByPackageId,
+      RequiredBy: conflict.PackageId,
+      RequiredByVersion: conflict.RequestedVersion,
+      Range: conflict.RequiredRange,
+      RequiredVersion: conflict.RequiredVersion ?? conflict.RequiredRange,
+      Tfm: conflict.Tfm ?? "",
+    }))
+  );
+  for (const conflict of conflicts) {
+    const entry = order.get(conflict.BlockedByPackageId.toLowerCase());
+    if (entry) conflict.Order = entry.Order;
+  }
 }
 
 function buildSelectedByProject(
@@ -2961,63 +3044,16 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
 
         const defined = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
-        const applied: string[] = [];
-        const skipped: string[] = [];
-        const changes: CpmVersionChange[] = [];
-        const conditional: Array<{ PackageId: string; Version: string; Condition: string }> = [];
-
-        for (const update of request.Updates) {
-          if (!isValidPackageId(update.PackageId) || !isValidNuGetVersion(update.Version)) {
-            skipped.push(update.PackageId);
-            continue;
-          }
-          const definedId = [...defined.keys()].find(
-            (id) => id.toLowerCase() === update.PackageId.toLowerCase()
-          );
-          if (update.Condition) {
-            // Per-TFM requirement: written into its own conditional group, even
-            // when no unconditional entry exists.
-            conditional.push({ PackageId: update.PackageId, Version: update.Version, Condition: update.Condition });
-            applied.push(update.PackageId);
-            continue;
-          }
-          if (!definedId) {
-            // Transitive requirement without a PackageVersion entry: NuGet
-            // resolves it on its own, nothing to raise.
-            skipped.push(update.PackageId);
-            continue;
-          }
-          changes.push({ packageId: definedId, version: update.Version, scope: "all" });
-          applied.push(update.PackageId);
-        }
-
-        if (changes.length === 0 && conditional.length === 0) {
-          return ok({ Applied: [], Skipped: skipped, PropsFile: propsFile });
+        const plan = PlanCentralUpdates(request.Updates, defined);
+        if (plan.Changes.length === 0 && plan.Conditional.length === 0) {
+          return ok({ Applied: [], Skipped: plan.Skipped, PropsFile: propsFile });
         }
 
         // Snapshot before writing: the batch rolls back project files, but this
         // props write is outside that snapshot, so a failed restore must undo it.
         const originalContent = await fs.readFile(propsFile, "utf8");
+        await WriteCentralVersionsAsync(propsFile, plan);
 
-        if (changes.length > 0) {
-          await CpmResolver.UpdateCpmVersionsAsync(propsFile, changes);
-        }
-        if (conditional.length > 0) {
-          const before = await fs.readFile(propsFile, "utf8");
-          const written = ApplyConditionalPackageVersions(before, conditional, {
-            // Two PackageVersion items for one package (unconditional + conditional)
-            // make NuGet use the unconditional one, so it has to be replaced.
-            ReplaceUnconditional: [...new Set(conditional.map((entry) => entry.PackageId))],
-          });
-          if (written.Changed) {
-            await fs.writeFile(propsFile, written.Content, "utf8");
-          }
-          if (written.CreatedGroups.length > 0) {
-            Logger.info(
-              `updateCentralVersions: created conditional group(s) ${written.CreatedGroups.join(", ")}`
-            );
-          }
-        }
         const failure = await restoreProjectsInternalAsync([projectPath], undefined, false);
         if (failure) {
           // Undo the central write so a failed restore cannot leave the props
@@ -3027,11 +3063,11 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
         toolchainHealthCache = null;
         Logger.info(
-          `updateCentralVersions: raised ${applied.length} version(s) in ${propsFile}, restored=${!failure}`
+          `updateCentralVersions: raised ${plan.Applied.length} version(s) in ${propsFile}, restored=${!failure}`
         );
         return ok({
-          Applied: applied,
-          Skipped: skipped,
+          Applied: plan.Applied,
+          Skipped: plan.Skipped,
           PropsFile: propsFile,
           ...(failure ? { RestoreError: failure.message } : {}),
         });
@@ -3128,10 +3164,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         return ok(result);
       } catch (err) {
         Logger.error("installSdk: failed", err);
-        const message = err instanceof SdkInstallError
-          ? [err.message, err.output].filter(Boolean).join(" ")
-          : err instanceof Error ? err.message : String(err);
-        return fail(message);
+        return fail(DescribeSdkInstallFailure(err));
       } finally {
         StatusBarUtils.hide();
       }

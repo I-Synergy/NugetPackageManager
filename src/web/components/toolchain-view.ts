@@ -346,36 +346,41 @@ export class ToolchainView extends LitElement {
   }
 
   private renderIssue(issue: ToolchainIssue, index: number): unknown {
-    const expanded = this.expandedIssue === index;
     return html`
       <div class="issue">
         <div class="issue-summary">
           <span class="codicon codicon-warning"></span> ${issue.Summary}
         </div>
         <div class="issue-hint">${issue.Hint}</div>
-        ${this.isWorkloadIssue(issue)
-          ? html`<div class="issue-actions">
-              <button
-                ?disabled=${this.workloadBusy !== null}
-                @click=${async () => await this.runWorkloadAsync("update")}
-              >Update workloads</button>
-              <button
-                ?disabled=${this.workloadBusy !== null}
-                @click=${async () => await this.runWorkloadAsync("repair")}
-              >Repair workloads</button>
-            </div>`
-          : nothing}
-        ${issue.Detail
-          ? html`
-              <div>
-                <button @click=${() => { this.expandedIssue = expanded ? null : index; }}>
-                  ${expanded ? "Hide output" : "Show output"}
-                </button>
-              </div>
-              ${expanded ? html`<pre>${issue.Detail}</pre>` : nothing}
-            `
-          : nothing}
+        ${this.renderWorkloadActions(issue)}
+        ${this.renderIssueDetail(issue, index)}
       </div>
+    `;
+  }
+
+  private renderWorkloadActions(issue: ToolchainIssue): unknown {
+    if (!this.isWorkloadIssue(issue)) return nothing;
+    return html`<div class="issue-actions">
+      <button
+        ?disabled=${this.workloadBusy !== null}
+        @click=${async () => await this.runWorkloadAsync("update")}
+      >Update workloads</button>
+      <button
+        ?disabled=${this.workloadBusy !== null}
+        @click=${async () => await this.runWorkloadAsync("repair")}
+      >Repair workloads</button>
+    </div>`;
+  }
+
+  private renderIssueDetail(issue: ToolchainIssue, index: number): unknown {
+    if (!issue.Detail) return nothing;
+    const expanded = this.expandedIssue === index;
+    const label = expanded ? "Hide output" : "Show output";
+    return html`
+      <div>
+        <button @click=${() => { this.expandedIssue = expanded ? null : index; }}>${label}</button>
+      </div>
+      ${expanded ? html`<pre>${issue.Detail}</pre>` : nothing}
     `;
   }
 
@@ -415,14 +420,46 @@ export class ToolchainView extends LitElement {
     if (!this.workloadResult && !this.workloadFeedback) return nothing;
     return html`
       <div class="card">
-        ${this.workloadFeedback
-          ? html`<div class="${this.workloadResult?.Succeeded === false ? "bad" : ""}" role="status">${this.workloadFeedback}</div>`
-          : nothing}
-        ${this.workloadResult
-          ? html`<pre>${this.workloadResult.Output || "(no output)"}</pre>`
-          : nothing}
+        ${this.renderWorkloadFeedback()}
+        ${this.renderWorkloadOutput()}
       </div>
     `;
+  }
+
+  private renderWorkloadFeedback(): unknown {
+    if (!this.workloadFeedback) return nothing;
+    const tone = this.workloadResult?.Succeeded === false ? "bad" : "";
+    return html`<div class="${tone}" role="status">${this.workloadFeedback}</div>`;
+  }
+
+  private renderWorkloadOutput(): unknown {
+    if (!this.workloadResult) return nothing;
+    return html`<pre>${this.workloadResult.Output || "(no output)"}</pre>`;
+  }
+
+  private renderOrphanedBands(bands: string[] | undefined): unknown {
+    if (!bands || bands.length === 0) return nothing;
+    return html`
+      <div class="card">
+        <div class="key">left-over manifest bands (no installed SDK)</div>
+        <div class="value">${bands.join(", ")}</div>
+        <div class="list-subtitle">
+          They are still composed by newer SDKs and are not removed by
+          <code>dotnet workload update</code> or <code>repair</code>.
+        </div>
+        <div class="issue-actions">
+          <button @click=${async () => await this.onCopyCleanupAsync(bands)}>
+            Copy cleanup command
+          </button>
+          ${this.renderCleanupFeedback()}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderCleanupFeedback(): unknown {
+    if (!this.cleanupFeedback) return nothing;
+    return html`<span class="feedback" role="status">${this.cleanupFeedback}</span>`;
   }
 
   private renderHealthy(): unknown {
@@ -529,26 +566,7 @@ export class ToolchainView extends LitElement {
         ? html`<div class="card">${health.Issues.map((issue, index) => this.renderIssue(issue, index))}</div>`
         : nothing}
       ${this.renderWorkloadResult()}
-      ${health.OrphanedManifestBands && health.OrphanedManifestBands.length > 0
-        ? html`
-            <div class="card">
-              <div class="key">left-over manifest bands (no installed SDK)</div>
-              <div class="value">${health.OrphanedManifestBands.join(", ")}</div>
-              <div class="list-subtitle">
-                They are still composed by newer SDKs and are not removed by
-                <code>dotnet workload update</code> or <code>repair</code>.
-              </div>
-              <div class="issue-actions">
-                <button @click=${async () => await this.onCopyCleanupAsync(health.OrphanedManifestBands ?? [])}>
-                  Copy cleanup command
-                </button>
-                ${this.cleanupFeedback
-                  ? html`<span class="feedback" role="status">${this.cleanupFeedback}</span>`
-                  : nothing}
-              </div>
-            </div>
-          `
-        : nothing}
+      ${this.renderOrphanedBands(health.OrphanedManifestBands)}
       ${health.InstalledSdks.length > 0
         ? html`<div class="card">
             <div class="key">installed SDKs</div>

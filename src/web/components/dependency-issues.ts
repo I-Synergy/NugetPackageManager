@@ -325,30 +325,8 @@ export class DependencyIssues extends LitElement {
   override render(): unknown {
     if (this._loadTask.status === TaskStatus.ERROR) return nothing;
 
-    const restoringCard = this.restoring.length > 0
-      ? html`
-          <div class="card" role="status">
-            <div class="header">
-              <span class="codicon codicon-loading codicon-modifier-spin"></span>
-              <span>Restoring ${this.restoring.length} project${this.restoring.length === 1 ? "" : "s"} to complete the analysis…</span>
-            </div>
-          </div>
-        `
-      : nothing;
-
-    const errorCard = this.restoreError
-      ? html`
-          <div class="card">
-            <div class="feedback" role="alert">${this.restoreError}</div>
-            <div class="actions">
-              <button ?disabled=${this.restoring.length > 0} @click=${async () => await this.retryRestoreAsync()}>
-                Restore again
-              </button>
-            </div>
-          </div>
-        `
-      : nothing;
-
+    const restoringCard = this.renderRestoringCard();
+    const errorCard = this.renderRestoreErrorCard();
     if (this.issues.length === 0) return html`${restoringCard}${errorCard}`;
 
     const removable = this.removable.length;
@@ -357,30 +335,85 @@ export class DependencyIssues extends LitElement {
     return html`
       ${restoringCard}${errorCard}
       <div class="card">
-        <button class="header" aria-expanded=${this.expanded} @click=${() => { this.expanded = !this.expanded; }}>
-          <span class="codicon ${this.expanded ? "codicon-chevron-down" : "codicon-chevron-right"}"></span>
-          <span>${this.issues.length} direct reference${this.issues.length === 1 ? "" : "s"} also arrive${this.issues.length === 1 ? "s" : ""} transitively</span>
-          <span class="spacer"></span>
-          <span class="count">${removable} removable${pinned > 0 ? ` · ${pinned} pinned` : ""}</span>
-        </button>
-        ${this.expanded
-          ? html`
-              ${this.issues.map((issue) => this.renderIssue(issue))}
-              ${removable > 0
-                ? html`<div class="actions">
-                    <button ?disabled=${this.busy} @click=${async () => await this.removeAllAsync()}>
-                      Remove all safe references
-                    </button>
-                  </div>`
-                : nothing}
-            `
-          : nothing}
-        ${this.feedback ? html`<div class="feedback" role="status">${this.feedback}</div>` : nothing}
-        ${this.skipped > 0 && this.expanded
-          ? html`<div class="feedback">${this.skipped} project${this.skipped === 1 ? "" : "s"} not restored yet — restore to include them.</div>`
-          : nothing}
+        ${this.renderHeader(removable, pinned)}
+        ${this.renderBody(removable)}
+        ${this.renderFeedback()}
+        ${this.renderSkippedNote()}
       </div>
     `;
+  }
+
+  private renderRestoringCard(): unknown {
+    if (this.restoring.length === 0) return nothing;
+    const count = this.restoring.length;
+    const noun = count === 1 ? "project" : "projects";
+    return html`
+      <div class="card" role="status">
+        <div class="header">
+          <span class="codicon codicon-loading codicon-modifier-spin"></span>
+          <span>Restoring ${count} ${noun} to complete the analysis…</span>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderRestoreErrorCard(): unknown {
+    if (!this.restoreError) return nothing;
+    return html`
+      <div class="card">
+        <div class="feedback" role="alert">${this.restoreError}</div>
+        <div class="actions">
+          <button ?disabled=${this.restoring.length > 0} @click=${async () => await this.retryRestoreAsync()}>
+            Restore again
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderHeader(removable: number, pinned: number): unknown {
+    const count = this.issues.length;
+    const noun = count === 1 ? "direct reference also arrives" : "direct references also arrive";
+    const pinnedNote = pinned > 0 ? ` · ${pinned} pinned` : "";
+    const chevron = this.expanded ? "codicon-chevron-down" : "codicon-chevron-right";
+    return html`
+      <button class="header" aria-expanded=${this.expanded} @click=${() => { this.expanded = !this.expanded; }}>
+        <span class="codicon ${chevron}"></span>
+        <span>${count} ${noun} transitively</span>
+        <span class="spacer"></span>
+        <span class="count">${removable} removable${pinnedNote}</span>
+      </button>
+    `;
+  }
+
+  private renderBody(removable: number): unknown {
+    if (!this.expanded) return nothing;
+    return html`
+      ${this.issues.map((issue) => this.renderIssue(issue))}
+      ${this.renderRemoveAllAction(removable)}
+    `;
+  }
+
+  private renderRemoveAllAction(removable: number): unknown {
+    if (removable === 0) return nothing;
+    return html`
+      <div class="actions">
+        <button ?disabled=${this.busy} @click=${async () => await this.removeAllAsync()}>
+          Remove all safe references
+        </button>
+      </div>
+    `;
+  }
+
+  private renderFeedback(): unknown {
+    if (!this.feedback) return nothing;
+    return html`<div class="feedback" role="status">${this.feedback}</div>`;
+  }
+
+  private renderSkippedNote(): unknown {
+    if (!this.expanded || this.skipped === 0) return nothing;
+    const noun = this.skipped === 1 ? "project" : "projects";
+    return html`<div class="feedback">${this.skipped} ${noun} not restored yet — restore to include them.</div>`;
   }
 }
 

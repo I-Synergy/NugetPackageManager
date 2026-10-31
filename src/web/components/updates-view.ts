@@ -17,6 +17,101 @@ import "./actionable-error";
 
 type PlanLineKind = "direct" | "central" | "conditional" | "unresolved";
 
+/** `net11.0 → 11.0.0-rc.3`, without a template inside a template. */
+interface RequirementGroups {
+  Central: Array<{ Id: string; Version: string }>;
+  Mixed: Array<{ Id: string; ByTfm: Array<[string, string]> }>;
+  Unresolved: string[];
+}
+
+/** Splits required versions into unconditional, per-TFM and unresolvable ones. */
+function ClassifyRequirements(
+  missing: Map<string, { Id: string; ByTfm: Map<string, string> }>
+): RequirementGroups {
+  const groups: RequirementGroups = { Central: [], Mixed: [], Unresolved: [] };
+  for (const entry of missing.values()) {
+    const versions = [...new Set(entry.ByTfm.values())];
+    if (versions.length === 1 && versions[0] !== "unresolved") {
+      groups.Central.push({ Id: entry.Id, Version: versions[0]! });
+    } else if (versions.length > 1) {
+      groups.Mixed.push({ Id: entry.Id, ByTfm: [...entry.ByTfm.entries()] });
+    } else {
+      groups.Unresolved.push(entry.Id);
+    }
+  }
+  return groups;
+}
+
+/** Dependency step per package; a package nothing requires can go first. */
+function BuildStepLookup(conflicts: BatchUpdateConflict[]): (id: string) => number {
+  const orderByPackage = new Map<string, number>();
+  for (const conflict of conflicts) {
+    const id = conflict.BlockedByPackageId.toLowerCase();
+    const current = orderByPackage.get(id);
+    const next = conflict.Order ?? 0;
+    orderByPackage.set(id, current === undefined ? next : Math.min(current, next));
+  }
+  return (id: string): number => orderByPackage.get(id.toLowerCase()) ?? 0;
+}
+
+function BuildPlanSteps(
+  additions: OutdatedPackageViewModel[],
+  requirements: RequirementGroups,
+  stepOf: (id: string) => number
+): Array<[number, Array<{ Text: string; Kind: PlanLineKind }>]> {
+  const steps = new Map<number, Array<{ Text: string; Kind: PlanLineKind }>>();
+  const addLine = (order: number, text: string, kind: PlanLineKind): void => {
+    const existing = steps.get(order) ?? [];
+    existing.push({ Text: text, Kind: kind });
+    steps.set(order, existing);
+  };
+
+  for (const addition of additions) {
+    addLine(stepOf(addition.Id), `${addition.Id} → ${addition.LatestVersion}`, "direct");
+  }
+  for (const entry of requirements.Central) {
+    addLine(stepOf(entry.Id), `${entry.Id} → ${entry.Version}`, "central");
+  }
+  for (const entry of requirements.Mixed) {
+    addLine(stepOf(entry.Id), `${entry.Id}: ${entry.ByTfm.map(FormatTfmVersion).join(", ")}`, "conditional");
+  }
+  for (const id of requirements.Unresolved) {
+    addLine(0, `${id}: no resolvable version`, "unresolved");
+  }
+
+  return [...steps.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+/** A package required at different versions per TFM becomes conditional groups. */
+function BuildConditionalUpdates(
+  mixed: RequirementGroups["Mixed"]
+): Array<{ PackageId: string; Version: string; Condition: string }> {
+  return mixed.flatMap((entry) =>
+    entry.ByTfm
+      .filter(([tfm]) => tfm !== "all")
+      .map(([tfm, version]) => ({
+        PackageId: entry.Id,
+        Version: version,
+        Condition: `'$(TargetFramework)' == '${tfm}'`,
+      }))
+  );
+}
+
+function FormatPlanText(orderedSteps: Array<[number, Array<{ Text: string; Kind: PlanLineKind }>]>): string[] {
+  return [
+    "Apply in this order (dependencies first):",
+    ...orderedSteps.flatMap(([order, lines]) => [
+      `Step ${order + 1}:`,
+      ...lines.map((line) => `  [${line.Kind}] ${line.Text}`),
+    ]),
+    "",
+  ];
+}
+
+function FormatTfmVersion(entry: readonly [string, string]): string {
+  return `${entry[0]} → ${entry[1]}`;
+}
+
 /** Fallback when the host could not classify the failure. */
 function ActionableFailure(message: string): DotnetFailureInfo {
   return {
@@ -854,90 +949,21 @@ export class UpdatesView extends LitElement {
     if (depth <= 0) return null;
 
     const { additions, missing } = this.collectRequiredUpdates(conflicts, packages);
-
-    // Classify every requirement: a single unconditional PackageVersion can only
-    // serve versions that agree across target frameworks.
-    const central: Array<{ Id: string; Version: string }> = [];
-    const mixed: Array<{ Id: string; ByTfm: Array<[string, string]> }> = [];
-    const unresolved: string[] = [];
-
-    for (const entry of missing.values()) {
-      const versions = [...new Set(entry.ByTfm.values())];
-      if (versions.length === 1 && versions[0] !== "unresolved") {
-        central.push({ Id: entry.Id, Version: versions[0]! });
-      } else if (versions.length > 1) {
-        mixed.push({ Id: entry.Id, ByTfm: [...entry.ByTfm.entries()] });
-      } else {
-        unresolved.push(entry.Id);
-      }
-    }
-
-    // Which step each package belongs to (the host orders them so dependencies
-    // move first); a package that nothing requires can go first.
-    const orderByPackage = new Map<string, number>();
-    for (const conflict of conflicts) {
-      const id = conflict.BlockedByPackageId.toLowerCase();
-      const current = orderByPackage.get(id);
-      const next = conflict.Order ?? 0;
-      orderByPackage.set(id, current === undefined ? next : Math.min(current, next));
-    }
-    const stepOf = (id: string): number => orderByPackage.get(id.toLowerCase()) ?? 0;
-
-    const steps = new Map<number, Array<{ Text: string; Kind: PlanLineKind }>>();
-    const addStepLine = (order: number, text: string, kind: PlanLineKind): void => {
-      const existing = steps.get(order) ?? [];
-      existing.push({ Text: text, Kind: kind });
-      steps.set(order, existing);
-    };
-    for (const addition of additions) {
-      addStepLine(stepOf(addition.Id), `${addition.Id} → ${addition.LatestVersion}`, "direct");
-    }
-    for (const entry of central) {
-      addStepLine(stepOf(entry.Id), `${entry.Id} → ${entry.Version}`, "central");
-    }
-    for (const entry of mixed) {
-      addStepLine(
-        stepOf(entry.Id),
-        `${entry.Id}: ${entry.ByTfm.map(([tfm, version]) => `${tfm} → ${version}`).join(", ")}`,
-        "conditional"
-      );
-    }
-    for (const id of unresolved) {
-      addStepLine(0, `${id}: no resolvable version`, "unresolved");
-    }
-    const orderedSteps = [...steps.entries()].sort((a, b) => a[0] - b[0]);
-    // A package required at different versions per TFM is expressible as
-    // conditional groups, so it no longer blocks the plan.
-    const conditionalUpdates = mixed.flatMap((entry) =>
-      entry.ByTfm
-        .filter(([tfm]) => tfm !== "all")
-        .map(([tfm, version]) => ({
-          PackageId: entry.Id,
-          Version: version,
-          Condition: `'$(TargetFramework)' == '${tfm}'`,
-        }))
-    );
-    const blocked = unresolved.length > 0;
+    const requirements = ClassifyRequirements(missing);
+    const orderedSteps = BuildPlanSteps(additions, requirements, BuildStepLookup(conflicts));
+    const conditionalUpdates = BuildConditionalUpdates(requirements.Mixed);
 
     this.updatePlan = {
-      Blocked: blocked,
+      Blocked: requirements.Unresolved.length > 0,
       Steps: orderedSteps.map(([order, lines]) => ({ Order: order, Lines: lines })),
     };
+    const planLines = FormatPlanText(orderedSteps);
 
-    const planLines = [
-      "Apply in this order (dependencies first):",
-      ...orderedSteps.flatMap(([order, lines]) => [
-        `Step ${order + 1}:`,
-        ...lines.map((line) => `  [${line.Kind}] ${line.Text}`),
-      ]),
-      "",
-    ];
-
-
-    if (
-      unresolved.length > 0 ||
-      (additions.length === 0 && central.length === 0 && conditionalUpdates.length === 0)
-    ) {
+    const nothingToApply =
+      additions.length === 0 &&
+      requirements.Central.length === 0 &&
+      conditionalUpdates.length === 0;
+    if (requirements.Unresolved.length > 0 || nothingToApply) {
       this.planDialogShown = true;
       await hostApi.showConfirmationAsync({
         Message: `${conflicts.length} conflict(s) cannot be resolved automatically — nothing was changed.`,
@@ -961,31 +987,43 @@ export class UpdatesView extends LitElement {
       return null;
     }
 
-    if (central.length > 0 || conditionalUpdates.length > 0) {
-      const raised = await hostApi.updateCentralVersionsAsync({
-        ProjectPaths: this.projectPaths,
-        Updates: [
-          ...central.map((entry) => ({ PackageId: entry.Id, Version: entry.Version })),
-          ...conditionalUpdates,
-        ],
-      });
-      if (!raised.ok) {
-        this.statusText = `Could not raise central versions: ${raised.error}`;
-        return null;
-      }
-      const applied = raised.value.Applied.length;
-      this.statusText = `Raised ${applied} central version${applied === 1 ? "" : "s"}${
-        raised.value.Skipped.length > 0
-          ? ` (${raised.value.Skipped.length} not found in Directory.Packages.props)`
-          : ""
-      }`;
-      if (applied === 0 && additions.length === 0) return null;
+    if (requirements.Central.length > 0 || conditionalUpdates.length > 0) {
+      const raised = await this.raiseCentralVersionsAsync(requirements.Central, conditionalUpdates);
+      if (raised === null) return null;
+      if (raised === 0 && additions.length === 0) return null;
     }
 
     if (additions.length > 0) {
       this.statusText = `Including ${additions.length} required update${additions.length === 1 ? "" : "s"}…`;
     }
     return await this.preflightAsync([...packages, ...additions], depth - 1);
+  }
+
+  /** Writes central raises and reports how many entries were applied, or `null` on failure. */
+  private async raiseCentralVersionsAsync(
+    central: Array<{ Id: string; Version: string }>,
+    conditional: Array<{ PackageId: string; Version: string; Condition: string }>
+  ): Promise<number | null> {
+    const raised = await hostApi.updateCentralVersionsAsync({
+      ProjectPaths: this.projectPaths,
+      Updates: [
+        ...central.map((entry) => ({ PackageId: entry.Id, Version: entry.Version })),
+        ...conditional,
+      ],
+    });
+    if (!raised.ok) {
+      this.statusText = `Could not raise central versions: ${raised.error}`;
+      return null;
+    }
+
+    const applied = raised.value.Applied.length;
+    const versionWord = applied === 1 ? "version" : "versions";
+    const skippedNote =
+      raised.value.Skipped.length > 0
+        ? ` (${raised.value.Skipped.length} not found in Directory.Packages.props)`
+        : "";
+    this.statusText = `Raised ${applied} central ${versionWord}${skippedNote}`;
+    return applied;
   }
 
   private async updatePackagesSequentiallyAsync(

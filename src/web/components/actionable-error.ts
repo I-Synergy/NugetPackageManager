@@ -3,6 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import codicon from "@/web/styles/codicon.css";
 import { hostApi } from "@/web/registrations";
 import type { DotnetFailureInfo, RestoreConflictInfo } from "@/common/rpc/types";
+import { StripTrailingPunctuation } from "@/common/text";
 
 /**
  * Shows a failed package operation as cause + remedy instead of a wall of
@@ -143,11 +144,38 @@ export class ActionableError extends LitElement {
 ${failure.Hint}
 ${failure.Detail}`;
     const urls = [...text.matchAll(/https?:\/\/[^\s)"']+/g)]
-      .map((match) => match[0].replace(/[.,;]+$/, ""))
+      .map((match) => StripTrailingPunctuation(match[0]))
       .filter((url) => !url.includes("aka.ms"));
     return [...new Set(urls)]
       .slice(0, 3)
       .map((url) => ({ Url: url, Label: url.includes("/advisories/") ? "Open advisory" : "Open link" }));
+  }
+
+  /** Pin actions for the fixable conflicts, or nothing when there are none. */
+  private renderConflictActions(): unknown {
+    if (this.fixableConflicts.length === 0) return nothing;
+    return html`
+      <div class="conflicts">
+        ${this.fixableConflicts.map((conflict) => this.renderPinAction(conflict))}
+        ${this.renderConflictFeedback()}
+      </div>
+    `;
+  }
+
+  private renderPinAction(conflict: RestoreConflictInfo): unknown {
+    return html`
+      <div class="conflict-actions">
+        <button
+          ?disabled=${this.conflictBusy}
+          @click=${async () => await this.pinConflictAsync(conflict)}
+        >Pin ${conflict.PackageId} to ${conflict.SuggestedVersion}</button>
+      </div>
+    `;
+  }
+
+  private renderConflictFeedback(): unknown {
+    if (!this.conflictFeedback) return nothing;
+    return html`<span class="feedback" role="status">${this.conflictFeedback}</span>`;
   }
 
   private async openUrlAsync(url: string): Promise<void> {
@@ -224,25 +252,7 @@ ${failure.Detail}`;
         </div>
         <div class="summary">${failure.Summary}</div>
         <div class="hint">${failure.Hint}</div>
-        ${this.fixableConflicts.length > 0
-          ? html`
-              <div class="conflicts">
-                ${this.fixableConflicts.map(
-                  (conflict) => html`
-                    <div class="conflict-actions">
-                      <button
-                        ?disabled=${this.conflictBusy}
-                        @click=${async () => await this.pinConflictAsync(conflict)}
-                      >Pin ${conflict.PackageId} to ${conflict.SuggestedVersion}</button>
-                    </div>
-                  `
-                )}
-                ${this.conflictFeedback
-                  ? html`<span class="feedback" role="status">${this.conflictFeedback}</span>`
-                  : nothing}
-              </div>
-            `
-          : nothing}
+        ${this.renderConflictActions()}
         <div class="actions">
           ${this.canRetry ? html`<button @click=${this.onRetry}>Retry</button>` : nothing}
           <button @click=${async () => await this.onCopyDiagnosticsAsync()}>Copy diagnostics</button>

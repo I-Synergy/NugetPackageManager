@@ -15,7 +15,7 @@ export function RangeLowerBound(range: string): string | null {
     const inner = closedEnd ? trimmed.slice(1, -1) : trimmed.slice(1);
     const [first] = inner.split(",");
     const candidate = first?.trim();
-    return candidate ? candidate : null;
+    return candidate || null;
   }
 
   // `>= 1.2.3` / `> 1.2.3` / `1.2.3`: the version is the minimum.

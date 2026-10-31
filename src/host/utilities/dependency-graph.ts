@@ -134,44 +134,71 @@ export async function ReadAssetsAsync(projectPath: string): Promise<AssetsFile |
 
 /** Direct references that are also reachable from another direct reference. */
 export function AnalyzeAssets(assets: AssetsFile, projectPath: string): DependencyIssue[] {
+    const issues = Object.entries(assets.targets ?? {}).flatMap(([tfm, target]) =>
+        AnalyzeTarget(assets, tfm, target, projectPath)
+    );
+    return DedupeIssues(issues);
+}
+
+function AnalyzeTarget(
+    assets: AssetsFile,
+    tfm: string,
+    target: Record<string, AssetsTargetEntry>,
+    projectPath: string
+): DependencyIssue[] {
+    const graph = BuildGraph(target);
+    const directIds = DirectPackageIds(assets, tfm).filter((id) => graph.has(id));
+    if (directIds.length < 2) return [];
+
     const issues: DependencyIssue[] = [];
-    const targets = assets.targets ?? {};
-
-    for (const [tfm, target] of Object.entries(targets)) {
-        const graph = BuildGraph(target);
-        const directEntries = assets.project?.frameworks?.[tfm]?.dependencies ?? {};
-        const directIds = Object.entries(directEntries)
-            .filter(([, dependency]) => !dependency.target || dependency.target === "Package")
-            .map(([id]) => id)
-            .filter((id) => graph.has(id));
-        if (directIds.length < 2) continue;
-
-        const seen = new Set<string>();
-        for (const id of directIds) {
-            const node = graph.get(id);
-            if (!node || seen.has(id)) continue;
-
-            const chain = FindChain(graph, directIds.filter((root) => root !== id), id);
-            if (!chain) continue;
-            seen.add(id);
-
-            const required = HighestRequiredVersion(graph, id);
-            const isRedundant = required !== null && compareVersions(node.version, required) <= 0;
-
-            issues.push({
-                ProjectPath: projectPath,
-                Tfm: tfm,
-                PackageId: id,
-                DirectVersion: node.version,
-                ResolvedVersion: node.version,
-                Kind: isRedundant ? "Redundant" : "Pinned",
-                Chain: chain.join(" -> "),
-            });
-        }
+    const seen = new Set<string>();
+    for (const id of directIds) {
+        const issue = BuildIssue({ graph, directIds, id, seen, tfm, projectPath });
+        if (issue) issues.push(issue);
     }
+    return issues;
+}
 
-    // One row per package per project; prefer the Redundant verdict when both
-    // TFMs disagree about a single package.
+function DirectPackageIds(assets: AssetsFile, tfm: string): string[] {
+    const directEntries = assets.project?.frameworks?.[tfm]?.dependencies ?? {};
+    return Object.entries(directEntries)
+        .filter(([, dependency]) => !dependency.target || dependency.target === "Package")
+        .map(([id]) => id);
+}
+
+interface IssueInput {
+    graph: Map<string, GraphNode>;
+    directIds: string[];
+    id: string;
+    seen: Set<string>;
+    tfm: string;
+    projectPath: string;
+}
+
+function BuildIssue({ graph, directIds, id, seen, tfm, projectPath }: IssueInput): DependencyIssue | null {
+    const node = graph.get(id);
+    if (!node || seen.has(id)) return null;
+
+    const chain = FindChain(graph, directIds.filter((root) => root !== id), id);
+    if (!chain) return null;
+    seen.add(id);
+
+    const required = HighestRequiredVersion(graph, id);
+    const isRedundant = required !== null && compareVersions(node.version, required) <= 0;
+
+    return {
+        ProjectPath: projectPath,
+        Tfm: tfm,
+        PackageId: id,
+        DirectVersion: node.version,
+        ResolvedVersion: node.version,
+        Kind: isRedundant ? "Redundant" : "Pinned",
+        Chain: chain.join(" -> "),
+    };
+}
+
+/** One row per package per project; prefer the Redundant verdict when both TFMs disagree. */
+function DedupeIssues(issues: DependencyIssue[]): DependencyIssue[] {
     const byPackage = new Map<string, DependencyIssue>();
     for (const issue of issues) {
         const existing = byPackage.get(issue.PackageId);

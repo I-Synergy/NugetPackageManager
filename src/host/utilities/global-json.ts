@@ -83,7 +83,12 @@ function FindObjectRange(text: string, key: string): { start: number; end: numbe
     if (keyIndex < 0) return null;
     const start = text.indexOf("{", keyIndex);
     if (start < 0) return null;
+    const end = ScanObjectEnd(text, start);
+    return end === null ? null : { start, end };
+}
 
+/** Index just past the object that opens at `start`, honouring strings and escapes. */
+function ScanObjectEnd(text: string, start: number): number | null {
     let depth = 0;
     let inString = false;
     let escaped = false;
@@ -99,7 +104,7 @@ function FindObjectRange(text: string, key: string): { start: number; end: numbe
         else if (char === "{") depth++;
         else if (char === "}") {
             depth--;
-            if (depth === 0) return { start, end: index + 1 };
+            if (depth === 0) return index + 1;
         }
     }
     return null;
@@ -107,27 +112,27 @@ function FindObjectRange(text: string, key: string): { start: number; end: numbe
 
 function ReplaceStringProperty(slice: string, key: string, value: string): string {
     return slice.replace(
-        new RegExp(`("${key}"\\s*:\\s*")[^"]*(")`),
+        new RegExp(String.raw`("${key}"\s*:\s*")[^"]*(")`),
         `$1${value}$2`
     );
 }
 
 function ReadBooleanProperty(slice: string, key: string): boolean | undefined {
-    const match = new RegExp(`"${key}"\\s*:\\s*(true|false)`).exec(slice);
+    const match = new RegExp(String.raw`"${key}"\s*:\s*(true|false)`).exec(slice);
     if (!match?.[1]) return undefined;
     return match[1] === "true";
 }
 
 function SetBooleanProperty(slice: string, key: string, value: boolean): string {
-    return slice.replace(new RegExp(`("${key}"\\s*:\\s*)(true|false)`), `$1${value}`);
+    return slice.replace(new RegExp(String.raw`("${key}"\s*:\s*)(true|false)`), `$1${value}`);
 }
 
 function HasStringProperty(slice: string, key: string): boolean {
-    return new RegExp(`"${key}"\\s*:\\s*"`).test(slice);
+    return new RegExp(String.raw`"${key}"\s*:\s*"`).test(slice);
 }
 
 function ReadStringProperty(slice: string, key: string): string | undefined {
-    return new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`).exec(slice)?.[1];
+    return new RegExp(String.raw`"${key}"\s*:\s*"([^"]*)"`).exec(slice)?.[1];
 }
 
 function InsertStringPropertyAfter(
@@ -137,18 +142,18 @@ function InsertStringPropertyAfter(
     value: string
 ): string {
     return slice.replace(
-        new RegExp(`("${afterKey}"\\s*:\\s*"[^"]*")`),
+        new RegExp(String.raw`("${afterKey}"\s*:\s*"[^"]*")`),
         `$1,\n    "${key}": "${value}"`
     );
 }
 
 function RemoveStringProperty(slice: string, key: string): string {
-    const trailing = new RegExp(`\\s*"${key}"\\s*:\\s*"[^"]*"\\s*,`, "g");
+    const trailing = new RegExp(String.raw`\s*"${key}"\s*:\s*"[^"]*"\s*,`, "g");
     let result = slice;
     if (trailing.test(result)) {
         result = result.replace(trailing, "");
     } else {
-        result = result.replace(new RegExp(`,\\s*"${key}"\\s*:\\s*"[^"]*"`, "g"), "");
+        result = result.replace(new RegExp(String.raw`,\s*"${key}"\s*:\s*"[^"]*"`, "g"), "");
     }
     return result.replace(/,\s*}/g, "}");
 }
@@ -167,46 +172,53 @@ function PlanCoherence(
     toolsSlice: string | null,
     version: string
 ): CoherencePlan {
-    const notes: string[] = [];
-    const plan: CoherencePlan = { setAllowPrerelease: false, notes };
-
-    if (sdkSlice) {
-        const allowPrerelease = ReadBooleanProperty(sdkSlice, "allowPrerelease");
-        if (IsPrerelease(version) && allowPrerelease === false) {
-            plan.setAllowPrerelease = true;
-            notes.push("sdk.allowPrerelease set to true for a prerelease SDK");
-        }
-
-        // A pin selects one exact SDK: rolling forward would silently use a
-        // different one than the selector shows.
-        const rollForward = ReadStringProperty(sdkSlice, "rollForward");
-        if (rollForward !== "disable") {
-            plan.setRollForward = rollForward ?? "(unset)";
-            notes.push(
-                rollForward
-                    ? `sdk.rollForward set to disable (was ${rollForward})`
-                    : "sdk.rollForward set to disable"
-            );
-        }
-
-        const workloadVersion = ReadStringProperty(sdkSlice, "workloadVersion");
-        if (workloadVersion && FeatureBand(workloadVersion) !== FeatureBand(version)) {
-            plan.removeWorkloadVersion = workloadVersion;
-            notes.push(
-                `removed sdk.workloadVersion ${workloadVersion} (band ${FeatureBand(workloadVersion)}; the selected SDK is ${FeatureBand(version)})`
-            );
-        }
-    }
-
-    if (toolsSlice) {
-        const toolsDotnet = ReadStringProperty(toolsSlice, "dotnet");
-        if (toolsDotnet && toolsDotnet !== version) {
-            plan.updateToolsDotnet = toolsDotnet;
-            notes.push(`tools.dotnet updated from ${toolsDotnet} to ${version}`);
-        }
-    }
-
+    const plan: CoherencePlan = { setAllowPrerelease: false, notes: [] };
+    if (sdkSlice) PlanSdkCoherence(sdkSlice, version, plan);
+    if (toolsSlice) PlanToolsCoherence(toolsSlice, version, plan);
     return plan;
+}
+
+/** `sdk.*` adjustments that keep the pin consistent with the selected SDK. */
+function PlanSdkCoherence(sdkSlice: string, version: string, plan: CoherencePlan): void {
+    PlanAllowPrerelease(sdkSlice, version, plan);
+    PlanRollForward(sdkSlice, plan);
+    PlanWorkloadVersion(sdkSlice, version, plan);
+}
+
+function PlanAllowPrerelease(sdkSlice: string, version: string, plan: CoherencePlan): void {
+    const allowPrerelease = ReadBooleanProperty(sdkSlice, "allowPrerelease");
+    if (!IsPrerelease(version) || allowPrerelease !== false) return;
+    plan.setAllowPrerelease = true;
+    plan.notes.push("sdk.allowPrerelease set to true for a prerelease SDK");
+}
+
+function PlanRollForward(sdkSlice: string, plan: CoherencePlan): void {
+    // A pin selects one exact SDK: rolling forward would silently use a
+    // different one than the selector shows.
+    const rollForward = ReadStringProperty(sdkSlice, "rollForward");
+    if (rollForward === "disable") return;
+    plan.setRollForward = rollForward ?? "(unset)";
+    plan.notes.push(
+        rollForward
+            ? `sdk.rollForward set to disable (was ${rollForward})`
+            : "sdk.rollForward set to disable"
+    );
+}
+
+function PlanWorkloadVersion(sdkSlice: string, version: string, plan: CoherencePlan): void {
+    const workloadVersion = ReadStringProperty(sdkSlice, "workloadVersion");
+    if (!workloadVersion || FeatureBand(workloadVersion) === FeatureBand(version)) return;
+    plan.removeWorkloadVersion = workloadVersion;
+    plan.notes.push(
+        `removed sdk.workloadVersion ${workloadVersion} (band ${FeatureBand(workloadVersion)}; the selected SDK is ${FeatureBand(version)})`
+    );
+}
+
+function PlanToolsCoherence(toolsSlice: string, version: string, plan: CoherencePlan): void {
+    const toolsDotnet = ReadStringProperty(toolsSlice, "dotnet");
+    if (!toolsDotnet || toolsDotnet === version) return;
+    plan.updateToolsDotnet = toolsDotnet;
+    plan.notes.push(`tools.dotnet updated from ${toolsDotnet} to ${version}`);
 }
 
 function ApplyPlan(

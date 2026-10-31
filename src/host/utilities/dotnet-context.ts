@@ -40,49 +40,61 @@ const MAX_WALK_DEPTH = 32;
  * String contents are preserved.
  */
 export function StripJsonCommentsAndTrailingCommas(text: string): string {
+    return RemoveComments(text).replace(/,(\s*[}\]])/g, "$1");
+}
+
+/** Copies the text, dropping `//` and block comments; string contents are kept. */
+function RemoveComments(text: string): string {
     let result = "";
-    let inString = false;
-    let escaped = false;
-
-    for (let index = 0; index < text.length; index++) {
+    let index = 0;
+    while (index < text.length) {
         const char = text[index]!;
-        const next = text[index + 1];
-
-        if (inString) {
-            result += char;
-            if (escaped) {
-                escaped = false;
-            } else if (char === "\\") {
-                escaped = true;
-            } else if (char === '"') {
-                inString = false;
-            }
-            continue;
-        }
-
         if (char === '"') {
-            inString = true;
-            result += char;
+            const end = ScanString(text, index);
+            result += text.slice(index, end);
+            index = end;
             continue;
         }
-
-        if (char === "/" && next === "/") {
-            while (index < text.length && text[index] !== "\n") index++;
+        if (char === "/" && text[index + 1] === "/") {
+            index = SkipLineComment(text, index) + 1;
             result += "\n";
             continue;
         }
-
-        if (char === "/" && next === "*") {
-            index += 2;
-            while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index++;
-            index++;
+        if (char === "/" && text[index + 1] === "*") {
+            index = SkipBlockComment(text, index);
             continue;
         }
-
         result += char;
+        index++;
     }
+    return result;
+}
 
-    return result.replace(/,(\s*[}\]])/g, "$1");
+/** Index just past the closing quote of the string that opens at `start`. */
+function ScanString(text: string, start: number): number {
+    let index = start + 1;
+    while (index < text.length) {
+        const char = text[index];
+        if (char === "\\") {
+            index += 2;
+            continue;
+        }
+        index++;
+        if (char === '"') return index;
+    }
+    return text.length;
+}
+
+function SkipLineComment(text: string, start: number): number {
+    let index = start;
+    while (index < text.length && text[index] !== "\n") index++;
+    return index;
+}
+
+function SkipBlockComment(text: string, start: number): number {
+    let index = start + 2;
+    while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index++;
+    return index + 2;
 }
 
 /** Parses the `sdk` section of a `global.json`. Returns `null` when unreadable. */

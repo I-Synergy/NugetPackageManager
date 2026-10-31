@@ -43,39 +43,51 @@ const SEPARATOR_RE = /^\s*-{4,}\s*$/;
 export function ParseSdkCheckOutput(output: string): SdkCheckResult {
     const sdks: SdkCheckRow[] = [];
     const runtimes: RuntimeCheckRow[] = [];
-    let section: "none" | "sdks" | "runtimes" = "none";
+    let section: SdkCheckSection = "none";
 
     for (const rawLine of output.split(/\r?\n/)) {
-        const line = rawLine.trimEnd();
-        if (!line.trim()) continue;
+        const line = rawLine.trim();
+        if (!line) continue;
 
-        if (/^\.NET SDKs:/i.test(line.trim())) {
-            section = "sdks";
+        const nextSection = SectionOf(line);
+        if (nextSection !== null) {
+            section = nextSection;
             continue;
         }
-        if (/^\.NET Runtimes:/i.test(line.trim())) {
-            section = "runtimes";
-            continue;
-        }
-        if (SEPARATOR_RE.test(line)) continue;
-        if (/^Version\s+Status$/i.test(line.trim())) continue;
-        if (/^Name\s+Version\s+Status$/i.test(line.trim())) continue;
-
-        if (section === "sdks") {
-            const match = /^\s*(\S+)\s{2,}(.+?)\s*$/.exec(line);
-            if (match?.[1] && match[2]) sdks.push({ Version: match[1], Status: match[2] });
-            continue;
-        }
-        if (section === "runtimes") {
-            const match = /^\s*(\S+)\s+(\S+)\s{2,}(.+?)\s*$/.exec(line);
-            if (match?.[1] && match[2] && match[3]) {
-                runtimes.push({ Name: match[1], Version: match[2], Status: match[3] });
-            }
-        }
+        if (IsIgnorableLine(line)) continue;
+        if (section === "sdks") AddSdkRow(sdks, line);
+        if (section === "runtimes") AddRuntimeRow(runtimes, line);
     }
 
     const usable = sdks.length > 0 || runtimes.length > 0;
     return { Sdks: sdks, Runtimes: runtimes, Unavailable: !usable, Raw: output };
+}
+
+type SdkCheckSection = "none" | "sdks" | "runtimes";
+
+/** The section a heading line opens, or `null` when the line is not a heading. */
+function SectionOf(line: string): SdkCheckSection | null {
+    if (/^\.NET SDKs:/i.test(line)) return "sdks";
+    if (/^\.NET Runtimes:/i.test(line)) return "runtimes";
+    return null;
+}
+
+/** Table furniture: separators and column headers. */
+function IsIgnorableLine(line: string): boolean {
+    if (SEPARATOR_RE.test(line)) return true;
+    if (/^Version\s+Status$/i.test(line)) return true;
+    return /^Name\s+Version\s+Status$/i.test(line);
+}
+
+function AddSdkRow(sdks: SdkCheckRow[], line: string): void {
+    const match = /^(\S+)\s{2,}(\S.*)$/.exec(line);
+    if (match?.[1] && match[2]) sdks.push({ Version: match[1], Status: match[2] });
+}
+
+function AddRuntimeRow(runtimes: RuntimeCheckRow[], line: string): void {
+    const match = /^(\S+)\s+(\S+)\s{2,}(\S.*)$/.exec(line);
+    if (!match?.[1] || !match[2] || !match[3]) return;
+    runtimes.push({ Name: match[1], Version: match[2], Status: match[3] });
 }
 
 export interface SdkCheckOptions {

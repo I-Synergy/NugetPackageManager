@@ -58,65 +58,109 @@ export interface ClosureResult {
 
 const DEFAULT_MAX_INSPECTED = 250;
 
+interface ClosureItem {
+    id: string;
+    version: string;
+    tfm: string;
+}
+
+interface ClosureState {
+    planned: Map<string, string>;
+    seen: Set<string>;
+    conflicts: ClosureConflict[];
+    inspected: number;
+    maxInspected: number;
+}
+
 export async function ComputeRequirementClosureAsync(
     input: ClosureInput
 ): Promise<ClosureResult> {
+    const planned = BuildInitialPlan(input);
+    const queue = BuildInitialQueue(input);
+    const state: ClosureState = {
+        planned,
+        seen: new Set<string>(),
+        conflicts: [],
+        inspected: 0,
+        maxInspected: input.MaxInspected ?? DEFAULT_MAX_INSPECTED,
+    };
+
+    while (queue.length > 0 && state.inspected < state.maxInspected) {
+        const item = queue.shift()!;
+        await InspectItemAsync(input, item, queue, state);
+    }
+
+    return { Conflicts: state.conflicts, Planned: planned };
+}
+
+/** The graph as planned: what is installed, overlaid with the selection. */
+function BuildInitialPlan(input: ClosureInput): Map<string, string> {
     const planned = new Map(input.Effective);
     for (const selected of input.Selected) {
         planned.set(selected.Id.toLowerCase(), selected.Version);
     }
+    return planned;
+}
 
-    const queue: Array<{ id: string; version: string; tfm: string }> = [];
+function BuildInitialQueue(input: ClosureInput): ClosureItem[] {
+    const queue: ClosureItem[] = [];
     for (const selected of input.Selected) {
         for (const tfm of input.Tfms) {
             queue.push({ id: selected.Id, version: selected.Version, tfm });
         }
     }
+    return queue;
+}
 
-    const seen = new Set<string>();
-    const conflicts: ClosureConflict[] = [];
-    const maxInspected = input.MaxInspected ?? DEFAULT_MAX_INSPECTED;
-    let inspected = 0;
+async function InspectItemAsync(
+    input: ClosureInput,
+    item: ClosureItem,
+    queue: ClosureItem[],
+    state: ClosureState
+): Promise<void> {
+    const key = `${item.id.toLowerCase()}@${item.version}|${item.tfm}`;
+    if (state.seen.has(key)) return;
+    state.seen.add(key);
+    state.inspected++;
 
-    while (queue.length > 0 && inspected < maxInspected) {
-        const item = queue.shift()!;
-        const key = `${item.id.toLowerCase()}@${item.version}|${item.tfm}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        inspected++;
+    const dependencies = await input.GetDependencies(item.id, item.version, item.tfm);
+    if (!dependencies) return;
+    for (const dependency of dependencies) {
+        VisitDependency(input, item, dependency, queue, state);
+    }
+}
 
-        const dependencies = await input.GetDependencies(item.id, item.version, item.tfm);
-        if (!dependencies) continue;
+function VisitDependency(
+    input: ClosureInput,
+    item: ClosureItem,
+    dependency: { Id: string; Range: string },
+    queue: ClosureItem[],
+    state: ClosureState
+): void {
+    const dependencyId = dependency.Id.toLowerCase();
+    const resolved = state.planned.get(dependencyId);
+    if (resolved && satisfiesVersionRange(resolved, dependency.Range)) return;
 
-        for (const dependency of dependencies) {
-            const dependencyId = dependency.Id.toLowerCase();
-            const resolved = planned.get(dependencyId);
-            if (resolved && satisfiesVersionRange(resolved, dependency.Range)) continue;
+    const requiredVersion = RangeLowerBound(dependency.Range);
+    if (!requiredVersion) return;
 
-            const requiredVersion = RangeLowerBound(dependency.Range);
-            if (!requiredVersion) continue;
-
-            const constrained = input.IsConstrained ? input.IsConstrained(dependency.Id, item.tfm) : true;
-            if (constrained) {
-                conflicts.push({
-                    PackageId: dependency.Id,
-                    RequiredBy: item.id,
-                    RequiredByVersion: item.version,
-                    Range: dependency.Range,
-                    RequiredVersion: requiredVersion,
-                    Tfm: item.tfm,
-                });
-            }
-
-            const current = planned.get(dependencyId);
-            if (!current || compareVersions(requiredVersion, current) > 0) {
-                planned.set(dependencyId, requiredVersion);
-            }
-            queue.push({ id: dependency.Id, version: requiredVersion, tfm: item.tfm });
-        }
+    const constrained = input.IsConstrained ? input.IsConstrained(dependency.Id, item.tfm) : true;
+    if (constrained) {
+        state.conflicts.push({
+            PackageId: dependency.Id,
+            RequiredBy: item.id,
+            RequiredByVersion: item.version,
+            Range: dependency.Range,
+            RequiredVersion: requiredVersion,
+            Tfm: item.tfm,
+        });
     }
 
-    return { Conflicts: conflicts, Planned: planned };
+    const current = state.planned.get(dependencyId);
+    if (!current || compareVersions(requiredVersion, current) > 0) {
+        state.planned.set(dependencyId, requiredVersion);
+    }
+    queue.push({ id: dependency.Id, version: requiredVersion, tfm: item.tfm });
 }
 
 export interface RequirementOrder {
