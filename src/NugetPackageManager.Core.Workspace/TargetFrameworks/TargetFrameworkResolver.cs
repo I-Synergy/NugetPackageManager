@@ -29,6 +29,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
     private const int MaxCacheEntries = 500;
     private const string DotnetExecutableName = "dotnet";
     private static readonly TimeSpan evaluationTimeout = TimeSpan.FromSeconds(60);
+    private static readonly string[] frameworkPropertyNames = ["TargetFrameworks", "TargetFramework"];
 
     private readonly SemaphoreSlim evaluationSlots = new(16, 16);
     private readonly Dictionary<string, CacheEntry> cache = [];
@@ -276,8 +277,40 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         }
     }
 
-    /// <summary>Reads the <c>Property = value</c> lines <c>-getProperty</c> prints.</summary>
+    /// <summary>Reads the target frameworks from <c>-getProperty</c> output.</summary>
     internal static List<string> ParseFrameworks(string output)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+
+        // .NET 9+ answers `-getProperty` with JSON; older SDKs print `Property = value` lines.
+        return Normalize(output.TrimStart().StartsWith('{')
+            ? ReadFrameworksFromJson(output)
+            : ReadFrameworksFromLines(output));
+    }
+
+    private static List<string> ReadFrameworksFromJson(string output)
+    {
+        var results = new List<string>();
+
+        using var document = JsonDocument.Parse(output);
+        if (!document.RootElement.TryGetProperty("Properties", out var properties)
+            || properties.ValueKind != JsonValueKind.Object)
+        {
+            return results;
+        }
+
+        foreach (var name in frameworkPropertyNames)
+        {
+            if (properties.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+            {
+                results.AddRange((value.GetString() ?? string.Empty).Split(';'));
+            }
+        }
+
+        return results;
+    }
+
+    private static List<string> ReadFrameworksFromLines(string output)
     {
         var results = new List<string>();
 
@@ -304,7 +337,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
             }
         }
 
-        return Normalize(results);
+        return results;
     }
 
     private static TargetFrameworkInfo WithOverrides(TargetFrameworkInfo info, IReadOnlyList<string> overrides)
