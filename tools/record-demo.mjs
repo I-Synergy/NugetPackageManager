@@ -134,11 +134,16 @@ await record(encoder, page, 2000);
 await clickTab(page, 'Vulnerabilities');
 await record(encoder, page, 2000);
 
-// ── Scene 11: Cleanup tab ────────────────────────────────────────────────────
+// ── Scene 11: Toolchain tab — SDK selection and health ──────────────────────
+console.log('  scene: Toolchain');
+await clickTab(page, 'Toolchain');
+await record(encoder, page, 2000);
+
+// ── Scene 12: Cleanup tab ────────────────────────────────────────────────────
 await clickTab(page, 'Cleanup');
 await record(encoder, page, 2000);
 
-// ── Scene 12: Back to Browse ─────────────────────────────────────────────────
+// ── Scene 13: Back to Browse ─────────────────────────────────────────────────
 await clickTab(page, 'Browse');
 await waitForNoSpinner(page);
 await hold(encoder, page, 1500);
