@@ -1,6 +1,6 @@
 # Plan: SonarCloud PR 48 remediation
 
-Status: IN PROGRESS (2026-11-02)
+Status: IMPLEMENTED (2026-11-02) — see `.ai/completed/sonar-pr48-remediation.md`.
 
 ## Findings (9)
 

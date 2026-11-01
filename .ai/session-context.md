@@ -74,6 +74,11 @@ non-CPM `PackageReference`) are now evaluated instead of read as literal text.
   `WorkspaceHandlers` invalidates the evaluator cache after every CPM write.
 - **Tests:** Core.Workspace 145, Core.Tests 89, Core.NuGet.Tests 39; `npm test` 370; E2E 4/4
   (including a real `Directory.Build.props` variable edit); `npm run quality` PASS.
+- **SonarCloud:** the 9 PR #48 findings (shadowed `Stamp`, cognitive complexity in
+  `ParsePreprocessed`/`ApplyBoundary`/`ResolvePropertyEditAsync`/`AddressedOccurrences`, the
+  8-parameter writer overload, a non-readonly field and a repeated literal) are fixed; a second
+  pass cleared the 7 findings the refactor itself introduced. The PR analysis now reports zero
+  open issues.
 - **Known follow-up:** `WorkspaceModelService.cpmCache` (parsed raw map per props file) is still
   not invalidated after a literal write — pre-existing, unchanged by this slice.
 
