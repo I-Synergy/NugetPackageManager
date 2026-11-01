@@ -48,7 +48,7 @@
 - Non-CPM `dotnet add` calls inside a transactional batch now pass `--no-restore`; exactly one `dotnet restore` covers the batch.
 - A failed restore is attributed back to batch rows (`attributeRestoreConflicts` → `BatchUpdateResponse.ConflictingPackages`); the tab offers "Retry without …" once.
 - `TaskExecutor.ExecuteCommandAsync` accepts an `onProgress` callback; `restoreProjectsInternalAsync` forwards per-project `dotnet` stages, which the batch maps into its 80–95 % band.
-- `BatchUpdateResponse.Cancelled` + `onStarted(jobId)` in `src/web/jobs.ts` back a **Cancel** button in the Updates progress banner (`cancelJobAsync`), which rolls back.
+- `BatchUpdateResponse.Cancelled` + `onStarted(jobId)` in `src/NugetPackageManager.VSCode.Webview/jobs.ts` back a **Cancel** button in the Updates progress banner (`cancelJobAsync`), which rolls back.
 - Cancel is wired into every job-triggering UI: `project-row` (busy row), `consolidate-view` (per-card), `cleanup-view`, and `packages-view` "remove from all projects" (stops the per-project loop). Each runner reports cancellation with a message saying what was rolled back or left applied.
 - Tests: **434 passing**; `npm run esbuild`, `npm run lint`, `npm run test-compile` clean.
 - Version bumped 2.1.0 → **2.2.0** (package.json/package-lock, CHANGELOG, RELEASE_NOTES);
@@ -57,10 +57,10 @@
 ### Completed: every long mutation is a host job (2026-10-28)
 - Plan: `.ai/plans/mutation-jobs-project-consolidate-cleanup.md`; progress: `.ai/completed/mutation-jobs-project-consolidate-cleanup.md`
 - Builds on the detach fix: `updateProjectAsync`, `consolidatePackagesAsync` and `cleanupUnusedPackagesAsync` no longer hold a request open for the length of a repo-wide write/restore, so a slow run neither times out nor loses its result.
-- `src/host/utilities/operation-jobs.ts` replaces `batch-update-jobs.ts`: a generic `JobRegistry<T>` (bounded retention, running jobs never pruned, explicit cancel wins over the abort failure) plus `OperationJobs` for `batchUpdate`, `projectUpdate`, `consolidate` and `cleanup`.
+- `src/NugetPackageManager.VSCode.Host/utilities/operation-jobs.ts` replaces `batch-update-jobs.ts`: a generic `JobRegistry<T>` (bounded retention, running jobs never pruned, explicit cancel wins over the abort failure) plus `OperationJobs` for `batchUpdate`, `projectUpdate`, `consolidate` and `cleanup`.
 - RPC surface is now `startBatchUpdateAsync` / `startProjectUpdateAsync` / `startConsolidateAsync` / `startCleanupAsync` → `{ JobId }`, `getJobAsync` → a `GetJobResponse` union discriminated by `Kind`, and `cancelJobAsync`. The legacy single-call RPCs remain and delegate to the same implementations.
 - Host implementations moved to `runBatchUpdateAsync`, `runProjectUpdateAsync`, `runConsolidateAsync`, `runCleanupAsync` with stage/percent reporting.
-- `src/web/jobs.ts` adds `waitForJobAsync` (poll 250 ms, optional `AbortSignal`, no stray timers) and typed runners; `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view` use them.
+- `src/NugetPackageManager.VSCode.Webview/jobs.ts` adds `waitForJobAsync` (poll 250 ms, optional `AbortSignal`, no stray timers) and typed runners; `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view` use them.
 - Tests: **421 passing**; `npm run esbuild`, `npm run lint`, `npm run test-compile` clean.
 - Not converted: `restoreProjectsAsync` (never writes versions; only its result can be lost) and `getOutdatedPackagesAsync` (already uses `ScanProgress` + `ScanId`).
 
@@ -78,7 +78,7 @@
 - Plan: `.ai/plans/prerelease-badge-and-scan-progress.md`; progress: `.ai/completed/prerelease-badge-and-scan-progress.md`
 - Root cause of the stale badge: `UpdatePackagesFiltersAsync` never refreshed the update count on a Prerelease change. Only a mounted `updates-view` reported `count-changed`, and no scan ever called `updateBadgeAsync` for the Activity Bar badge.
 - `packages-view` now clears the count immediately (`…` in the tab badge), re-scans when no Updates tab is mounted, and keeps the tree badge in sync through a new `badge-changed` event (count + blocked count).
-- New `ScanId` on `GetOutdatedPackagesRequest` + `getOutdatedScanProgressAsync` RPC backed by `src/host/utilities/scan-progress.ts`. The host reports resolving sources → parsing projects (n/N) → latest versions (n/N) → dependency constraints (n/N) → preparing results.
+- New `ScanId` on `GetOutdatedPackagesRequest` + `getOutdatedScanProgressAsync` RPC backed by `src/NugetPackageManager.VSCode.Host/utilities/scan-progress.ts`. The host reports resolving sources → parsing projects (n/N) → latest versions (n/N) → dependency constraints (n/N) → preparing results.
 - `updates-view` polls progress every 400 ms while loading and renders the stage, item counts and a determinate progress bar; polling stops on completion, error, cancellation and disconnect.
 - Tests: **395 passing**; `npm run esbuild` and `npm run lint` clean.
 - Version bumped 2.0.0 → **2.1.0**; `CHANGELOG.md` and `RELEASE_NOTES.md` updated; local test build at
@@ -169,7 +169,7 @@
 - `CpmResolver`: `ResolveVersions` (one version line per condition), `UpdateCpmVersionsAsync` (single read/write per props file, verification before write, group/all/first scopes)
 - `host-api.ts`: Installed/Updates/Consolidate/Vulnerabilities now share per-TFM resolution; aligned latest version per TFM major; deduplicated NuGet lookups; `packageSourceMapping`-aware source selection; bin/obj exclusions
 - UI: per-TFM rows and framework filter, **Update all TFMs**, explicit latest-overall action, TFM badges for vulnerabilities
-- Tests: 277 passing; fixtures in `src/host/utilities/__fixtures__/cpm` and `.../projects`; host integration covers net10/net11/multi/platform projects
+- Tests: 277 passing; fixtures in `src/NugetPackageManager.VSCode.Host/utilities/__fixtures__/cpm` and `.../projects`; host integration covers net10/net11/multi/platform projects
 - Verified against `D:\Projects\I-Synergy\I-Synergy.Framework`: 69 unconditional + 2×31 conditional groups, net10 → 10.0.13, net11 → 11.0.0-rc.2, scoped writes only touch the addressed `ItemGroup`
 - Screenshots: `docs/images/screenshot-{installed,updates}-frameworks.png`, `...-net9.png`
 
@@ -221,7 +221,7 @@
 ## Established Patterns
 
 ### RPC Pattern
-All host↔webview calls use typed RPC (`src/common/rpc/types.ts`). Every method returns `Result<T>`. Add new methods by:
+All host↔webview calls use typed RPC (`src/NugetPackageManager.VSCode.Common/rpc/types.ts`). Every method returns `Result<T>`. Add new methods by:
 1. Adding request/response types to `types.ts`
 2. Adding the method signature to `HostAPI` interface in `types.ts`
 3. Implementing in `host-api.ts`
@@ -250,8 +250,8 @@ Used for anonymous usage telemetry (operation counts, error rates). Connects to 
 ### ESLint Version
 Staying on ESLint 9.x — ESLint 10 has breaking config changes that aren't worth migrating now.
 
-### src/common/ Isomorphism
-Files in `src/common/` are bundled into BOTH the host (Node.js) and web (browser) bundles. They must not import Node.js-only modules. Use `globalThis.crypto` instead of `import { randomBytes } from "crypto"`.
+### src/NugetPackageManager.VSCode.Common/ Isomorphism
+Files in `src/NugetPackageManager.VSCode.Common/` are bundled into BOTH the host (Node.js) and web (browser) bundles. They must not import Node.js-only modules. Use `globalThis.crypto` instead of `import { randomBytes } from "crypto"`.
 
 ---
 
@@ -288,6 +288,6 @@ was completed on 2026-10-24 and archived to `.ai/completed/`.
 
 1. **If releasing**: Update `package.json` version, run `npm run package`, verify `.vsix`
 2. **If adding RPC method**: types.ts → host-api.ts → webview call
-3. **If editing `src/common/`**: Ensure no Node.js-only imports (test with `npm run esbuild`)
+3. **If editing `src/NugetPackageManager.VSCode.Common/`**: Ensure no Node.js-only imports (test with `npm run esbuild`)
 4. **Before any commit**: `npm run quality` (build + lint with SonarJS + type check + tests + audit; 0 errors required)
 5. **After changing AI context**: `bash .ai/tests/run-all-tests.sh` (11 suites) and regenerate junctions with `python .ai/scripts/sync-skills.py`

@@ -5,6 +5,9 @@
 .playwright-mcp/**
 out/**
 src/**
+tests/**
+Directory.Build.props
+NugetPackageManager.slnx
 docs/raw/**
 docs/images/social-preview.png
 docs/*.md
@@ -24,6 +27,8 @@ scripts/**
 **/tsconfig.test.json
 **/*.map
 **/*.ts
+dist/core/**/*.pdb
+dist/core/**/*.xml
 **/node_modules/**
 **/package-lock.json
 **/yarn.lock

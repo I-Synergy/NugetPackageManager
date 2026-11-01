@@ -12,7 +12,13 @@ coverage/
 .scannerwork/
 
 # Fixture build output generated while resolving target frameworks in tests
-src/host/utilities/__fixtures__/**/obj/
+tests/__fixtures__/**/obj/
+
+# C# project build output
+src/**/bin/
+src/**/obj/
+tests/**/bin/
+tests/**/obj/
 
 # AI template scratch and generated artifacts
 __pycache__/
@@ -27,3 +33,9 @@ __pycache__/
 .github/agents/
 .reasonix/skills/
 .reasonix/agents/
+
+# AI Workspace Manager: resolver cache and platform junctions
+.github/instructions/
+.github/prompts/
+.claude/commands/
+.claude/instructions/

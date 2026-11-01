@@ -3,7 +3,7 @@ const { defineConfig } = require('@vscode/test-cli');
 module.exports = defineConfig([
 	{
 		label: 'unitTests',
-		files: 'out/**/*.test.js',
+		files: 'out/tests/**/*.test.js',
 		version: 'stable',
 		workspaceFolder: '.',
 		mocha: {
@@ -13,7 +13,7 @@ module.exports = defineConfig([
 		},
 		coverage: {
 			include: ['src/**/*.ts'],
-			exclude: ['src/**/*.test.ts', 'src/**/__fixtures__/**'],
+			exclude: ['src/**/__fixtures__/**'],
 			includeAll: true
 		},
 		launchArgs: [

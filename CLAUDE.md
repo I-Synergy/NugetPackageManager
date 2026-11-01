@@ -21,8 +21,8 @@ npm run package          # Package extension (.vsix) into releases/
 ```
 
 Build produces two separate bundles via `esbuild.js`:
-- **Host**: `src/host/extension.ts` → `dist/extension.js` (Node.js, CommonJS)
-- **Web**: `src/web/main.ts` → `dist/web.js` (Browser, ESM)
+- **Host**: `src/NugetPackageManager.VSCode.Host/extension.ts` → `dist/extension.js` (Node.js, CommonJS)
+- **Web**: `src/NugetPackageManager.VSCode.Webview/main.ts` → `dist/web.js` (Browser, ESM)
 
 ## Environment
 
@@ -48,22 +48,22 @@ VSCode Extension Host (Node.js)          VSCode Webview (Browser)
 
 All host-web communication uses a **typed RPC layer** with `Result<T>`:
 
-- **HostAPI interface** in `src/common/rpc/types.ts` — defines all methods with typed request/response
+- **HostAPI interface** in `src/NugetPackageManager.VSCode.Common/rpc/types.ts` — defines all methods with typed request/response
 - **Result<T>**: Discriminated union `{ ok: true, value: T } | { ok: false, error: string }`
 - **Wire protocol**: `{ type: 'rpc-request', id, method, params }` / `{ type: 'rpc-response', id, result }`
-- **RpcHost** (`src/common/rpc/rpc-host.ts`): Host-side dispatcher mapping method names to HostAPI
-- **RpcClient** (`src/common/rpc/rpc-client.ts`): Client-side ES Proxy, 120s request deadline, Promise-based. The deadline only stops the webview waiting — it never cancels host work (cancellation is explicit, via `AbortSignal`).
-- **Host implementation** in `src/host/host-api.ts`: All handlers as functions returning `Result<T>`
+- **RpcHost** (`src/NugetPackageManager.VSCode.Common/rpc/rpc-host.ts`): Host-side dispatcher mapping method names to HostAPI
+- **RpcClient** (`src/NugetPackageManager.VSCode.Common/rpc/rpc-client.ts`): Client-side ES Proxy, 120s request deadline, Promise-based. The deadline only stops the webview waiting — it never cancels host work (cancellation is explicit, via `AbortSignal`).
+- **Host implementation** in `src/NugetPackageManager.VSCode.Host/host-api.ts`: All handlers as functions returning `Result<T>`
 
 ### Real-time Progress
 
 Long mutations run as host-side jobs, not as request/response calls:
 
-- `OperationJobs` (`src/host/utilities/operation-jobs.ts`) — a `JobRegistry` per kind (`batchUpdate`, `projectUpdate`, `consolidate`, `cleanup`) holding state, stage, percent and the terminal `Result`; running jobs are never pruned.
+- `OperationJobs` (`src/NugetPackageManager.VSCode.Host/utilities/operation-jobs.ts`) — a `JobRegistry` per kind (`batchUpdate`, `projectUpdate`, `consolidate`, `cleanup`) holding state, stage, percent and the terminal `Result`; running jobs are never pruned.
 - `startBatchUpdateAsync` / `startProjectUpdateAsync` / `startConsolidateAsync` / `startCleanupAsync` return `{ JobId }` immediately; `getJobAsync` polls state and `cancelJobAsync` aborts explicitly. The old single-call RPCs remain and delegate to the same implementations.
-- `src/web/jobs.ts` — `waitForJobAsync` plus typed runners (`runProjectUpdateJobAsync`, …) used by `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view`. Each runner takes `onStarted(jobId)` so the owning component can offer `cancelJobAsync` while it runs.
+- `src/NugetPackageManager.VSCode.Webview/jobs.ts` — `waitForJobAsync` plus typed runners (`runProjectUpdateJobAsync`, …) used by `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view`. Each runner takes `onStarted(jobId)` so the owning component can offer `cancelJobAsync` while it runs.
 - `checkBatchUpdateAsync` preflights a selection against `project.assets.json` + NuGet metadata (`findBatchUpdateConflictsAsync`) before any write; `BatchUpdateResponse.ConflictingPackages` maps a failed restore's diagnostics back to the offending rows.
-- `TaskExecutor.ExecuteCommandAsync` in `src/host/utilities/task-executor.ts` still spawns dotnet and parses stdout into progress stages (`Map<string, OperationProgress>`), exposed through `getOperationProgressAsync`.
+- `TaskExecutor.ExecuteCommandAsync` in `src/NugetPackageManager.VSCode.Host/utilities/task-executor.ts` still spawns dotnet and parses stdout into progress stages (`Map<string, OperationProgress>`), exposed through `getOperationProgressAsync`.
 
 ### Web Components (Lit)
 
@@ -72,20 +72,20 @@ UI uses **Lit** (LitElement) with native HTML elements styled via VS Code CSS va
 - `@customElement("tag-name")` decorator for components
 - `@state()` for internal reactive state, `@property()` for external attributes
 - Template syntax: `html` literals, `.prop` (property binding), `?attr` (boolean attr), `@event`
-- Module-level singletons in `src/web/registrations.ts`: `hostApi`, `router`, `configuration`
+- Module-level singletons in `src/NugetPackageManager.VSCode.Webview/registrations.ts`: `hostApi`, `router`, `configuration`
 
 ### Key Components
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| `packages-view` | `src/web/components/packages-view.ts` | Main 3-pane layout (project tree / packages / details) with Split.js |
-| `project-tree` | `src/web/components/project-tree.ts` | Checkbox tree for project selection |
-| `updates-view` | `src/web/components/updates-view.ts` | Outdated packages tab — auto-refreshes on tab switch |
-| `consolidate-view` | `src/web/components/consolidate-view.ts` | Version inconsistency finder — auto-refreshes on tab switch |
-| `vulnerabilities-view` | `src/web/components/vulnerabilities-view.ts` | CVE scanning — auto-refreshes on tab switch |
-| `search-bar` | `src/web/components/search-bar.ts` | Search + source + prerelease filter |
-| `package-row` | `src/web/components/package-row.ts` | Package list item |
-| `project-row` | `src/web/components/project-row.ts` | Per-project install/update/uninstall UI with progress bar |
+| `packages-view` | `src/NugetPackageManager.VSCode.Webview/components/packages-view.ts` | Main 3-pane layout (project tree / packages / details) with Split.js |
+| `project-tree` | `src/NugetPackageManager.VSCode.Webview/components/project-tree.ts` | Checkbox tree for project selection |
+| `updates-view` | `src/NugetPackageManager.VSCode.Webview/components/updates-view.ts` | Outdated packages tab — auto-refreshes on tab switch |
+| `consolidate-view` | `src/NugetPackageManager.VSCode.Webview/components/consolidate-view.ts` | Version inconsistency finder — auto-refreshes on tab switch |
+| `vulnerabilities-view` | `src/NugetPackageManager.VSCode.Webview/components/vulnerabilities-view.ts` | CVE scanning — auto-refreshes on tab switch |
+| `search-bar` | `src/NugetPackageManager.VSCode.Webview/components/search-bar.ts` | Search + source + prerelease filter |
+| `package-row` | `src/NugetPackageManager.VSCode.Webview/components/package-row.ts` | Package list item |
+| `project-row` | `src/NugetPackageManager.VSCode.Webview/components/project-row.ts` | Per-project install/update/uninstall UI with progress bar |
 
 ### Path Alias
 
@@ -136,7 +136,7 @@ These apply to this project specifically:
 | Area | Rule |
 |------|------|
 | Nonce generation | Use `globalThis.crypto.randomUUID()` — works in both Node.js 19+ and browser |
-| Path validation | Use `src/host/utilities/workspace-path.ts` (resolve + realpath + relative check) before passing any path to dotnet or a file write |
+| Path validation | Use `src/NugetPackageManager.VSCode.Host/utilities/workspace-path.ts` (resolve + realpath + relative check) before passing any path to dotnet or a file write |
 | URL validation | Validate source URLs with `new URL()` before passing to dotnet CLI |
 | Script execution | Password scripts require a trusted workspace and a path under the machine-scoped `passwordScriptAllowlist`; only `.ps1`, `.bat`, `.cmd`, `.sh` are accepted |
 | Sort/filter input | Validate against explicit allowlist before use |

@@ -1,0 +1,14 @@
+<Project>
+
+  <!--
+    Test data must not inherit the repository's central package versions.
+
+    The root `Directory.Packages.props` is discovered by every project below it, including the
+    `__fixtures__` trees. This file is nearer, so it wins the walk: fixtures keep whatever CPM
+    behaviour they declare themselves, and a fixture that declares nothing sees no CPM at all.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+</Project>

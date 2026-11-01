@@ -109,12 +109,12 @@ The extension has two runtime contexts connected by `postMessage`:
 
 ```text
 VS Code Extension Host (Node.js)          Webview (browser, Lit)
-  src/host/extension.ts                     src/web/main.ts
+  src/NugetPackageManager.VSCode.Host/extension.ts                     src/NugetPackageManager.VSCode.Webview/main.ts
   RpcHost <──────── typed RPC ────────────> RpcClient
   host-api.ts / TaskExecutor / NuGet API    components/*
 ```
 
-Every host method implements `HostAPI` in `src/common/rpc/types.ts` and returns
+Every host method implements `HostAPI` in `src/NugetPackageManager.VSCode.Common/rpc/types.ts` and returns
 `Result<T>` (`{ ok: true; value: T } | { ok: false; error: string }`) using `ok()` / `fail()`.
 Never throw across the RPC boundary. Add a method by updating `types.ts` → `host-api.ts` →
 the webview call site.
@@ -134,7 +134,7 @@ the webview call site.
 - `strict: true`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
 - Avoid `any`; prefix unused variables with `_`.
 - `@/*` resolves to `src/*` (configured in `tsconfig.json`, resolved by esbuild).
-- Files in `src/common/` are bundled into both host and web bundles: **no Node.js-only
+- Files in `src/NugetPackageManager.VSCode.Common/` are bundled into both host and web bundles: **no Node.js-only
   imports** there. Use `globalThis.crypto`, not `node:crypto`.
 
 ### 4. Lit components
@@ -151,7 +151,7 @@ the webview call site.
 | Area | Rule |
 |---|---|
 | Nonces | `globalThis.crypto.randomUUID()` — works in Node.js 19+ and browsers |
-| Project paths | Validate with `src/host/utilities/workspace-path.ts` (resolve + realpath + relative) before dotnet or file writes |
+| Project paths | Validate with `src/NugetPackageManager.VSCode.Host/utilities/workspace-path.ts` (resolve + realpath + relative) before dotnet or file writes |
 | Source URLs | Validate with `new URL()` before passing to the dotnet CLI |
 | Script execution | Password scripts require a trusted workspace and a machine-scoped allowlist; only `.ps1`, `.bat`, `.cmd`, `.sh` are accepted |
 | Sort/filter input | Validate against an explicit allowlist |
@@ -160,8 +160,8 @@ the webview call site.
 ### 6. Central Package Management and multi-framework versions
 
 - CPM lives in `Directory.Packages.props`; the resolver is
-  `src/host/utilities/cpm-resolver.ts` and condition parsing is
-  `src/host/utilities/cpm-condition.ts`.
+  `src/NugetPackageManager.VSCode.Host/utilities/cpm-resolver.ts` and condition parsing is
+  `src/NugetPackageManager.VSCode.Host/utilities/cpm-condition.ts`.
 - Conditional `<ItemGroup Condition="...">` groups are evaluated **per project target
   framework** (`dotnet msbuild -getProperty`), never by first-match and never by ignoring
   negation.
@@ -181,7 +181,7 @@ A CPM package with framework-scoped versions intentionally has no single
 package versions or framework filters:
 
 - Search for empty-version guards and review every match:
-  `grep -rn "CpmResolutions\|!pkg\.Version\|pkg\.Version" src/host src/web`
+  `grep -rn "CpmResolutions\|!pkg\.Version\|pkg\.Version" src/NugetPackageManager.VSCode.Host src/NugetPackageManager.VSCode.Webview`
 - Never `continue`/skip a package merely because `pkg.Version` is empty. If
   `pkg.CpmResolutions` exists, process every resolution (`Tfm`, `Condition`, `Version`)
   independently.
@@ -198,8 +198,8 @@ package versions or framework filters:
 - Tests use the VS Code Test CLI + Mocha (TDD `suite`/`test`) + Sinon + Node `assert`.
 - Test files: `src/**/*.test.ts`. Mock `vscode`, axios, and the file system with Sinon.
 - Web tests mock `hostApi` via `Object.defineProperty(registrations, "hostApi", ...)`.
-- CPM fixtures live in `src/host/utilities/__fixtures__/cpm` and
-  `src/host/utilities/__fixtures__/projects`; keep them representative of real grouped
+- CPM fixtures live in `tests/__fixtures__/cpm` and
+  `tests/__fixtures__/projects`; keep them representative of real grouped
   `Directory.Packages.props` layouts.
 
 ### 8. Commits and documentation

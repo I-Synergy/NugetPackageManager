@@ -56,7 +56,7 @@ export default tseslint.config(
 
   // Lit's render() legitimately returns either `nothing` or a TemplateResult.
   {
-    files: ["src/web/components/**/*.ts"],
+    files: ["src/NugetPackageManager.VSCode.Webview/components/**/*.ts"],
     rules: {
       "sonarjs/function-return-type": "off",
     },
