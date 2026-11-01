@@ -89,6 +89,22 @@ Compiler-API audit of `src/` + `tests/` (368 async declarations) plus a C# scan:
 
 Details: `.ai/completed/async-audit-remediation.md`.
 
+## SonarCloud PR 46 remediation (2026-11-01)
+
+All 61 open findings from the PR analysis are addressed (S1192 ×14, S6444 ×12, S3776 ×6,
+S3358 ×5, S8970 ×5, S2325 ×3, S2583/S2589 ×3, S1118 ×2, S3267 ×2, and singles of S2094, S3218,
+S4158, S4036 ×2, S6966, plus four TS/JS findings).
+
+Shape changes worth knowing: `ConditionNode` → `IConditionNode` (an interface, renamed for
+CA1715); `CpmPropsReader` collectors return lists instead of pushing through an `Action`;
+`TargetFrameworkResolver` runs the same `dotnet` muxer the sidecar was started with instead of
+a PATH lookup; `tools/quality-gate.mjs` resolves `dotnet` from known install roots.
+`dotnet build`/`dotnet test` (204), `npm run typecheck`, `npm run lint`, `npm test` (358) and
+`npm run quality` (8/8) all pass. The issue count itself can only be re-confirmed by the next
+CI analysis.
+
+Details: `.ai/completed/sonar-pr46-remediation.md`.
+
 ---
 
 ## Project Overview
