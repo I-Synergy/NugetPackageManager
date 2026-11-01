@@ -1128,22 +1128,12 @@ export class UpdatesView extends LitElement {
 
 
   private toPackageViewModel(pkg: OutdatedPackageViewModel): PackageViewModel {
-    const vm = new PackageViewModel({
-      Id: pkg.Id,
-      Name: pkg.Id,
-      IconUrl: "",
-      Authors: [],
-      Description: "",
-      LicenseUrl: "",
-      ProjectUrl: "",
-      TotalDownloads: null,
-      Verified: null,
-      Version: pkg.LatestVersion,
-      InstalledVersion: pkg.InstalledVersion,
-      Versions: [],
-      Tags: [],
-      Registration: "",
-    }, "Detailed");
+    // The scan already knows the popularity metadata, so the row does not need a refetch.
+    const vm = PackageViewModel.Empty(pkg.Id, "Detailed");
+    vm.Version = pkg.LatestVersion;
+    vm.InstalledVersion = pkg.InstalledVersion;
+    vm.TotalDownloads = pkg.TotalDownloads;
+    vm.Verified = pkg.Verified;
     vm.CpmFramework = pkg.CpmFramework;
     return vm;
   }

@@ -84,6 +84,9 @@ type OutdatedPackage = {
   Projects: Array<{ Name: string; Path: string; Version: string }>;
   SourceUrl: string;
   SourceName: string;
+  /** Popularity metadata from the search resource; null when the feed does not publish it. */
+  TotalDownloads?: number | null;
+  Verified?: boolean | null;
   CpmCondition?: string;   // raw XML Condition string; absent = unconditional
   CpmFramework?: string;   // resolved TFM, e.g. "net10.0"; absent = unconditional
   CpmConditionLabel?: string; // disambiguated condition label, e.g. "not net11.0"

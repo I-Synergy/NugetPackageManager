@@ -1,6 +1,6 @@
 # Fix #45 — take package metadata from the search resource (full NuGet.Protocol migration)
 
-Status: IN PROGRESS — core migration landed (commit 56f565d), branch pushed
+Status: DONE — build, tests and gate green; ready to commit
 Branch: `fix/45-package-metadata` (cut from `spike/blazor-wasm-webview`)
 Issue: https://github.com/I-Synergy/NugetPackageManager/issues/45
 
@@ -69,11 +69,11 @@ the PR body.
 - [x] P4 `Sources/ProtocolNuGetSource.cs` — `INuGetSource` over the four resources, with the search enrichment and caches
 - [x] P5 Wire `NuGetSourceProvider` + handlers; delete `HttpNuGetSource`, `PackageMapping`, `NuGetHttpClient`
 - [x] P6 `getPackageDetails` → `{ Id, Version }` (C#, RPC types, host-api, webview, DependencyHandlers)
-- [ ] P7 `OutdatedPackage` carries `TotalDownloads`/`Verified`; Updates rows render them
-- [ ] P8 One `emptyPackage` factory; `Id`/`Name` semantics fixed
+- [x] P7 `OutdatedPackage` carries `TotalDownloads`/`Verified`; Updates rows render them
+- [x] P8 One `emptyPackage` factory; `Id`/`Name` semantics fixed
 - [~] P9 Tests: source + mapper tests done (39 pass); handler/webview tests updated mapper unit tests, source tests over a stub handler, update `PackageLookupFailureTests`
       and the mapping tests; keep `dotnet test` green
-- [ ] P10 `npm run quality`, CHANGELOG/README note, commit with `Fixes #45`
+- [x] P10 `npm run quality` (8/8), CHANGELOG/README note, commit with `Fixes #45`
 
 ## Risks
 
@@ -97,8 +97,12 @@ tests (`ProtocolNuGetSourceTests` — 39 pass, including "feed without search �
 currently fails the solution build (IDE0005/CS1591 on `Constants.cs`), so only
 `Core.NuGet.Tests` could be run. Re-run `dotnet test` + `npm run quality` once that lands.
 
-Remaining: P7 (carry the metadata into `OutdatedPackage` so **Updates list rows** are right
-without a refetch), P8 (one empty-package factory, settle `Id` vs `Name`), then P10.
+P7 is done: `getLatestVersionAsync` keeps the search payload's `TotalDownloads`/`Verified`,
+`OutdatedPackage` carries them, and the Updates rows render without a refetch.
+P8 is done: `PackageViewModel.Empty(id, status)` is the only empty-package factory (three copies
+removed); `Id` is the package id again, so no leaf-URL overload remains.
+Also landed in this tree: the owner's `NugetPackageManager.Common` refactor (shared constants,
+`Enumerations/` with one enum per file).
 
 ## Verification
 

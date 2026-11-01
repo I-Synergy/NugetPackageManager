@@ -1,6 +1,29 @@
 export type PackageViewModelStatus = "Detailed" | "MissingDetails" | "Error";
 
 export class PackageViewModel {
+  /**
+   * The one placeholder for a package the UI knows only by id (Installed / Updates rows).
+   * Metadata is unknown until a lookup fills it in, so it is null rather than 0/false.
+   */
+  static Empty(id: string, status: PackageViewModelStatus = "MissingDetails"): PackageViewModel {
+    return new PackageViewModel({
+      Id: id,
+      Name: id,
+      Authors: [],
+      Description: "",
+      IconUrl: "",
+      LicenseUrl: "",
+      ProjectUrl: "",
+      Registration: "",
+      TotalDownloads: null,
+      Verified: null,
+      InstalledVersion: "",
+      Version: "",
+      Versions: [],
+      Tags: [],
+    }, status);
+  }
+
   Id: string;
   Name: string;
   Model: Package;

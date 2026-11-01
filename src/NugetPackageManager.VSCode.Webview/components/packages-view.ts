@@ -586,22 +586,7 @@ export class PackagesView extends LitElement {
       return;
     }
 
-    const pkg = new PackageViewModel({
-      Id: packageId,
-      Name: packageId,
-      IconUrl: "",
-      Authors: [],
-      Description: "",
-      LicenseUrl: "",
-      ProjectUrl: "",
-      TotalDownloads: null,
-      Verified: null,
-      Version: "",
-      InstalledVersion: "",
-      Versions: [],
-      Tags: [],
-      Registration: "",
-    }, "MissingDetails");
+    const pkg = PackageViewModel.Empty(packageId);
     if (sourceUrl) pkg.SourceUrl = sourceUrl;
     await this.SelectPackageAsync(pkg);
   }
@@ -757,31 +742,9 @@ export class PackagesView extends LitElement {
     );
 
     this.projectsPackages = Object.entries(grouped).map(([_key, data]) => {
-      const pkg = new PackageViewModel(
-        {
-          Id: data.id,
-          Name: data.id,
-          IconUrl: "",
-          Versions: data.versions.map((x) => ({
-            Id: "",
-            Version: x,
-          })),
-          InstalledVersion:
-            data.versions.length > 1
-              ? "Multiple"
-              : (data.versions[0] ?? ""),
-          Version: "",
-          Description: "",
-          LicenseUrl: "",
-          ProjectUrl: "",
-          Verified: null,
-          TotalDownloads: null,
-          Tags: [],
-          Registration: "",
-          Authors: [],
-        },
-        "MissingDetails"
-      );
+      const pkg = PackageViewModel.Empty(data.id);
+      pkg.Versions = [...data.versions];
+      pkg.InstalledVersion = data.versions.length > 1 ? "Multiple" : (data.versions[0] ?? "");
       pkg.AllowsUpdate = data.allowsUpdate;
       pkg.CpmFramework = data.framework;
       return pkg;

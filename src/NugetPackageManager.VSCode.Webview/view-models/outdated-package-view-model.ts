@@ -6,6 +6,8 @@ export class OutdatedPackageViewModel {
   Projects: Array<{ Name: string; Path: string; Version: string }>;
   SourceUrl: string;
   SourceName: string;
+  TotalDownloads: number | null;
+  Verified: boolean | null;
   CpmCondition: string;
   CpmFramework: string;
   CpmConditionLabel: string;
@@ -22,6 +24,8 @@ export class OutdatedPackageViewModel {
     this.Projects = model.Projects;
     this.SourceUrl = model.SourceUrl;
     this.SourceName = model.SourceName;
+    this.TotalDownloads = model.TotalDownloads ?? null;
+    this.Verified = model.Verified ?? null;
     this.CpmCondition = model.CpmCondition ?? "";
     this.CpmFramework = model.CpmFramework ?? "";
     this.CpmConditionLabel = model.CpmConditionLabel ?? "";

@@ -1520,16 +1520,13 @@ suite('HostAPI Tests', () => {
             const api = {
                 GetPackageAsync: async (packageId: string) => ({
                     data: {
-                        Versions: Object.entries(byLowerId.get(packageId.toLowerCase()) ?? {}).map(([version]) => ({
-                            Id: `${packageId}@${version}`,
+                        Versions: Object.keys(byLowerId.get(packageId.toLowerCase()) ?? {}).map((version) => ({
                             Version: version,
                         })),
                     },
                 }),
-                GetPackageDetailsAsync: async (versionId: string) => {
-                    const at = versionId.lastIndexOf('@');
-                    const packageId = versionId.slice(0, at);
-                    const version = versionId.slice(at + 1);
+                // Metadata is addressed by id + version, not by a registration leaf URL.
+                GetPackageDetailsAsync: async (packageId: string, version: string) => {
                     return {
                         data: {
                             dependencies: {

@@ -1980,6 +1980,8 @@ function buildOutdatedEntry(
     Projects: candidate.installed.projects,
     SourceUrl: candidate.latest.sourceUrl,
     SourceName: candidate.latest.sourceName,
+    TotalDownloads: candidate.latest.totalDownloads ?? null,
+    Verified: candidate.latest.verified ?? null,
   };
   const installed = candidate.installed;
   if (installed.condition) entry.CpmCondition = installed.condition;
@@ -3738,6 +3740,10 @@ async function getLatestVersionAsync(
           versions: sorted,
           sourceUrl: source.Url,
           sourceName: source.Name,
+          // The search payload already carries these; keep them instead of dropping them and
+          // re-fetching on click.
+          totalDownloads: pkg.TotalDownloads,
+          verified: pkg.Verified,
         };
       }
     } catch {
@@ -3794,7 +3800,15 @@ type InstalledPackageGroup = {
 type OutdatedCandidate = {
   packageId: string;
   installed: InstalledPackageEntry;
-  latest: { version: string; versions: string[]; sourceUrl: string; sourceName: string };
+  latest: {
+    version: string;
+    versions: string[];
+    sourceUrl: string;
+    sourceName: string;
+    /** Absent on candidates restored from a persisted scan (older shape). */
+    totalDownloads?: number | null;
+    verified?: boolean | null;
+  };
   available: string[];
 };
 

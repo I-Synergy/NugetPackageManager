@@ -7,6 +7,27 @@ import { ok } from '@/common/rpc/result';
 import type { GetPackageDetailsRequest, GetPackageDetailsResponse, HostAPI } from '@/common/rpc/types';
 import type { Result } from '@/common/rpc/result';
 
+
+/** A complete view model: the component renders every field, so a partial stub crashes. */
+function testPackage(): PackageViewModel {
+    return new PackageViewModel({
+        Id: 'Contoso.Sdk',
+        Name: 'Contoso.Sdk',
+        Authors: [],
+        Description: 'A test package',
+        IconUrl: '',
+        LicenseUrl: '',
+        ProjectUrl: '',
+        Registration: '',
+        TotalDownloads: null,
+        Verified: null,
+        InstalledVersion: '',
+        Version: '1.0.0',
+        Versions: [{ Version: '1.0.0' }, { Version: '0.9.0' }],
+        Tags: [],
+    });
+}
+
 suite('PackageDetails Component', () => {
     let packageDetails: PackageDetailsComponent;
     let getPackageDetailsStub: (req: GetPackageDetailsRequest) => Promise<Result<GetPackageDetailsResponse>>;
@@ -104,7 +125,7 @@ suite('PackageDetails Component', () => {
             return Promise.resolve(ok({ Package: null as unknown as PackageDetails }));
         };
 
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
 
         packageDetails.selectedVersion = '1.0.0';
         packageDetails.source = 'https://source.url';
@@ -123,7 +144,7 @@ suite('PackageDetails Component', () => {
         };
 
         packageDetails.source = 'https://source.url';
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
         packageDetails.selectedVersion = '1.0.0';
         // Wait for async operations
         await new Promise(resolve => setTimeout(resolve, 0));
@@ -139,18 +160,18 @@ suite('PackageDetails Component', () => {
         };
 
         const source = 'https://source.url';
-        const versionUrl = 'https://package.url/v1';
         const passwordScript = 'script.sh';
 
         packageDetails.passwordScriptPath = passwordScript;
         packageDetails.source = source;
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
         packageDetails.selectedVersion = '1.0.0';
 
         await new Promise(resolve => setTimeout(resolve, 0));
 
         assert.deepStrictEqual(capturedRequest, {
-            PackageVersionUrl: versionUrl,
+            Id: 'Contoso.Sdk',
+            Version: '1.0.0',
             Url: source,
             PasswordScriptPath: passwordScript
         });
@@ -173,7 +194,7 @@ suite('PackageDetails Component', () => {
         getPackageDetailsStub = () => promise;
 
         packageDetails.source = 'src';
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
         packageDetails.selectedVersion = '1.0.0';
 
         // Wait for Lit update cycle so updated() triggers reloadDependencies()
@@ -209,7 +230,7 @@ suite('PackageDetails Component', () => {
         packageDetails.source = 'src';
 
         // First change — trigger separate Lit update cycle
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
         packageDetails.selectedVersion = '1.0.0';
         await packageDetails.updateComplete;
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -255,7 +276,7 @@ suite('PackageDetails Component', () => {
         }));
 
         packageDetails.source = 'https://source.url';
-        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.package = testPackage();
         packageDetails.selectedVersion = '1.0.0';
         // Wait for the reactive task to settle under the current jsdom runtime.
         for (let attempt = 0; attempt < 20 && !packageDetails.packageDetails; attempt++) {

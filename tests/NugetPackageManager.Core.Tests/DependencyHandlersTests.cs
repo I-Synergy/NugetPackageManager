@@ -77,7 +77,7 @@ public class DependencyHandlersTests
             .Setup(x => x.GetPackageAsync("A", true, It.IsAny<CancellationToken>()))
             .ReturnsAsync(Package("2.0.0"));
         source
-            .Setup(x => x.GetPackageDetailsAsync("leaf/A/2.0.0", It.IsAny<CancellationToken>()))
+            .Setup(x => x.GetPackageDetailsAsync("A", "2.0.0", It.IsAny<CancellationToken>()))
             .ReturnsAsync(Details(("net10.0", [new PackageDependency
             {
                 Package = "B",
@@ -99,7 +99,7 @@ public class DependencyHandlersTests
         Assert.AreEqual("2.0.0", document.RootElement.GetProperty("Planned").GetProperty("b").GetString());
 
         source.Verify(
-            x => x.GetPackageDetailsAsync("leaf/A/2.0.0", It.IsAny<CancellationToken>()),
+            x => x.GetPackageDetailsAsync("A", "2.0.0", It.IsAny<CancellationToken>()),
             Times.Once);
     }
 
@@ -113,7 +113,7 @@ public class DependencyHandlersTests
             .Setup(x => x.GetPackageAsync("A", true, It.IsAny<CancellationToken>()))
             .ReturnsAsync(Package("2.0.0"));
         source
-            .Setup(x => x.GetPackageDetailsAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Setup(x => x.GetPackageDetailsAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(Details(
                 ("net9.0", [new PackageDependency { Package = "Old", VersionRange = "[9.0.0, )" }]),
                 ("net10.0-windows", [new PackageDependency { Package = "C", VersionRange = "[2.0.0, )" }])));
@@ -184,11 +184,7 @@ public class DependencyHandlersTests
         Verified = false,
         InstalledVersion = string.Empty,
         Version = versions[^1],
-        Versions = [.. versions.Select(version => new PackageVersionRef
-        {
-            Version = version,
-            Id = $"leaf/A/{version}",
-        })],
+        Versions = [.. versions.Select(version => new PackageVersionRef(version))],
         Tags = [],
     };
 

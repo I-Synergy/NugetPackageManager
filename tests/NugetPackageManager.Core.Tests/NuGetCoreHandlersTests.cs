@@ -168,7 +168,7 @@ public class NuGetCoreHandlersTests
             Verified = true,
             InstalledVersion = string.Empty,
             Version = "13.0.3",
-            Versions = [new PackageVersionRef { Version = "13.0.3", Id = "leaf" }],
+            Versions = [new PackageVersionRef("13.0.3")],
             Tags = ["json"],
         };
         var source = new Mock<INuGetSource>();
