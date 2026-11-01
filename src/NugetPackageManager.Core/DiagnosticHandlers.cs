@@ -8,7 +8,7 @@ namespace NugetPackageManager.Core;
 /// Classifies raw <c>dotnet</c> output the host captured. The host still owns spawning,
 /// progress streaming and cancellation; it only sends the text and the context.
 /// </summary>
-public sealed class DiagnosticHandlers
+public static class DiagnosticHandlers
 {
     public static Dictionary<string, RpcHandler> Create() =>
         new(StringComparer.Ordinal)
@@ -25,7 +25,7 @@ public sealed class DiagnosticHandlers
         var output = ReadOptionalString(parameters, "output");
         if (output is null)
         {
-            throw new RpcException("invalidParams", "'output' is required.");
+            throw new RpcException(RpcException.InvalidParams, "'output' is required.");
         }
 
         var context = new DotnetFailureContext(

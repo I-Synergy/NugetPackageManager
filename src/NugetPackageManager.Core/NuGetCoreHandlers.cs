@@ -55,7 +55,7 @@ public sealed class NuGetCoreHandlers
         var id = ReadString(parameters, "id");
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException("invalidParams", "'id' is required.");
+            throw new RpcException(RpcException.InvalidParams, "'id' is required.");
         }
 
         var prerelease = ReadBoolean(parameters, "prerelease");
@@ -73,7 +73,7 @@ public sealed class NuGetCoreHandlers
         var packageVersionUrl = ReadString(parameters, "packageVersionUrl");
         if (string.IsNullOrWhiteSpace(packageVersionUrl))
         {
-            throw new RpcException("invalidParams", "'packageVersionUrl' is required.");
+            throw new RpcException(RpcException.InvalidParams, "'packageVersionUrl' is required.");
         }
 
         return await GuardAsync(() => sources
@@ -134,13 +134,13 @@ public sealed class NuGetCoreHandlers
             || !parameters.TryGetProperty("source", out var source)
             || source.ValueKind != JsonValueKind.Object)
         {
-            throw new RpcException("invalidParams", "A 'source' object is required.");
+            throw new RpcException(RpcException.InvalidParams, "A 'source' object is required.");
         }
 
         var url = ReadString(source, "url");
         if (string.IsNullOrWhiteSpace(url))
         {
-            throw new RpcException("invalidParams", "source.url is required.");
+            throw new RpcException(RpcException.InvalidParams, "source.url is required.");
         }
 
         return new SourceDescriptor

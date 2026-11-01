@@ -32,7 +32,7 @@ public sealed class DependencyHandlers
             ["orderRequirements"] = HandleOrderRequirementsAsync,
         };
 
-    private Task<object?> HandleAnalyzeProjectAsync(
+    private static Task<object?> HandleAnalyzeProjectAsync(
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -41,7 +41,7 @@ public sealed class DependencyHandlers
         return Task.FromResult<object?>(AssetsGraph.AnalyzeProject(projectPath));
     }
 
-    private Task<object?> HandleGetRestoredDirectDependenciesAsync(
+    private static Task<object?> HandleGetRestoredDirectDependenciesAsync(
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -243,7 +243,7 @@ public sealed class DependencyHandlers
         [.. ReadArray(parameters, property)
             .Select(element => element.ValueKind == JsonValueKind.String ? element.GetString() : null)
             .Where(value => !string.IsNullOrEmpty(value))
-            .Select(value => value!)];
+            .OfType<string>()];
 
     private static Dictionary<string, string> ReadVersionMap(JsonElement parameters, string property)
     {
@@ -312,7 +312,7 @@ public sealed class DependencyHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException("invalidParams", $"'{property}' is required.")
+            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
             : value;
     }
 

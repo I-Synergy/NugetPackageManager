@@ -108,7 +108,6 @@ public static class RequirementClosure
         ArgumentNullException.ThrowIfNull(conflicts);
 
         var dependencies = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        var ids = new HashSet<string>(StringComparer.Ordinal);
 
         HashSet<string> Ensure(string id)
         {
@@ -119,7 +118,6 @@ public static class RequirementClosure
 
             var created = new HashSet<string>(StringComparer.Ordinal);
             dependencies[id] = created;
-            ids.Add(id);
             return created;
         }
 
@@ -154,7 +152,8 @@ public static class RequirementClosure
             return order;
         }
 
-        foreach (var id in ids)
+        // The keys are every package named by a conflict, in insertion order.
+        foreach (var id in dependencies.Keys)
         {
             Visit(id, []);
         }

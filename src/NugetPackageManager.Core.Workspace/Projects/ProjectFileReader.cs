@@ -100,7 +100,13 @@ public static class ProjectFileReader
     private static string? ChildValue(XElement parent, string localName)
     {
         var child = FindElements([parent], localName).FirstOrDefault();
-        return child is null ? null : child.Value.Trim() is { Length: > 0 } value ? value : null;
+        if (child is null)
+        {
+            return null;
+        }
+
+        var value = child.Value.Trim();
+        return value.Length > 0 ? value : null;
     }
 
     /// <summary>Descendants by local name, ignoring the MSBuild namespace.</summary>

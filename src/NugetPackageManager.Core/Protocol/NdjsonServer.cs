@@ -200,7 +200,7 @@ public sealed class NdjsonServer : IDisposable
         {
             try
             {
-                source.Cancel();
+                await source.CancelAsync().ConfigureAwait(false);
             }
             catch (ObjectDisposedException)
             {

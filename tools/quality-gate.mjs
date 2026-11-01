@@ -13,7 +13,8 @@
 // is available, so the gate still works on a machine without it.
 
 import { spawnSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..");
@@ -70,11 +71,26 @@ if (fix) {
 
 const steps = [];
 
+/**
+ * Absolute path of the `dotnet` host. Resolving it keeps the gate from executing whatever a
+ * user-writable directory on PATH happens to provide; PATH stays the last resort only.
+ */
+function resolveDotnetHost() {
+  const candidates = [
+    process.env.DOTNET_HOST_PATH,
+    isWindows ? join(process.env.ProgramFiles ?? "C:\Program Files", "dotnet", "dotnet.exe") : null,
+    isWindows ? null : "/usr/share/dotnet/dotnet",
+    isWindows ? null : "/usr/local/share/dotnet/dotnet",
+    isWindows ? null : join(homedir(), ".dotnet", "dotnet"),
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? "dotnet";
+}
+
 /** The installed .NET SDK version, or null when there is no usable one. */
 function resolveDotnetSdk() {
-  const probe = spawnSync("dotnet", ["--version"], {
+  const probe = spawnSync(resolveDotnetHost(), ["--version"], {
     cwd: ROOT,
-    shell: isWindows,
     encoding: "utf8",
   });
 

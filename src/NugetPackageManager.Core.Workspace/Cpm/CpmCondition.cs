@@ -31,7 +31,7 @@ public static partial class CpmCondition
     private static partial Regex WhitespaceRegex();
 
     /// <summary>Parses a condition; an empty condition is "always true".</summary>
-    public static ConditionNode? Parse(string? condition)
+    public static IConditionNode? Parse(string? condition)
     {
         var raw = (condition ?? string.Empty).Trim();
         if (raw.Length == 0)
@@ -40,7 +40,7 @@ public static partial class CpmCondition
         }
 
         var tokens = Tokenize(raw);
-        return tokens is null || tokens.Count == 0 ? null : new ConditionParser(tokens).Parse();
+        return tokens is null || tokens.Count == 0 ? null : new ConditionParser(tokens).ParseExpression();
     }
 
     /// <summary>
@@ -88,7 +88,7 @@ public static partial class CpmCondition
             : null;
     }
 
-    private static bool? EvaluateNode(ConditionNode node, IReadOnlyDictionary<string, string> properties)
+    private static bool? EvaluateNode(IConditionNode node, IReadOnlyDictionary<string, string> properties)
     {
         if (node is LiteralNode literal)
         {
@@ -203,12 +203,15 @@ public static partial class CpmCondition
     private static string? ResolveOperand(string value, IReadOnlyDictionary<string, string> properties)
     {
         var match = PropertyReferenceRegex().Match(value.Trim());
-        return match.Success
-            ? properties.TryGetValue(match.Groups[1].Value.Trim(), out var resolved) ? resolved : null
-            : value;
+        if (!match.Success)
+        {
+            return value;
+        }
+
+        return properties.TryGetValue(match.Groups[1].Value.Trim(), out var resolved) ? resolved : null;
     }
 
-    private static string? LabelNode(ConditionNode node)
+    private static string? LabelNode(IConditionNode node)
     {
         if (node is LiteralNode literal)
         {
@@ -238,7 +241,7 @@ public static partial class CpmCondition
         return node is CallNode call ? call.Value : null;
     }
 
-    private static string? LabelBinary(ConditionNode left, ConditionNode right, string joiner)
+    private static string? LabelBinary(IConditionNode left, IConditionNode right, string joiner)
     {
         var leftLabel = LabelNode(left);
         var rightLabel = LabelNode(right);
@@ -292,68 +295,67 @@ public static partial class CpmCondition
 
         while (index < input.Length)
         {
-            while (index < input.Length && char.IsWhiteSpace(input[index]))
-            {
-                index++;
-            }
-
+            SkipWhitespace(input, ref index);
             if (index >= input.Length)
             {
                 break;
             }
 
-            if (TryReadSymbol(input, ref index, out var symbol))
-            {
-                tokens.Add(symbol);
-                continue;
-            }
-
-            var current = input[index];
-            if (current is '\'' or '"')
-            {
-                var quoted = ReadQuoted(input, ref index, current);
-                if (quoted is null)
-                {
-                    return null;
-                }
-
-                tokens.Add(ClassifyValue(quoted));
-                continue;
-            }
-
-            if (current == '$' && index + 1 < input.Length && input[index + 1] == '(')
-            {
-                var expression = ReadPropertyExpression(input, ref index);
-                if (expression is null)
-                {
-                    return null;
-                }
-
-                tokens.Add(ClassifyPropertyExpression(expression));
-                continue;
-            }
-
-            var word = ReadWord(input, ref index);
-            if (word is null)
+            var token = ReadToken(input, ref index);
+            if (token is null)
             {
                 return null;
             }
 
-            if (string.Equals(word, "and", StringComparison.OrdinalIgnoreCase))
-            {
-                tokens.Add(new Token(TokenType.And));
-            }
-            else if (string.Equals(word, "or", StringComparison.OrdinalIgnoreCase))
-            {
-                tokens.Add(new Token(TokenType.Or));
-            }
-            else
-            {
-                tokens.Add(new Token(TokenType.Identifier, word));
-            }
+            tokens.Add(token);
         }
 
         return tokens;
+    }
+
+    private static void SkipWhitespace(string input, ref int index)
+    {
+        while (index < input.Length && char.IsWhiteSpace(input[index]))
+        {
+            index++;
+        }
+    }
+
+    /// <summary>The next token, or null when the input is malformed.</summary>
+    private static Token? ReadToken(string input, ref int index)
+    {
+        if (TryReadSymbol(input, ref index, out var symbol))
+        {
+            return symbol;
+        }
+
+        var current = input[index];
+        if (current is '\'' or '"')
+        {
+            var quoted = ReadQuoted(input, ref index, current);
+            return quoted is null ? null : ClassifyValue(quoted);
+        }
+
+        if (current == '$' && index + 1 < input.Length && input[index + 1] == '(')
+        {
+            var expression = ReadPropertyExpression(input, ref index);
+            return expression is null ? null : ClassifyPropertyExpression(expression);
+        }
+
+        var word = ReadWord(input, ref index);
+        return word is null ? null : KeywordToken(word);
+    }
+
+    private static Token KeywordToken(string word)
+    {
+        if (string.Equals(word, "and", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Token(TokenType.And);
+        }
+
+        return string.Equals(word, "or", StringComparison.OrdinalIgnoreCase)
+            ? new Token(TokenType.Or)
+            : new Token(TokenType.Identifier, word);
     }
 
     private static bool TryReadSymbol(string input, ref int index, [NotNullWhen(true)] out Token? token)
@@ -509,7 +511,7 @@ public static partial class CpmCondition
     {
         private int index;
 
-        public ConditionNode? Parse()
+        public IConditionNode? ParseExpression()
         {
             var expression = ParseOr();
             return expression is not null && index == tokens.Count ? expression : null;
@@ -517,7 +519,7 @@ public static partial class CpmCondition
 
         private Token? Peek() => index < tokens.Count ? tokens[index] : null;
 
-        private ConditionNode? ParseOr()
+        private IConditionNode? ParseOr()
         {
             var left = ParseAnd();
             if (left is null)
@@ -540,7 +542,7 @@ public static partial class CpmCondition
             return left;
         }
 
-        private ConditionNode? ParseAnd()
+        private IConditionNode? ParseAnd()
         {
             var left = ParseUnary();
             if (left is null)
@@ -563,7 +565,7 @@ public static partial class CpmCondition
             return left;
         }
 
-        private ConditionNode? ParseUnary()
+        private IConditionNode? ParseUnary()
         {
             if (Peek()?.Type == TokenType.Not)
             {
@@ -575,7 +577,7 @@ public static partial class CpmCondition
             return ParsePrimary();
         }
 
-        private ConditionNode? ParsePrimary()
+        private IConditionNode? ParsePrimary()
         {
             var token = Peek();
             if (token is null)
@@ -596,7 +598,7 @@ public static partial class CpmCondition
             return token.Type is TokenType.Property or TokenType.StringValue ? ParseValue(token) : null;
         }
 
-        private ConditionNode? ParseParenthesized()
+        private IConditionNode? ParseParenthesized()
         {
             index++;
             var expression = ParseOr();
@@ -615,7 +617,7 @@ public static partial class CpmCondition
             return new CallNode(token.Property, token.Method, token.Text);
         }
 
-        private ConditionNode? ParseValue(Token token)
+        private IConditionNode? ParseValue(Token token)
         {
             index++;
             var next = Peek();

@@ -32,6 +32,12 @@ public static partial class CpmWriter
 {
     private static readonly SemaphoreSlim fileLock = new(1, 1);
 
+    private const string ConditionAttribute = "Condition";
+    private const string VerificationFailedCode = "verificationFailed";
+
+    /// <summary>Upper bound for the pattern-based XML edits.</summary>
+    private static readonly TimeSpan regexTimeout = TimeSpan.FromSeconds(2);
+
     public static async Task UpdateVersionsAsync(
         string propsFilePath,
         IReadOnlyList<CpmVersionChange> changes,
@@ -100,23 +106,17 @@ public static partial class CpmWriter
 
             var elementPattern = new Regex(
                 $@"[ \t]*<PackageVersion\b[^>]*\bInclude\s*=\s*(""{escaped}""|'{escaped}')[^>]*(?:/>|>\s*</PackageVersion>)[ \t]*(?:\r?\n)?",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, regexTimeout);
 
-            var removed = 0;
-            var updated = elementPattern.Replace(content, _ =>
-            {
-                removed++;
-                return string.Empty;
-            });
-
-            if (removed == 0)
+            var updated = elementPattern.Replace(content, string.Empty);
+            if (string.Equals(updated, content, StringComparison.Ordinal))
             {
                 return false;
             }
 
             var remaining = new Regex(
                 $@"<PackageVersion\b[^>]*\bInclude\s*=\s*(""{escaped}""|'{escaped}')",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, regexTimeout);
 
             if (remaining.IsMatch(updated))
             {
@@ -205,7 +205,7 @@ public static partial class CpmWriter
                 block.Body,
                 packageId,
                 newVersion,
-                tag => CombineConditions(block.Condition, (Attribute(tag, "Condition") ?? string.Empty).Trim()) == condition,
+                tag => CombineConditions(block.Condition, (Attribute(tag, ConditionAttribute) ?? string.Empty).Trim()) == condition,
                 global: false);
 
             if (!result.Changed)
@@ -240,7 +240,7 @@ public static partial class CpmWriter
                 block.Body,
                 packageId,
                 newVersion,
-                tag => Attribute(tag, "Condition") is null,
+                tag => Attribute(tag, ConditionAttribute) is null,
                 global: true);
 
             if (!result.Changed)
@@ -362,14 +362,14 @@ public static partial class CpmWriter
             if (before.Count == 0)
             {
                 throw new WorkspaceException(
-                    "verificationFailed",
+                    VerificationFailedCode,
                     $"Verification failed: {packageId} missing from {propsFilePath}");
             }
 
             if (before.Count != after.Count)
             {
                 throw new WorkspaceException(
-                    "verificationFailed",
+                    VerificationFailedCode,
                     $"Verification failed: element count for {packageId} changed in {propsFilePath}");
             }
 
@@ -384,7 +384,7 @@ public static partial class CpmWriter
                 if (!string.Equals(after[index].Version, expected[index], StringComparison.Ordinal))
                 {
                     throw new WorkspaceException(
-                        "verificationFailed",
+                        VerificationFailedCode,
                         $"Verification failed for {packageId}: occurrence {index} expected {expected[index]}, got {after[index].Version} in {propsFilePath}");
                 }
             }
@@ -404,14 +404,14 @@ public static partial class CpmWriter
         {
             var condition = change.Condition
                 ?? throw new WorkspaceException(
-                    "verificationFailed",
+                    VerificationFailedCode,
                     $"Verification failed for {packageId}: a condition is required for a group-scoped update in {propsFilePath}");
 
             var index = before.FindIndex(occurrence => occurrence.Condition == condition);
             if (index < 0)
             {
                 throw new WorkspaceException(
-                    "verificationFailed",
+                    VerificationFailedCode,
                     $"Verification failed for {packageId}: Condition=\"{condition}\" produced no occurrences in {propsFilePath}");
             }
 
@@ -430,7 +430,7 @@ public static partial class CpmWriter
             if (indices.Count == 0)
             {
                 throw new WorkspaceException(
-                    "verificationFailed",
+                    VerificationFailedCode,
                     $"Verification failed for {packageId}: no unconditional occurrence in {propsFilePath}");
             }
 
@@ -464,13 +464,13 @@ public static partial class CpmWriter
         var document = System.Xml.Linq.XDocument.Parse(cpmContent);
         foreach (var group in document.Descendants().Where(element => element.Name.LocalName == "ItemGroup"))
         {
-            var groupCondition = (group.Attribute("Condition")?.Value ?? string.Empty).Trim();
+            var groupCondition = (group.Attribute(ConditionAttribute)?.Value ?? string.Empty).Trim();
 
             foreach (var element in group.Elements().Where(child => child.Name.LocalName == "PackageVersion"))
             {
                 var include = element.Attribute("Include")?.Value;
                 var version = element.Attribute("Version")?.Value;
-                var elementCondition = (element.Attribute("Condition")?.Value ?? string.Empty).Trim();
+                var elementCondition = (element.Attribute(ConditionAttribute)?.Value ?? string.Empty).Trim();
 
                 if (include is not null
                     && version is not null
@@ -487,7 +487,7 @@ public static partial class CpmWriter
     private static List<ItemGroupBlock> FindItemGroupBlocks(string content) =>
         [.. ItemGroupRegex().Matches(content)
             .Select(match => new ItemGroupBlock(
-                (Attribute(match.Groups[1].Value, "Condition") ?? string.Empty).Trim(),
+                (Attribute(match.Groups[1].Value, ConditionAttribute) ?? string.Empty).Trim(),
                 match.Index,
                 match.Index + match.Length,
                 $"<ItemGroup{match.Groups[1].Value}>",
@@ -511,12 +511,15 @@ public static partial class CpmWriter
     {
         var pattern = new Regex(
             $@"\b{Regex.Escape(name)}\s*=\s*(?:""([^""]*)""|'([^']*)')",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, regexTimeout);
 
         var match = pattern.Match(tag);
-        return match.Success
-            ? match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value
-            : null;
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        return match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
     }
 
     private static async Task<(string Content, DateTime Stamp)> ReadAsync(

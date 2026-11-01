@@ -19,6 +19,16 @@ public static partial class GlobalJson
 {
     private const int MaxWalkDepth = 32;
 
+    private const string RollForwardProperty = "rollForward";
+    private const string AllowPrereleaseProperty = "allowPrerelease";
+    private const string ToolsProperty = "tools";
+    private const string RollForwardDisabled = "disable";
+    private const string WorkloadVersionProperty = "workloadVersion";
+    private const string DotnetToolProperty = "dotnet";
+
+    /// <summary>Upper bound for the pattern-based property edits; the slices are small.</summary>
+    private static readonly TimeSpan regexTimeout = TimeSpan.FromSeconds(2);
+
     public static bool IsValidSdkVersion(string version) =>
         SdkVersion().IsMatch(version.Trim());
 
@@ -48,8 +58,8 @@ public static partial class GlobalJson
 
         return new GlobalJsonSettings(
             ReadString(sdk, "version"),
-            ReadString(sdk, "rollForward"),
-            sdk["allowPrerelease"] is JsonValue allow && allow.TryGetValue<bool>(out var flag)
+            ReadString(sdk, RollForwardProperty),
+            sdk[AllowPrereleaseProperty] is JsonValue allow && allow.TryGetValue<bool>(out var flag)
                 ? flag
                 : null);
     }
@@ -100,7 +110,7 @@ public static partial class GlobalJson
         var previousVersion = Parse(original)?.Version;
 
         var sdkRange = FindObjectRange(original, "sdk");
-        var toolsRange = FindObjectRange(original, "tools");
+        var toolsRange = FindObjectRange(original, ToolsProperty);
         var plan = PlanCoherence(
             sdkRange is null ? null : original[sdkRange.Value.Start..sdkRange.Value.End],
             toolsRange is null ? null : original[toolsRange.Value.Start..toolsRange.Value.End],
@@ -154,7 +164,7 @@ public static partial class GlobalJson
 
     private static void PlanAllowPrerelease(string sdkSlice, string version, CoherencePlan plan)
     {
-        var allowPrerelease = ReadBooleanProperty(sdkSlice, "allowPrerelease");
+        var allowPrerelease = ReadBooleanProperty(sdkSlice, AllowPrereleaseProperty);
         if (!version.Contains('-') || allowPrerelease != false)
         {
             return;
@@ -168,8 +178,8 @@ public static partial class GlobalJson
     {
         // A pin selects one exact SDK: rolling forward would silently use a different one than
         // the selector shows.
-        var rollForward = ReadStringProperty(sdkSlice, "rollForward");
-        if (rollForward == "disable")
+        var rollForward = ReadStringProperty(sdkSlice, RollForwardProperty);
+        if (rollForward == RollForwardDisabled)
         {
             return;
         }
@@ -182,7 +192,7 @@ public static partial class GlobalJson
 
     private static void PlanWorkloadVersion(string sdkSlice, string version, CoherencePlan plan)
     {
-        var workloadVersion = ReadStringProperty(sdkSlice, "workloadVersion");
+        var workloadVersion = ReadStringProperty(sdkSlice, WorkloadVersionProperty);
         if (workloadVersion is null || FeatureBand(workloadVersion) == FeatureBand(version))
         {
             return;
@@ -195,7 +205,7 @@ public static partial class GlobalJson
 
     private static void PlanToolsCoherence(string toolsSlice, string version, CoherencePlan plan)
     {
-        var toolsDotnet = ReadStringProperty(toolsSlice, "dotnet");
+        var toolsDotnet = ReadStringProperty(toolsSlice, DotnetToolProperty);
         if (toolsDotnet is null || toolsDotnet == version)
         {
             return;
@@ -218,29 +228,29 @@ public static partial class GlobalJson
                 : sdkSlice.Replace("{", $"{{\n    \"version\": \"{version}\",", StringComparison.Ordinal);
             if (plan.SetRollForward is not null)
             {
-                sdkSlice = HasStringProperty(sdkSlice, "rollForward")
-                    ? ReplaceStringProperty(sdkSlice, "rollForward", "disable")
-                    : InsertStringPropertyAfter(sdkSlice, "version", "rollForward", "disable");
+                sdkSlice = HasStringProperty(sdkSlice, RollForwardProperty)
+                    ? ReplaceStringProperty(sdkSlice, RollForwardProperty, RollForwardDisabled)
+                    : InsertStringPropertyAfter(sdkSlice, "version", RollForwardProperty, RollForwardDisabled);
             }
 
             if (plan.SetAllowPrerelease)
             {
-                sdkSlice = SetBooleanProperty(sdkSlice, "allowPrerelease", value: true);
+                sdkSlice = SetBooleanProperty(sdkSlice, AllowPrereleaseProperty, value: true);
             }
 
             if (plan.RemoveWorkloadVersion is not null)
             {
-                sdkSlice = RemoveStringProperty(sdkSlice, "workloadVersion");
+                sdkSlice = RemoveStringProperty(sdkSlice, WorkloadVersionProperty);
             }
 
             result = result[..sdkObject.Start] + sdkSlice + result[sdkObject.End..];
         }
 
-        var toolsRange = FindObjectRange(result, "tools");
+        var toolsRange = FindObjectRange(result, ToolsProperty);
         if (toolsRange is { } toolsObject && plan.UpdateToolsDotnet is not null)
         {
             var toolsSlice = result[toolsObject.Start..toolsObject.End];
-            var updated = ReplaceStringProperty(toolsSlice, "dotnet", version);
+            var updated = ReplaceStringProperty(toolsSlice, DotnetToolProperty, version);
             result = result[..toolsObject.Start] + updated + result[toolsObject.End..];
         }
 
@@ -255,26 +265,26 @@ public static partial class GlobalJson
             ? (JsonObject)existingSdk.DeepClone()
             : [];
         sdk["version"] = version;
-        if (plan.SetRollForward is not null || sdk["rollForward"] is null)
+        if (plan.SetRollForward is not null || sdk[RollForwardProperty] is null)
         {
-            sdk["rollForward"] = "disable";
+            sdk[RollForwardProperty] = RollForwardDisabled;
         }
 
         if (plan.SetAllowPrerelease)
         {
-            sdk["allowPrerelease"] = true;
+            sdk[AllowPrereleaseProperty] = true;
         }
 
         if (plan.RemoveWorkloadVersion is not null)
         {
-            sdk.Remove("workloadVersion");
+            sdk.Remove(WorkloadVersionProperty);
         }
 
         parsed["sdk"] = sdk;
 
-        if (plan.UpdateToolsDotnet is not null && parsed["tools"] is JsonObject tools)
+        if (plan.UpdateToolsDotnet is not null && parsed[ToolsProperty] is JsonObject tools)
         {
-            tools["dotnet"] = version;
+            tools[DotnetToolProperty] = version;
         }
 
         return parsed.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n";
@@ -289,24 +299,24 @@ public static partial class GlobalJson
             return false;
         }
 
-        if (ReadString(sdk, "rollForward") != "disable")
+        if (ReadString(sdk, RollForwardProperty) != RollForwardDisabled)
         {
             return false;
         }
 
         if (plan.SetAllowPrerelease
-            && !(sdk["allowPrerelease"] is JsonValue allow && allow.TryGetValue<bool>(out var flag) && flag))
+            && !(sdk[AllowPrereleaseProperty] is JsonValue allow && allow.TryGetValue<bool>(out var flag) && flag))
         {
             return false;
         }
 
-        if (plan.RemoveWorkloadVersion is not null && sdk.ContainsKey("workloadVersion"))
+        if (plan.RemoveWorkloadVersion is not null && sdk.ContainsKey(WorkloadVersionProperty))
         {
             return false;
         }
 
         return plan.UpdateToolsDotnet is null
-            || (parsed["tools"] is JsonObject tools && ReadString(tools, "dotnet") == version);
+            || (parsed[ToolsProperty] is JsonObject tools && ReadString(tools, DotnetToolProperty) == version);
     }
 
     private static JsonObject? TryParseObject(string content)
@@ -482,11 +492,20 @@ public static partial class GlobalJson
     }
 
     private static string ReplaceStringProperty(string slice, string key, string value) =>
-        Regex.Replace(slice, $"(\"{Regex.Escape(key)}\"\\s*:\\s*\")[^\"]*(\")", $"$1{value}$2");
+        Regex.Replace(
+            slice,
+            $"(\"{Regex.Escape(key)}\"\\s*:\\s*\")[^\"]*(\")",
+            $"$1{value}$2",
+            RegexOptions.None,
+            regexTimeout);
 
     private static bool? ReadBooleanProperty(string slice, string key)
     {
-        var match = Regex.Match(slice, $"\"{Regex.Escape(key)}\"\\s*:\\s*(true|false)");
+        var match = Regex.Match(
+            slice,
+            $"\"{Regex.Escape(key)}\"\\s*:\\s*(true|false)",
+            RegexOptions.None,
+            regexTimeout);
         return match.Success ? match.Groups[1].Value == "true" : null;
     }
 
@@ -494,14 +513,24 @@ public static partial class GlobalJson
         Regex.Replace(
             slice,
             $"(\"{Regex.Escape(key)}\"\\s*:\\s*)(true|false)",
-            $"$1{(value ? "true" : "false")}");
+            $"$1{(value ? "true" : "false")}",
+            RegexOptions.None,
+            regexTimeout);
 
     private static bool HasStringProperty(string slice, string key) =>
-        Regex.IsMatch(slice, $"\"{Regex.Escape(key)}\"\\s*:\\s*\"");
+        Regex.IsMatch(
+            slice,
+            $"\"{Regex.Escape(key)}\"\\s*:\\s*\"",
+            RegexOptions.None,
+            regexTimeout);
 
     private static string? ReadStringProperty(string slice, string key)
     {
-        var match = Regex.Match(slice, $"\"{Regex.Escape(key)}\"\\s*:\\s*\"([^\"]*)\"");
+        var match = Regex.Match(
+            slice,
+            $"\"{Regex.Escape(key)}\"\\s*:\\s*\"([^\"]*)\"",
+            RegexOptions.None,
+            regexTimeout);
         return match.Success ? match.Groups[1].Value : null;
     }
 
@@ -513,14 +542,21 @@ public static partial class GlobalJson
         Regex.Replace(
             slice,
             $"(\"{Regex.Escape(afterKey)}\"\\s*:\\s*\"[^\"]*\")",
-            $"$1,\n    \"{key}\": \"{value}\"");
+            $"$1,\n    \"{key}\": \"{value}\"",
+            RegexOptions.None,
+            regexTimeout);
 
     private static string RemoveStringProperty(string slice, string key)
     {
         var trailingPattern = $"\\s*\"{Regex.Escape(key)}\"\\s*:\\s*\"[^\"]*\"\\s*,";
-        var result = Regex.IsMatch(slice, trailingPattern)
-            ? Regex.Replace(slice, trailingPattern, string.Empty)
-            : Regex.Replace(slice, $",\\s*\"{Regex.Escape(key)}\"\\s*:\\s*\"[^\"]*\"", string.Empty);
+        var result = Regex.IsMatch(slice, trailingPattern, RegexOptions.None, regexTimeout)
+            ? Regex.Replace(slice, trailingPattern, string.Empty, RegexOptions.None, regexTimeout)
+            : Regex.Replace(
+                slice,
+                $",\\s*\"{Regex.Escape(key)}\"\\s*:\\s*\"[^\"]*\"",
+                string.Empty,
+                RegexOptions.None,
+                regexTimeout);
 
         return TrailingCommaBeforeBrace().Replace(result, "}");
     }

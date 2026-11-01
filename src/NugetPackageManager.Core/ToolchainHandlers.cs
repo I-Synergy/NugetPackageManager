@@ -9,7 +9,7 @@ namespace NugetPackageManager.Core;
 /// cancellation, private install) and the core turns the captured output into findings and edits
 /// <c>global.json</c>.
 /// </summary>
-public sealed class ToolchainHandlers
+public static class ToolchainHandlers
 {
     public static Dictionary<string, RpcHandler> Create() =>
         new(StringComparer.Ordinal)
@@ -33,7 +33,7 @@ public sealed class ToolchainHandlers
         }
         catch (ArgumentException exception)
         {
-            throw new RpcException("invalidParams", exception.Message);
+            throw new RpcException(RpcException.InvalidParams, exception.Message);
         }
     }
 
@@ -50,9 +50,9 @@ public sealed class ToolchainHandlers
             GlobalJsonPath = ReadOptionalString(parameters, "globalJsonPath"),
             PinnedSdkVersion = ReadOptionalString(parameters, "pinnedSdkVersion"),
             Version = ReadCommandOutput(parameters, "version")
-                ?? throw new RpcException("invalidParams", "'version' output is required."),
+                ?? throw new RpcException(RpcException.InvalidParams, "'version' output is required."),
             SdkList = ReadCommandOutput(parameters, "sdkList")
-                ?? throw new RpcException("invalidParams", "'sdkList' output is required."),
+                ?? throw new RpcException(RpcException.InvalidParams, "'sdkList' output is required."),
             Evaluation = ReadCommandOutput(parameters, "evaluation"),
             SdkCheckOutput = ReadOptionalString(parameters, "sdkCheckOutput"),
             PrivateSdkVersions = ReadStringArray(parameters, "privateSdkVersions"),
@@ -102,7 +102,7 @@ public sealed class ToolchainHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException("invalidParams", $"'{property}' is required.")
+            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
             : value;
     }
 

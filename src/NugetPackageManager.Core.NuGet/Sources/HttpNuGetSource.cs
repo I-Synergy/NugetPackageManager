@@ -105,12 +105,9 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
         }
 
         var prefix = packageId.ToLowerInvariant() + "|";
-        foreach (var key in packageCache.Keys)
+        foreach (var key in packageCache.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)))
         {
-            if (key.StartsWith(prefix, StringComparison.Ordinal))
-            {
-                packageCache.TryRemove(key, out _);
-            }
+            packageCache.TryRemove(key, out _);
         }
     }
 
@@ -157,13 +154,17 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
             return PackageMapping.MapDependencyGroups(catalogEntry);
         }
 
-        var catalogUrl = catalogEntry.ValueKind == JsonValueKind.String
-            ? catalogEntry.GetString()
-            : catalogEntry.ValueKind == JsonValueKind.Object
-                && catalogEntry.TryGetProperty("@id", out var id)
-                && id.ValueKind == JsonValueKind.String
-                    ? id.GetString()
-                    : null;
+        string? catalogUrl = null;
+        if (catalogEntry.ValueKind == JsonValueKind.String)
+        {
+            catalogUrl = catalogEntry.GetString();
+        }
+        else if (catalogEntry.ValueKind == JsonValueKind.Object
+            && catalogEntry.TryGetProperty("@id", out var id)
+            && id.ValueKind == JsonValueKind.String)
+        {
+            catalogUrl = id.GetString();
+        }
 
         if (string.IsNullOrEmpty(catalogUrl))
         {
@@ -197,31 +198,49 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
 
         foreach (var page in pages.EnumerateArray())
         {
-            if (page.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-            {
-                leaves.AddRange(items.EnumerateArray().Select(item => item.Clone()));
-                continue;
-            }
-
-            // A page can be a reference to fetch on its own.
-            if (page.TryGetProperty("@id", out var pageId) && pageId.ValueKind == JsonValueKind.String)
-            {
-                var pageUrl = pageId.GetString();
-                if (!string.IsNullOrEmpty(pageUrl) && IsTrustedSourceUrl(pageUrl))
-                {
-                    using var pageDocument = await http
-                        .GetJsonAsync(pageUrl, cancellationToken, AuthorizationFor)
-                        .ConfigureAwait(false);
-                    if (pageDocument.RootElement.TryGetProperty("items", out var pageItems)
-                        && pageItems.ValueKind == JsonValueKind.Array)
-                    {
-                        leaves.AddRange(pageItems.EnumerateArray().Select(item => item.Clone()));
-                    }
-                }
-            }
+            leaves.AddRange(await ReadPageLeavesAsync(page, cancellationToken).ConfigureAwait(false));
         }
 
         return leaves;
+    }
+
+    /// <summary>The leaves a single registration page carries, embedded or by reference.</summary>
+    private async Task<List<JsonElement>> ReadPageLeavesAsync(
+        JsonElement page,
+        CancellationToken cancellationToken)
+    {
+        if (page.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            return [.. items.EnumerateArray().Select(item => item.Clone())];
+        }
+
+        // A page can be a reference to fetch on its own.
+        var pageUrl = TrustedPageUrl(page);
+        if (pageUrl is null)
+        {
+            return [];
+        }
+
+        using var pageDocument = await http
+            .GetJsonAsync(pageUrl, cancellationToken, AuthorizationFor)
+            .ConfigureAwait(false);
+
+        return pageDocument.RootElement.TryGetProperty("items", out var pageItems)
+            && pageItems.ValueKind == JsonValueKind.Array
+                ? [.. pageItems.EnumerateArray().Select(item => item.Clone())]
+                : [];
+    }
+
+    /// <summary>Absolute URL of a page that has to be fetched separately, when it is trusted.</summary>
+    private string? TrustedPageUrl(JsonElement page)
+    {
+        if (!page.TryGetProperty("@id", out var pageId) || pageId.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var pageUrl = pageId.GetString();
+        return string.IsNullOrEmpty(pageUrl) || !IsTrustedSourceUrl(pageUrl) ? null : pageUrl;
     }
 
     private async Task EnsureServiceIndexAsync(CancellationToken cancellationToken)

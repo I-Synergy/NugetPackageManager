@@ -111,10 +111,10 @@ public static partial class DotnetFailureClassifier
         var packages = new List<string>();
         var advisories = new List<string>();
 
-        foreach (Match match in VulnerablePackage().Matches(output))
+        foreach (var groups in VulnerablePackage().Matches(output).Select(match => match.Groups))
         {
-            packages.Add($"{match.Groups[1].Value} {match.Groups[2].Value} ({match.Groups[3].Value})");
-            var advisory = match.Groups[4];
+            packages.Add($"{groups[1].Value} {groups[2].Value} ({groups[3].Value})");
+            var advisory = groups[4];
             if (advisory.Success)
             {
                 advisories.Add(TrimTrailingPunctuation(advisory.Value));

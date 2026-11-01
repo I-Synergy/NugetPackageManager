@@ -11,6 +11,8 @@ namespace NugetPackageManager.Core.NuGet.Sources;
 /// </summary>
 public static class PackageMapping
 {
+    private const string VersionProperty = "version";
+
     /// <summary>Maps a <c>SearchQueryService</c> response (<c>data[]</c>).</summary>
     public static List<Package> MapSearch(JsonElement root)
     {
@@ -37,7 +39,7 @@ public static class PackageMapping
                 TotalDownloads = Number(item, "totalDownloads"),
                 Verified = Boolean(item, "verified"),
                 InstalledVersion = string.Empty,
-                Version = Text(item, "version"),
+                Version = Text(item, VersionProperty),
                 Versions = MapSearchVersions(item),
                 Tags = StringOrArray(item, "tags"),
             });
@@ -78,10 +80,10 @@ public static class PackageMapping
             TotalDownloads = entry is null ? 0 : Number(entry.Value, "totalDownloads"),
             Verified = entry is not null && Boolean(entry.Value, "verified"),
             InstalledVersion = string.Empty,
-            Version = entry is null ? string.Empty : Text(entry.Value, "version"),
+            Version = entry is null ? string.Empty : Text(entry.Value, VersionProperty),
             Versions = [.. selected.Select(leaf => new PackageVersionRef
             {
-                Version = CatalogEntry(leaf) is { } catalog ? Text(catalog, "version") : string.Empty,
+                Version = CatalogEntry(leaf) is { } catalog ? Text(catalog, VersionProperty) : string.Empty,
                 Id = Text(leaf, "@id"),
             })],
             Tags = entry is null ? [] : StringOrArray(entry.Value, "tags"),
@@ -166,7 +168,7 @@ public static class PackageMapping
     }
 
     private static string VersionOf(JsonElement leaf) =>
-        CatalogEntry(leaf) is { } entry ? Text(entry, "version") : string.Empty;
+        CatalogEntry(leaf) is { } entry ? Text(entry, VersionProperty) : string.Empty;
 
     /// <summary>
     /// NuGet's version ordering, matching the TypeScript comparator: numeric segments first,
@@ -217,20 +219,15 @@ public static class PackageMapping
 
     private static int ComparePrerelease(string left, string right)
     {
-        if (left.Length == 0 && right.Length == 0)
+        if (left.Length == 0 || right.Length == 0)
         {
-            return 0;
-        }
+            // A release is newer than any prerelease of the same version.
+            if (left.Length == 0 && right.Length == 0)
+            {
+                return 0;
+            }
 
-        // A release is newer than any prerelease of the same version.
-        if (left.Length == 0)
-        {
-            return 1;
-        }
-
-        if (right.Length == 0)
-        {
-            return -1;
+            return left.Length == 0 ? 1 : -1;
         }
 
         var leftParts = left.Split('.');
@@ -239,40 +236,50 @@ public static class PackageMapping
 
         for (var index = 0; index < length; index++)
         {
-            var leftPart = leftParts[index];
-            var rightPart = rightParts[index];
-            var leftIsNumber = long.TryParse(leftPart, out var leftNumber);
-            var rightIsNumber = long.TryParse(rightPart, out var rightNumber);
-
-            if (leftIsNumber && rightIsNumber)
-            {
-                if (leftNumber != rightNumber)
-                {
-                    return leftNumber < rightNumber ? -1 : 1;
-                }
-
-                continue;
-            }
-
-            // Numeric identifiers sort before alphanumeric ones.
-            if (leftIsNumber)
-            {
-                return -1;
-            }
-
-            if (rightIsNumber)
-            {
-                return 1;
-            }
-
-            var comparison = string.CompareOrdinal(leftPart, rightPart);
+            var comparison = ComparePrereleasePart(leftParts[index], rightParts[index]);
             if (comparison != 0)
             {
-                return comparison < 0 ? -1 : 1;
+                return comparison;
             }
         }
 
         return leftParts.Length.CompareTo(rightParts.Length);
+    }
+
+    /// <summary>One dotted identifier: numeric parts compare numerically and sort before text.</summary>
+    private static int ComparePrereleasePart(string leftPart, string rightPart)
+    {
+        var leftIsNumber = long.TryParse(leftPart, out var leftNumber);
+        var rightIsNumber = long.TryParse(rightPart, out var rightNumber);
+
+        if (leftIsNumber && rightIsNumber)
+        {
+            if (leftNumber == rightNumber)
+            {
+                return 0;
+            }
+
+            return leftNumber < rightNumber ? -1 : 1;
+        }
+
+        // Numeric identifiers sort before alphanumeric ones.
+        if (leftIsNumber)
+        {
+            return -1;
+        }
+
+        if (rightIsNumber)
+        {
+            return 1;
+        }
+
+        var comparison = string.CompareOrdinal(leftPart, rightPart);
+        if (comparison == 0)
+        {
+            return 0;
+        }
+
+        return comparison < 0 ? -1 : 1;
     }
 
     private static long ParsePart(string value) =>
@@ -290,7 +297,7 @@ public static class PackageMapping
             {
                 versions.Add(new PackageVersionRef
                 {
-                    Version = Text(version, "version"),
+                    Version = Text(version, VersionProperty),
                     Id = Text(version, "@id"),
                 });
             }

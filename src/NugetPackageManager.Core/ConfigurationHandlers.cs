@@ -50,7 +50,7 @@ public static class ConfigurationHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException("invalidParams", $"'{property}' is required.")
+            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
             : value;
     }
 
@@ -74,6 +74,6 @@ public static class ConfigurationHandlers
             .Where(item => item.ValueKind == JsonValueKind.String)
             .Select(item => item.GetString())
             .Where(item => !string.IsNullOrEmpty(item))
-            .Select(item => item!)];
+            .OfType<string>()];
     }
 }

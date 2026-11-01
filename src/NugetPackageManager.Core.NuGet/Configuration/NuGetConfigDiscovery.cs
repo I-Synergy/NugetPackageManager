@@ -7,7 +7,10 @@ namespace NugetPackageManager.Core.NuGet.Configuration;
 /// </summary>
 public static class NuGetConfigDiscovery
 {
-    private static readonly string[] configFileNames = ["nuget.config", "NuGet.Config", "NuGet.config"];
+    private const string NuGetDirectoryName = "NuGet";
+    private const string NuGetConfigFileName = "NuGet.Config";
+
+    private static readonly string[] configFileNames = ["nuget.config", NuGetConfigFileName, "NuGet.config"];
 
     /// <summary>Every existing config file, lowest priority first.</summary>
     public static IReadOnlyList<NuGetConfigLocation> Discover(
@@ -31,24 +34,24 @@ public static class NuGetConfigDiscovery
 
             if (programFiles is not null)
             {
-                AddIfExists(configs, Path.Combine(programFiles, "NuGet", "Config", "Microsoft.VisualStudio.Offline.config"), exists);
+                AddIfExists(configs, Path.Combine(programFiles, NuGetDirectoryName, "Config", "Microsoft.VisualStudio.Offline.config"), exists);
             }
         }
 
         // 2. User config: ~/.config/NuGet on Unix, ~/.nuget everywhere, then %APPDATA% on Windows.
         if (!isWindows)
         {
-            AddIfExists(configs, Path.Combine(environment.HomeDirectory, ".config", "NuGet", "NuGet.Config"), exists);
+            AddIfExists(configs, Path.Combine(environment.HomeDirectory, ".config", NuGetDirectoryName, NuGetConfigFileName), exists);
         }
 
-        AddIfExists(configs, Path.Combine(environment.HomeDirectory, ".nuget", "NuGet", "NuGet.Config"), exists);
+        AddIfExists(configs, Path.Combine(environment.HomeDirectory, ".nuget", NuGetDirectoryName, NuGetConfigFileName), exists);
 
         if (isWindows)
         {
             var appData = environment.GetVariable("APPDATA");
             if (!string.IsNullOrEmpty(appData))
             {
-                AddIfExists(configs, Path.Combine(appData, "NuGet", "NuGet.Config"), exists);
+                AddIfExists(configs, Path.Combine(appData, NuGetDirectoryName, NuGetConfigFileName), exists);
             }
         }
 
@@ -112,6 +115,13 @@ public static class NuGetConfigDiscovery
         }
     }
 
-    private static string? FirstNonEmpty(string? first, string? second) =>
-        !string.IsNullOrEmpty(first) ? first : !string.IsNullOrEmpty(second) ? second : null;
+    private static string? FirstNonEmpty(string? first, string? second)
+    {
+        if (!string.IsNullOrEmpty(first))
+        {
+            return first;
+        }
+
+        return string.IsNullOrEmpty(second) ? null : second;
+    }
 }

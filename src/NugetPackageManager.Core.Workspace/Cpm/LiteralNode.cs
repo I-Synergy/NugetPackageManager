@@ -1,4 +1,4 @@
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
-public sealed record LiteralNode(bool Value) : ConditionNode;
+public sealed record LiteralNode(bool Value) : IConditionNode;

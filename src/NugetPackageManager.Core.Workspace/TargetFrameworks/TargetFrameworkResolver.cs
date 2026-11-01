@@ -27,6 +27,7 @@ public enum TargetFrameworkSource
 public sealed partial class TargetFrameworkResolver : IDisposable
 {
     private const int MaxCacheEntries = 500;
+    private const string DotnetExecutableName = "dotnet";
     private static readonly TimeSpan evaluationTimeout = TimeSpan.FromSeconds(60);
 
     private readonly SemaphoreSlim evaluationSlots = new(16, 16);
@@ -216,6 +217,24 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         return new TargetFrameworkInfo([], TargetFrameworkSource.Xml);
     }
 
+    /// <summary>
+    /// Absolute path of the <c>dotnet</c> host to run. The sidecar is itself started through the
+    /// muxer, so its own image is the same host the user's workspace is using; when that is not
+    /// the case fall back to the SDK's <c>DOTNET_HOST_PATH</c>.
+    /// </summary>
+    private static string DotnetHost()
+    {
+        var processPath = Environment.ProcessPath;
+        if (!string.IsNullOrEmpty(processPath)
+            && Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            return processPath;
+        }
+
+        var hostPath = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        return string.IsNullOrEmpty(hostPath) ? DotnetExecutableName : hostPath;
+    }
+
     /// <summary>Runs <c>dotnet msbuild -getProperty</c>; the only path that evaluates conditions.</summary>
     internal async Task<IReadOnlyList<string>> EvaluateWithMsBuildAsync(
         string projectPath,
@@ -226,7 +245,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         {
             var startInfo = new ProcessStartInfo
             {
-                FileName = "dotnet",
+                FileName = DotnetHost(),
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

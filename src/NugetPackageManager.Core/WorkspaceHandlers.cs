@@ -64,7 +64,7 @@ public sealed class WorkspaceHandlers
         return new { applied = changes.Count };
     }
 
-    private async Task<object?> HandleRemovePackageVersionAsync(
+    private static async Task<object?> HandleRemovePackageVersionAsync(
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -99,7 +99,7 @@ public sealed class WorkspaceHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException("invalidParams", $"'{property}' is required.")
+            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
             : value;
     }
 
@@ -120,7 +120,7 @@ public sealed class WorkspaceHandlers
 
         return Enum.TryParse<CpmWriteScope>(scope, ignoreCase: true, out var parsed)
             ? parsed
-            : throw new RpcException("invalidParams", $"Unknown scope '{scope}'.");
+            : throw new RpcException(RpcException.InvalidParams, $"Unknown scope '{scope}'.");
     }
 
     private static List<CpmVersionChange> ReadChanges(JsonElement parameters)
@@ -129,7 +129,7 @@ public sealed class WorkspaceHandlers
             || !parameters.TryGetProperty("changes", out var changes)
             || changes.ValueKind != JsonValueKind.Array)
         {
-            throw new RpcException("invalidParams", "'changes' must be an array.");
+            throw new RpcException(RpcException.InvalidParams, "'changes' must be an array.");
         }
 
         var parsed = new List<CpmVersionChange>();
@@ -151,7 +151,7 @@ public sealed class WorkspaceHandlers
             || !parameters.TryGetProperty("projectPaths", out var paths)
             || paths.ValueKind != JsonValueKind.Array)
         {
-            throw new RpcException("invalidParams", "'projectPaths' must be an array.");
+            throw new RpcException(RpcException.InvalidParams, "'projectPaths' must be an array.");
         }
 
         var projectPaths = paths.EnumerateArray()

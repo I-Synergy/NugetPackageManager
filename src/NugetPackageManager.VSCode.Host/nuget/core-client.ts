@@ -167,7 +167,7 @@ export class CoreClient {
   }
 
   private FailPending(error: Error): void {
-    for (const id of [...this.pending.keys()]) {
+    for (const id of this.pending.keys()) {
       this.RemovePending(id)?.reject(error);
     }
   }

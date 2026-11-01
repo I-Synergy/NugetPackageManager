@@ -1,4 +1,4 @@
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
-public sealed record NotNode(ConditionNode Operand) : ConditionNode;
+public sealed record NotNode(IConditionNode Operand) : IConditionNode;

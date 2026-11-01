@@ -1,4 +1,4 @@
-import * as assert from 'assert';
+import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { repositoryPath } from '../test-paths';
@@ -17,6 +17,11 @@ import type { UpdateProjectResponse } from '@/common/rpc/types';
  * Requires `dist/core` (`npm run build:core`) and `dotnet` on PATH.
  */
 
+function unwrap<T>(result: Result<T>): T {
+    assert.ok(result.ok, result.ok ? 'unexpected failure' : result.error);
+    return result.value;
+}
+
 const fixtureRoot = repositoryPath('tests', 'NugetPackageManager.VSCode.Tests', 'e2e-workspace');
 coreProcess.Configure(repositoryPath());
 
@@ -31,11 +36,6 @@ suite('E2E: dotnet round trip', () => {
 
     function readProject(): string {
         return fs.readFileSync(projectPath, 'utf8');
-    }
-
-    function unwrap<T>(result: Result<T>): T {
-        assert.ok(result.ok, result.ok ? 'unexpected failure' : result.error);
-        return result.value;
     }
 
     setup(() => {

@@ -23,33 +23,54 @@ public static partial class NuGetConfigParser
         ArgumentNullException.ThrowIfNull(content);
 
         var document = XDocument.Parse(content);
+
+        return new NuGetConfigFile(
+            ReadSources(document),
+            ReadCredentials(document, expandEnvironment, getVariable),
+            ReadDisabledSources(document),
+            Element(document, "packageSources", "clear") is not null,
+            ReadMappings(document),
+            Element(document, "packageSourceMapping", "clear") is not null);
+    }
+
+    private static List<NuGetConfigSource> ReadSources(XDocument document)
+    {
         var sources = new List<NuGetConfigSource>();
-        var credentials = new Dictionary<string, NuGetConfigCredential>(StringComparer.Ordinal);
-        var disabled = new List<string>();
-        var mappings = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
-
-        var clear = Element(document, "packageSources", "clear") is not null;
-
         foreach (var add in Elements(document, "packageSources", "add"))
         {
             var name = Attribute(add, "key");
             var url = Attribute(add, "value");
-
             if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(url))
             {
                 sources.Add(new NuGetConfigSource(name, url));
             }
         }
 
+        return sources;
+    }
+
+    private static List<string> ReadDisabledSources(XDocument document)
+    {
+        var disabled = new List<string>();
         foreach (var add in Elements(document, "disabledPackageSources", "add"))
         {
             var name = Attribute(add, "key");
-            if (!string.IsNullOrEmpty(name) && string.Equals(Attribute(add, "value"), "true", StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(name)
+                && string.Equals(Attribute(add, "value"), "true", StringComparison.OrdinalIgnoreCase))
             {
                 disabled.Add(name);
             }
         }
 
+        return disabled;
+    }
+
+    private static Dictionary<string, NuGetConfigCredential> ReadCredentials(
+        XDocument document,
+        bool expandEnvironment,
+        Func<string, string?>? getVariable)
+    {
+        var credentials = new Dictionary<string, NuGetConfigCredential>(StringComparer.Ordinal);
         foreach (var container in Descendants(document, "packageSourceCredentials"))
         {
             foreach (var sourceElement in container.Elements())
@@ -62,7 +83,12 @@ public static partial class NuGetConfigParser
             }
         }
 
-        var clearMappings = Element(document, "packageSourceMapping", "clear") is not null;
+        return credentials;
+    }
+
+    private static Dictionary<string, IReadOnlyList<string>> ReadMappings(XDocument document)
+    {
+        var mappings = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
         foreach (var packageSource in Elements(document, "packageSourceMapping", "packageSource"))
         {
             var key = Attribute(packageSource, "key");
@@ -76,7 +102,7 @@ public static partial class NuGetConfigParser
                 .Where(element => element.Name.LocalName == "package")
                 .Select(element => Attribute(element, "pattern"))
                 .Where(pattern => !string.IsNullOrEmpty(pattern))
-                .Select(pattern => pattern!)
+                .OfType<string>()
                 .ToArray();
 
             if (patterns.Length > 0)
@@ -85,8 +111,9 @@ public static partial class NuGetConfigParser
             }
         }
 
-        return new NuGetConfigFile(sources, credentials, disabled, clear, mappings, clearMappings);
+        return mappings;
     }
+
 
     /// <summary>
     /// NuGet encodes characters that are invalid in XML element names as <c>_xHHHH_</c>, so

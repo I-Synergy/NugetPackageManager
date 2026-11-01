@@ -47,16 +47,9 @@ public static class NuGetConfigResolver
 
         foreach (var location in locations)
         {
-            NuGetConfigFile parsed;
-
-            try
+            var parsed = TryParse(location, environment, readFile, failures);
+            if (parsed is null)
             {
-                // Environment expansion is allowed only above workspace level.
-                parsed = NuGetConfigParser.Parse(readFile(location.Path), !location.IsWorkspace, environment.GetVariable);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or XmlException)
-            {
-                failures.Add(new NuGetConfigFailure(location.Path, exception.Message));
                 continue;
             }
 
@@ -65,45 +58,97 @@ public static class NuGetConfigResolver
                 sources.Clear();
                 order.Clear();
                 disabled.Clear();
-
-                if (location.IsWorkspace)
-                {
-                    clearFound = true;
-                }
+                clearFound |= location.IsWorkspace;
             }
 
-            foreach (var source in parsed.Sources)
-            {
-                if (!sources.ContainsKey(source.Name))
-                {
-                    order.Add(source.Name);
-                }
-
-                // A later file replaces the entry but keeps the name's original position.
-                sources[source.Name] = source;
-            }
-
-            foreach (var (name, credential) in parsed.Credentials)
-            {
-                credentials[name] = credential;
-            }
+            MergeSources(sources, order, parsed.Sources);
+            MergeCredentials(credentials, parsed.Credentials);
 
             if (parsed.ClearMappings)
             {
                 mappings.Clear();
             }
 
-            foreach (var (key, patterns) in parsed.Mappings)
-            {
-                mappings[key] = patterns;
-            }
-
-            foreach (var name in parsed.DisabledSources)
-            {
-                disabled.Add(name);
-            }
+            MergeMappings(mappings, parsed.Mappings);
+            MergeDisabled(disabled, parsed.DisabledSources);
         }
 
+        return new NuGetConfigResolution(
+            ResolvedSources(order, sources, disabled, credentials, mappings),
+            clearFound,
+            failures);
+    }
+
+    private static NuGetConfigFile? TryParse(
+        NuGetConfigLocation location,
+        NuGetConfigEnvironment environment,
+        Func<string, string> readFile,
+        List<NuGetConfigFailure> failures)
+    {
+        try
+        {
+            // Environment expansion is allowed only above workspace level.
+            return NuGetConfigParser.Parse(readFile(location.Path), !location.IsWorkspace, environment.GetVariable);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or XmlException)
+        {
+            failures.Add(new NuGetConfigFailure(location.Path, exception.Message));
+            return null;
+        }
+    }
+
+    private static void MergeSources(
+        Dictionary<string, NuGetConfigSource> sources,
+        List<string> order,
+        IReadOnlyList<NuGetConfigSource> additions)
+    {
+        foreach (var source in additions)
+        {
+            if (!sources.ContainsKey(source.Name))
+            {
+                order.Add(source.Name);
+            }
+
+            // A later file replaces the entry but keeps the name's original position.
+            sources[source.Name] = source;
+        }
+    }
+
+    private static void MergeCredentials(
+        Dictionary<string, NuGetConfigCredential> credentials,
+        IReadOnlyDictionary<string, NuGetConfigCredential> additions)
+    {
+        foreach (var (name, credential) in additions)
+        {
+            credentials[name] = credential;
+        }
+    }
+
+    private static void MergeMappings(
+        Dictionary<string, IReadOnlyList<string>> mappings,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> additions)
+    {
+        foreach (var (key, patterns) in additions)
+        {
+            mappings[key] = patterns;
+        }
+    }
+
+    private static void MergeDisabled(HashSet<string> disabled, IReadOnlyList<string> additions)
+    {
+        foreach (var name in additions)
+        {
+            disabled.Add(name);
+        }
+    }
+
+    private static List<ResolvedNuGetSource> ResolvedSources(
+        List<string> order,
+        Dictionary<string, NuGetConfigSource> sources,
+        HashSet<string> disabled,
+        Dictionary<string, NuGetConfigCredential> credentials,
+        Dictionary<string, IReadOnlyList<string>> mappings)
+    {
         var resolved = new List<ResolvedNuGetSource>(order.Count);
 
         foreach (var name in order)
@@ -125,6 +170,7 @@ public static class NuGetConfigResolver
                 patterns));
         }
 
-        return new NuGetConfigResolution(resolved, clearFound, failures);
+        return resolved;
     }
+
 }
