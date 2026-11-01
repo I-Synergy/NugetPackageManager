@@ -52,6 +52,45 @@ reads use explicit fixture maps. `utilities/cpm-reader.test.ts` covers the adapt
 
 ---
 
+## Code-organisation pass (2026-11-01) — one type per file, no `*Dto`
+
+`src/` and `tests/` now honour `.ai/reference/critical-rules.md` rule 10 and the
+`{Entity}` naming convention from `.ai/reference/naming-conventions.md`:
+
+- **`*Dto` postfix gone.** `PackageDto` → `Package`, `PackageDetailsDto` → `PackageDetails`,
+  `PackageDependencyGroupDto` → `PackageDependencyGroup`, `PackageDependencyDto` →
+  `PackageDependency` (all now one file each under `Core.NuGet/Models`), and
+  `DependencyIssueDto` → `DependencyIssue` (`Core.Workspace/Dependencies`). The C# package
+  shape now matches the `Package` interface the webview already used.
+- **One top-level type per file** across 14 C# files plus 6 TypeScript files. `RpcContracts.cs`,
+  `ProjectModels.cs`, `PackageDtos.cs` and `NuGetConfigModels.cs` no longer exist; the two
+  TypeScript barrels (`VSCode.Webview/types.ts`, `utilities/operation-jobs.ts`) re-export so no
+  import path changed. Private nested helpers stay with their owner.
+- Verified with `dotnet test` 204/204, `npm test` 358 passing and `npm run quality` PASS.
+
+Details: `.ai/completed/dto-rename-and-one-type-per-file.md`.
+
+## Async audit (2026-11-01) — rules now hold everywhere
+
+Compiler-API audit of `src/` + `tests/` (368 async declarations) plus a C# scan:
+
+- **C#:** compliant — 33 `async` methods and 17 non-async `Task`-returning members all end in
+  `Async`; no `async void`, `.Result`, `.Wait()`, `GetAwaiter().GetResult()` or `ContinueWith`.
+  Unawaited tasks stay compiler-enforced (`CS4014` + `TreatWarningsAsErrors`).
+- **TypeScript:** 6 async functions were missing the suffix (`recordRestoreFailure`,
+  `executeRemovePackage`, `executeAddPackage`, `getLatestVersion`, `packages-view.runNext`, and
+  `global-json.ts`'s core writer, now `WriteGlobalJsonSdkVersionAsync` — the file already had a
+  separate `UpdateGlobalJsonSdkVersionAsync` for the template path) and 7 promise calls were
+  fire-and-forget (`logger.ts` shutdown, `rpc-host.ts` postMessage, two `openExternal` calls,
+  `globalState.update`, `updateStatusBarAsync`, the debounced reload). All fixed with `void`.
+- Accepted exceptions: Lit's `task:` property name, test doubles implementing
+  `postMessage`/`writeText`/`update`, and `packages-view.connectedCallback`'s `void` load
+  (documented last-resort case).
+
+Details: `.ai/completed/async-audit-remediation.md`.
+
+---
+
 ## Project Overview
 
 **Extension ID:** `I-Synergy.nugetpackagemanager`
