@@ -239,6 +239,7 @@
     "pretest": "node -e \"require('node:fs').rmSync('out',{recursive:true,force:true})\" && npm run test-compile",
     "test:coverage": "vscode-test --label unitTests --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text-summary",
     "pretest:coverage": "npm run test-compile",
+    "test:csharp": "dotnet test NugetPackageManager.slnx -c Release --settings tests/coverlet.runsettings --collect:\"XPlat Code Coverage\" --results-directory coverage/csharp",
     "quality": "node tools/quality-gate.mjs",
     "quality:coverage": "node tools/quality-gate.mjs --coverage",
     "esbuild": "node ./esbuild.js",

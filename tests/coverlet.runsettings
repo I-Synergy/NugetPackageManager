@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Coverlet settings for the C# test projects.
+
+  Reports land next to the TypeScript lcov (`coverage/`) so the CI step that uploads the
+  coverage artifact and the SonarCloud scanner both find them:
+    coverage/csharp/**/coverage.cobertura.xml   (Sonar: sonar.cs.cobertura.reportsPaths)
+    coverage/csharp/**/coverage.opencover.xml   (Sonar: sonar.cs.opencover.reportsPaths)
+
+  Generated sources are excluded so coverage measures hand-written code only:
+  `System.Text.RegularExpressions.Generator` emits a `.g.cs` per `[GeneratedRegex]`, and those
+  files are not ours to test.
+-->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura,opencover</Format>
+          <IncludeTestAssembly>false</IncludeTestAssembly>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>
+          <ExcludeByFile>**/obj/**/*.cs,**/bin/**/*.cs</ExcludeByFile>
+          <SkipAutoProps>false</SkipAutoProps>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

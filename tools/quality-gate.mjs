@@ -41,14 +41,16 @@ if (help) {
   process.exit(0);
 }
 
-function run(label, command, commandArgs) {
+function run(label, command, commandArgs, { shell = isWindows } = {}) {
   console.log(`\n=== ${label} ===`);
   const started = Date.now();
   const result = spawnSync(command, commandArgs, {
     cwd: ROOT,
     stdio: "inherit",
-    // npm/npx are .cmd shims on Windows and must be launched through the shell.
-    shell: isWindows,
+    // npm/npx are .cmd shims on Windows and must be launched through the shell. `dotnet` is a
+    // real executable, and cmd.exe would split arguments that contain a space
+    // (`--collect:XPlat Code Coverage`), so the C# steps opt out.
+    shell,
   });
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
 
@@ -132,10 +134,27 @@ if (dotnetVersion === null) {
   console.log("\n⚠ No usable .NET SDK — skipping the C# build and tests.");
 } else {
   console.log(`\n.NET SDK ${dotnetVersion}`);
-  steps.push(["C# build", "dotnet", ["build", SOLUTION, "-c", "Release"]]);
+  steps.push(["C# build", "dotnet", ["build", SOLUTION, "-c", "Release"], { shell: false }]);
 
   if (!skipTests) {
-    steps.push(["C# tests", "dotnet", ["test", SOLUTION, "-c", "Release", "--no-build"]]);
+    // Coverage always: the report is what the SonarCloud scanner reads (coverage/csharp).
+    steps.push([
+      "C# tests",
+      "dotnet",
+      [
+        "test",
+        SOLUTION,
+        "-c",
+        "Release",
+        "--no-build",
+        "--settings",
+        "tests/coverlet.runsettings",
+        "--collect:XPlat Code Coverage",
+        "--results-directory",
+        "coverage/csharp",
+      ],
+      { shell: false },
+    ]);
   }
 }
 
@@ -158,8 +177,8 @@ if (coverage) {
 }
 
 const failed = [];
-for (const [label, command, commandArgs] of steps) {
-  if (!run(label, command, commandArgs)) {
+for (const [label, command, commandArgs, options] of steps) {
+  if (!run(label, command, commandArgs, options)) {
     failed.push(label);
   }
 }
