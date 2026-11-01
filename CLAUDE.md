@@ -19,6 +19,7 @@ npm run lint             # Check code style (ESLint 9 flat config)
 npm run lint:fix         # Auto-fix linting issues
 npm test                 # Run TypeScript tests (VSCode Test CLI + Mocha)
 npm run test-compile     # Compile tests only (tsconfig.test.json)
+npm run test:e2e         # End-to-end: real sidecar + real dotnet against a fixture project
 dotnet build NugetPackageManager.slnx -c Release   # C# core
 dotnet test  NugetPackageManager.slnx -c Release   # MSTest
 npm run quality          # Full gate: bundles, lint, typecheck, C# build + tests, TS tests, audit
@@ -123,6 +124,8 @@ the C# projects use MSTest:
 - Pattern: Arrange with stubs → Act via component method → Assert with `assert.strictEqual`
 - Web component tests: Mock `hostApi` via `Object.defineProperty(registrations, 'hostApi', { value: mock })`
 - Lit updates: Use `await element.updateComplete` instead of manual DOM tick
+- E2E: `tests/NugetPackageManager.VSCode.Tests/e2e/*.e2e.ts` run through the `e2eTests` label
+  (`npm run test:e2e`) with the real sidecar and the real `dotnet` CLI
 
 Run a single test file by modifying `.vscode-test.js` config or using the test explorer.
 

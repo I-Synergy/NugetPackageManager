@@ -545,6 +545,7 @@ dotnet build NugetPackageManager.slnx -c Release   # C# core
 ```bash
 npm test              # Full test suite (VSCode Test CLI + Mocha)
 npm run test-compile  # Compile tests to out/ (required before npm test)
+npm run test:e2e      # End-to-end: real sidecar + real dotnet against a fixture project
 ```
 
 TypeScript tests live in `tests/NugetPackageManager.VSCode.Tests/**/*.test.ts`, mirroring the

@@ -238,6 +238,9 @@ package versions or framework filters:
   from `tests/NugetPackageManager.TestUtilities`, and keep them representative of real grouped
   `Directory.Packages.props` layouts.
 - A change that crosses the sidecar contract needs a core test **and** a host test.
+- `npm run test:e2e` drives the real sidecar and the real `dotnet` CLI against a fixture
+  project under `tests/NugetPackageManager.VSCode.Tests/e2e/` (needs `npm run build:core` and
+  `dotnet` on PATH). It is opt-in and not part of `npm test`.
 - Test design detail: `.ai/patterns/testing-patterns.md`.
 
 ### 8. Commits and documentation
@@ -257,6 +260,7 @@ npm run lint             # ESLint 9 flat config
 npm run lint:fix         # auto-fix
 npm test                 # VS Code Test CLI + Mocha (TypeScript)
 npm run test-compile     # compile tests only (tsconfig.test.json)
+npm run test:e2e         # opt-in end-to-end: real sidecar + real dotnet write a fixture project
 dotnet build NugetPackageManager.slnx -c Release   # C# core
 dotnet test  NugetPackageManager.slnx -c Release   # MSTest
 npm run quality          # quality gate: bundles + lint + typecheck + C# build + C# tests + TS tests + audit

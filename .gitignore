@@ -12,6 +12,9 @@ releases/
 coverage/
 .scannerwork/
 
+# End-to-end fixture workspace (created and deleted by the e2e suite)
+tests/NugetPackageManager.VSCode.Tests/e2e-workspace/
+
 # Fixture build output generated while resolving target frameworks in tests
 tests/NugetPackageManager.TestUtilities/Fixtures/**/obj/
 

@@ -63,6 +63,14 @@ reads use explicit fixture maps. `utilities/cpm-reader.test.ts` covers the adapt
 
 ## Recent Work (this session and last)
 
+### Completed: opt-in end-to-end suite (2026-11-01)
+- `tests/NugetPackageManager.VSCode.Tests/e2e/dotnet-roundtrip.e2e.ts` drives `createHostAPI()` with the **real** sidecar (`dist/core`) and the **real** `dotnet` CLI against a fixture project under `tests/.../e2e-workspace/` (gitignored, created per test).
+- Cases: install → update → uninstall rewrites the `.csproj`; a CPM project writes the version into `Directory.Packages.props` and leaves the reference unpinned; `getOutdatedPackagesAsync` reports the older install against nuget.org.
+- New `e2eTests` label in `.vscode-test.js` (`out/tests/**/*.e2e.js`) and `npm run test:e2e`; `npm test` is now scoped to `--label unitTests`, so the 358-test unit suite stays fast and offline.
+- Fixtures opt out of CPM with a local `Directory.Packages.props` (`ManagePackageVersionsCentrally=false`) because the fixture folder lives inside this repo, whose root props enable CPM.
+- Verified: 3/3 E2E passing (23 s), 358 unit tests, typecheck + lint clean.
+- Commit: `2a1a5d6` (the pre-E2E checkpoint) plus this change.
+
 ### Completed: UI + process test sweep, two fixes, dev-mock completion (2026-11-01)
 - Suites: `npm test` 358 passing, `dotnet test` 204 passing (42 + 89 + 73).
 - UI driven with real clicks against `npm run dev`: all seven tabs, search (live nuget.org), prerelease, sort, source, project tree, details panel (Description/Dependencies/Versions), per-row install/update/uninstall/consolidate/cleanup, error alerts, copy diagnostics — no console errors.

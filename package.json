@@ -235,9 +235,9 @@
     "vscode:prepublish": "node ./esbuild.js && npm run build:core",
     "lint": "eslint src tests",
     "lint:fix": "eslint src --fix",
-    "test": "vscode-test",
+    "test": "vscode-test --label unitTests",
     "pretest": "node -e \"require('node:fs').rmSync('out',{recursive:true,force:true})\" && npm run test-compile",
-    "test:coverage": "vscode-test --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text-summary",
+    "test:coverage": "vscode-test --label unitTests --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text-summary",
     "pretest:coverage": "npm run test-compile",
     "quality": "node tools/quality-gate.mjs",
     "quality:coverage": "node tools/quality-gate.mjs --coverage",
@@ -250,7 +250,8 @@
     "package:ci": "vsce package --no-dependencies --out nugetpackagemanager.vsix",
     "publish:vsix": "vsce publish --no-dependencies --skip-duplicate --packagePath",
     "docs": "node ./tools/generate-docs.mjs",
-    "screenshot": "node tools/take-screenshots.mjs"
+    "screenshot": "node tools/take-screenshots.mjs",
+    "test:e2e": "npm run test-compile && vscode-test --label e2eTests"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.0",
