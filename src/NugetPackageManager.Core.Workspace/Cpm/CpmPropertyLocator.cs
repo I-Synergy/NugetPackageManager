@@ -196,7 +196,7 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
             {
                 if (node is XComment comment)
                 {
-                    ApplyBoundary(comment, importedFiles);
+                    ApplyBoundary(comment);
                     continue;
                 }
 
@@ -220,82 +220,82 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
                 Walk(element, isTarget, conditional);
             }
         }
-    }
 
-    /// <summary>A property element: the requested name, directly inside a <c>PropertyGroup</c>.</summary>
-    private static bool IsDefinition(XElement element, XContainer container, string propertyName) =>
-        container is XElement parent
-        && parent.Name.LocalName.Equals(PropertyGroupElement, StringComparison.OrdinalIgnoreCase)
-        && element.Name.LocalName.Equals(propertyName, StringComparison.OrdinalIgnoreCase);
+        /// <summary>A property element: the requested name, directly inside a <c>PropertyGroup</c>.</summary>
+        private static bool IsDefinition(XElement element, XContainer container, string propertyName) =>
+            container is XElement parent
+            && parent.Name.LocalName.Equals(PropertyGroupElement, StringComparison.OrdinalIgnoreCase)
+            && element.Name.LocalName.Equals(propertyName, StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasCondition(XElement element) =>
-        element.Attributes().Any(attribute =>
-            attribute.Name.LocalName.Equals(ConditionAttribute, StringComparison.OrdinalIgnoreCase));
+        private static bool HasCondition(XElement element) =>
+            element.Attributes().Any(attribute =>
+                attribute.Name.LocalName.Equals(ConditionAttribute, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>
-    /// Tracks the import stack from one boundary comment. Such a comment holds the <c>&lt;Import&gt;</c>
-    /// (or <c>&lt;/Import&gt;</c>) line, possibly a description, and the resolved file path; the last
-    /// non-markup line is the path.
-    /// </summary>
-    private static void ApplyBoundary(XComment comment, Stack<string> importedFiles)
-    {
-        var opens = false;
-        var closes = false;
-        var candidates = new List<string>();
-
-        foreach (var rawLine in comment.Value.Split('\n'))
+        /// <summary>
+        /// Tracks the import stack from one boundary comment. Such a comment holds the <c>&lt;Import&gt;</c>
+        /// (or <c>&lt;/Import&gt;</c>) line, possibly a description, and the resolved file path; the last
+        /// non-markup line is the path.
+        /// </summary>
+        private void ApplyBoundary(XComment comment)
         {
-            var line = rawLine.Trim();
-            if (line.Length == 0)
+            var opens = false;
+            var closes = false;
+            var candidates = new List<string>();
+
+            foreach (var rawLine in comment.Value.Split('\n'))
             {
-                continue;
+                var line = rawLine.Trim();
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                if (IsMarkupLine(line))
+                {
+                    ReadMarkupLine(line, ref opens, ref closes);
+                    continue;
+                }
+
+                if (!IsSeparator(line))
+                {
+                    candidates.Add(line);
+                }
             }
 
-            if (IsMarkupLine(line))
+            if (opens && candidates.Count > 0)
             {
-                ReadMarkupLine(line, ref opens, ref closes);
-                continue;
+                importedFiles.Push(candidates[^1]);
             }
-
-            if (!IsSeparator(line))
+            else if (closes && importedFiles.Count > 0)
             {
-                candidates.Add(line);
+                importedFiles.Pop();
             }
         }
 
-        if (opens && candidates.Count > 0)
+        /// <summary>True when the trimmed comment line is XML markup rather than the resolved path.</summary>
+        private static bool IsMarkupLine(string line) => line.StartsWith('<');
+
+        /// <summary>
+        /// Classifies one markup line: a close tag closes the import, and an opening tag that is not
+        /// self-closing (<c>/&gt;</c>) opens it. Anything else, such as a self-closing import, is ignored.
+        /// </summary>
+        private static void ReadMarkupLine(string line, ref bool opens, ref bool closes)
         {
-            importedFiles.Push(candidates[^1]);
+            if (line.StartsWith(ImportCloseTag, StringComparison.OrdinalIgnoreCase))
+            {
+                closes = true;
+            }
+            else if (line.StartsWith(ImportOpenTag, StringComparison.OrdinalIgnoreCase)
+                && !line.EndsWith("/>", StringComparison.Ordinal))
+            {
+                opens = true;
+            }
         }
-        else if (closes && importedFiles.Count > 0)
-        {
-            importedFiles.Pop();
-        }
+
+        /// <summary>A banner line made only of <c>=</c> or <c>*</c>.</summary>
+        private static bool IsSeparator(string line) =>
+            line.All(character => character is '=' or '*');
     }
-
-    /// <summary>True when the trimmed comment line is XML markup rather than the resolved path.</summary>
-    private static bool IsMarkupLine(string line) => line.StartsWith('<');
-
-    /// <summary>
-    /// Classifies one markup line: a close tag closes the import, and an opening tag that is not
-    /// self-closing (<c>/&gt;</c>) opens it. Anything else, such as a self-closing import, is ignored.
-    /// </summary>
-    private static void ReadMarkupLine(string line, ref bool opens, ref bool closes)
-    {
-        if (line.StartsWith(ImportCloseTag, StringComparison.OrdinalIgnoreCase))
-        {
-            closes = true;
-        }
-        else if (line.StartsWith(ImportOpenTag, StringComparison.OrdinalIgnoreCase)
-            && !line.EndsWith("/>", StringComparison.Ordinal))
-        {
-            opens = true;
-        }
-    }
-
-    /// <summary>A banner line made only of <c>=</c> or <c>*</c>.</summary>
-    private static bool IsSeparator(string line) =>
-        line.All(character => character is '=' or '*');
 
     private static void TryKill(Process process)
     {

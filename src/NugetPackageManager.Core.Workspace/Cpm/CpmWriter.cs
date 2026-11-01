@@ -338,7 +338,7 @@ public static partial class CpmWriter
     {
         // A per-framework update must not bump a shared property: that would move every
         // framework's version at once.
-        if (!CanUsePropertyPath(change, projectPaths, workspaceRoots, propertyLocator))
+        if (!TryCreatePropertyWriteContext(change, projectPaths, workspaceRoots, propertyLocator, out var context))
         {
             return null;
         }
@@ -360,10 +360,10 @@ public static partial class CpmWriter
         }
 
         var definition = await ResolveDefinitionAsync(
-            projectPaths!, propertyName, propertyLocator!, cancellationToken)
+            context.ProjectPaths, propertyName, context.PropertyLocator, cancellationToken)
             .ConfigureAwait(false);
 
-        if (definition is null || !IsInsideWorkspaceRoot(definition.FilePath, workspaceRoots!))
+        if (definition is null || !IsInsideWorkspaceRoot(definition.FilePath, context.WorkspaceRoots))
         {
             return null;
         }
@@ -379,18 +379,34 @@ public static partial class CpmWriter
     }
 
     /// <summary>
-    /// True when the change is even allowed to touch a property definition: a locator, projects and
-    /// workspace roots are all supplied, and the update is not scoped to one framework.
+    /// The inputs a property write needs, captured only when the change is even allowed to touch a
+    /// property definition: a locator, projects and workspace roots are all supplied, and the update
+    /// is not scoped to one framework.
     /// </summary>
-    private static bool CanUsePropertyPath(
+    private sealed record PropertyWriteContext(
+        IReadOnlyList<string> ProjectPaths,
+        IReadOnlyList<string> WorkspaceRoots,
+        ICpmPropertyLocator PropertyLocator);
+
+    /// <summary>
+    /// Builds the <see cref="PropertyWriteContext"/> for one change. False, with a <c>null</c>
+    /// context, when the change has to stay on the literal path.
+    /// </summary>
+    private static bool TryCreatePropertyWriteContext(
         CpmVersionChange change,
         IReadOnlyList<string>? projectPaths,
         IReadOnlyList<string>? workspaceRoots,
-        ICpmPropertyLocator? propertyLocator) =>
-        propertyLocator is not null
-        && projectPaths is { Count: > 0 }
-        && workspaceRoots is { Count: > 0 }
-        && change.EffectiveScope != CpmWriteScope.Group;
+        ICpmPropertyLocator? propertyLocator,
+        [NotNullWhen(true)] out PropertyWriteContext? context)
+    {
+        context = propertyLocator is not null
+            && projectPaths is { Count: > 0 }
+            && workspaceRoots is { Count: > 0 }
+            && change.EffectiveScope != CpmWriteScope.Group
+            ? new PropertyWriteContext(projectPaths, workspaceRoots, propertyLocator)
+            : null;
+        return context is not null;
+    }
 
     /// <summary>
     /// Reads the addressed occurrences as property references. False as soon as one is conditional,
@@ -519,7 +535,8 @@ public static partial class CpmWriter
             CpmWriteScope.Group => GroupOccurrences(occurrences, change.Condition),
             CpmWriteScope.All => AllOccurrences(occurrences),
             CpmWriteScope.Unconditional => UnconditionalOccurrences(occurrences),
-            CpmWriteScope.First or _ => FirstOccurrence(occurrences),
+            CpmWriteScope.First => FirstOccurrence(occurrences),
+            _ => FirstOccurrence(occurrences),
         };
 
     /// <summary>Every occurrence in the given condition; a change without one addresses nothing.</summary>
