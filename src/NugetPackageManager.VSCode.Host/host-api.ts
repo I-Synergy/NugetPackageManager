@@ -65,6 +65,7 @@ import type {
 import type { Result } from "@/common/rpc/result";
 import { ok, fail } from "@/common/rpc/result";
 import CpmResolver, { type CpmFrameworkEntry, type CpmPackageMap, type CpmVersionChange } from "./utilities/cpm-resolver";
+import CpmWriter from "./utilities/cpm-writer";
 import { getTfmMajorVersion } from "./utilities/cpm-condition";
 import { findPathOutsideWorkspaceAsync } from "./utilities/workspace-path";
 import { compareVersions, isVersionInRange, satisfiesVersionRange } from "./utilities/version";
@@ -152,7 +153,7 @@ function PlanCentralUpdates(
 
 async function WriteCentralVersionsAsync(propsFile: string, plan: CentralUpdatePlan): Promise<void> {
   if (plan.Changes.length > 0) {
-    await CpmResolver.UpdateCpmVersionsAsync(propsFile, plan.Changes);
+    await CpmWriter.UpdateCpmVersionsAsync(propsFile, plan.Changes);
   }
   if (plan.Conditional.length === 0) return;
 
@@ -496,7 +497,7 @@ async function applyBatchUpdateAsync(
   try {
     const { changesByFile, nonCpmProjects } = await resolveCpmChangesForUpdateAsync(update, context.cpmMapCache);
     for (const [propsFilePath, changes] of changesByFile) {
-      await CpmResolver.UpdateCpmVersionsAsync(propsFilePath, changes);
+      await CpmWriter.UpdateCpmVersionsAsync(propsFilePath, changes);
     }
     for (const projectPath of nonCpmProjects) {
       // A transactional batch restores once at the end; letting `dotnet add`
@@ -823,7 +824,7 @@ async function applyProjectUpdateAsync(
   if (cpm.isCpmEnabled && cpm.isCpmPackage) {
     const scope = "scope" in cpmScope ? cpmScope.scope : "group";
     const condition = "condition" in cpmScope ? cpmScope.condition : undefined;
-    await CpmResolver.UpdatePackageVersionAsync(
+    await CpmWriter.UpdatePackageVersionAsync(
       request.ProjectPath,
       request.PackageId,
       request.Version!,
@@ -949,7 +950,7 @@ async function removeUnusedFromPropsAsync(
   for (const packageId of propsFile.Unused) {
     if (signal?.aborted) break;
     try {
-      const didRemove = await CpmResolver.RemovePackageVersionAsync(propsFile.Path, packageId);
+      const didRemove = await CpmWriter.RemovePackageVersionAsync(propsFile.Path, packageId);
       if (didRemove) acc.removed.push(packageId);
     } catch (err) {
       acc.errors.push(`Failed to remove ${packageId} from ${propsFile.Path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -978,7 +979,7 @@ async function runConsolidateAsync(
 
     report("Writing package versions…", 60);
     for (const [propsFilePath, changes] of changesByFile) {
-      await CpmResolver.UpdateCpmVersionsAsync(propsFilePath, changes);
+      await CpmWriter.UpdateCpmVersionsAsync(propsFilePath, changes);
     }
 
     await applyConsolidationAddsAsync(request, nonCpmProjects, signal);
@@ -2896,7 +2897,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
 
         if (target === "cpm") {
-          await CpmResolver.UpdatePackageVersionAsync(
+          await CpmWriter.UpdatePackageVersionAsync(
             request.ProjectPath,
             request.PackageId,
             request.Version
@@ -3527,7 +3528,7 @@ async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSig
   for (const cpmFile of cpmFiles) {
     if (referencedCpmFiles.has(cpmFile)) continue;
     try {
-      await CpmResolver.RemovePackageVersionAsync(cpmFile, packageId);
+      await CpmWriter.RemovePackageVersionAsync(cpmFile, packageId);
     } catch (err) {
       Logger.error(`cleanupUnusedCpmPackage: Failed to clean ${cpmFile}`, err);
       throw err;
@@ -3591,7 +3592,7 @@ async function applyConflictFixesAsync(
     const requiredVersion = suggestedVersion!;
     if (cpmVersions?.has(packageId)) {
       Logger.info(`restoreWithConflictResolution: Updating CPM ${packageId} to ${requiredVersion}`);
-      await CpmResolver.UpdatePackageVersionAsync(projectPath, packageId, requiredVersion);
+      await CpmWriter.UpdatePackageVersionAsync(projectPath, packageId, requiredVersion);
       fixedAny = true;
       continue;
     }

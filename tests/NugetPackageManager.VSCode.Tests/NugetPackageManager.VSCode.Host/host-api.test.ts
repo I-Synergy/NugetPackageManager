@@ -24,26 +24,81 @@ function fixturesRoot(): string {
  * Routes the core's `getProjects` call. The host sends every path in one request and the core
  * skips projects it cannot read, so `resolve` returns null for an unreadable project.
  */
-function stubProjectParsing(
-    sandbox: sinon.SinonSandbox,
-    resolve: (projectPath: string) => Project | null
-): sinon.SinonStub {
+/**
+ * Routes the core's calls for the host tests.
+ *
+ * `getProjects` is answered by whichever resolver the test installs with `useProjects`.
+ * The write methods are bridged to the TypeScript writer here only so the orchestration tests
+ * (rollback, job state, conflict attribution) can assert what landed on disk; in production the
+ * core does the writing, and its behaviour is pinned by the golden files in
+ * `tests/__fixtures__/cpm/expected`.
+ */
+let projectResolver: ((projectPath: string) => Project | null) | null = null;
+
+function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
+    projectResolver = null;
+
     return sandbox.stub(coreProcess, 'CallAsync').callsFake((async (
         method: string,
-        params: { projectPaths?: string[] }
+        params: Record<string, never>
     ) => {
-        if (method !== 'getProjects') {
-            throw new Error(`unexpected core method: ${method}`);
-        }
+        switch (method) {
+            case 'getProjects': {
+                const projects: Project[] = [];
+                for (const projectPath of (params as unknown as { projectPaths?: string[] }).projectPaths ?? []) {
+                    const project = projectResolver?.(projectPath) ?? null;
+                    if (project) projects.push(project);
+                }
 
-        const projects: Project[] = [];
-        for (const projectPath of params.projectPaths ?? []) {
-            const project = resolve(projectPath);
-            if (project) projects.push(project);
-        }
+                return projects;
+            }
 
-        return projects;
+            case 'updateCpmVersions': {
+                const request = params as unknown as {
+                    propsFilePath: string;
+                    changes: Array<{ packageId: string; version: string; condition?: string; scope?: 'group' | 'unconditional' | 'all' | 'first' }>;
+                };
+                await CpmResolver.UpdateCpmVersionsAsync(request.propsFilePath, request.changes);
+                return { applied: request.changes.length };
+            }
+
+            case 'removePackageVersion': {
+                const request = params as unknown as { propsFilePath: string; packageId: string };
+                return { removed: await CpmResolver.RemovePackageVersionAsync(request.propsFilePath, request.packageId) };
+            }
+
+            case 'updatePackageVersion': {
+                const request = params as unknown as {
+                    projectPath: string;
+                    packageId: string;
+                    version: string;
+                    condition?: string;
+                    scope?: 'group' | 'unconditional' | 'all' | 'first';
+                };
+                await CpmResolver.UpdatePackageVersionAsync(
+                    request.projectPath,
+                    request.packageId,
+                    request.version,
+                    request.condition,
+                    request.scope
+                );
+                return { updated: true };
+            }
+
+            default:
+                throw new Error(`unexpected core method: ${method}`);
+        }
     }) as never);
+}
+
+let coreStub: sinon.SinonStub | undefined;
+
+/** Installs the projects the core should report; the router is created in `setup`. */
+function stubProjectParsing(
+    resolve: (projectPath: string) => Project | null
+): sinon.SinonStub {
+    projectResolver = resolve;
+    return coreStub as sinon.SinonStub;
 }
 
 suite('HostAPI Tests', () => {
@@ -61,6 +116,7 @@ suite('HostAPI Tests', () => {
         // The in-process path is what these tests exercise; the .NET core has its own suite.
         coreConfigured = false;
         sandbox.stub(coreProcess, 'IsConfigured').get(() => coreConfigured);
+        coreStub = installCoreStub(sandbox);
     });
 
     teardown(() => {
@@ -75,23 +131,28 @@ suite('HostAPI Tests', () => {
             coreConfigured = true;
             const projectUri = { fsPath: '/ws/MyApp/MyApp.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([projectUri]);
-            const call = sandbox.stub(coreProcess, 'CallAsync').resolves([
-                { Name: 'FromCore', Path: '/ws/MyApp/MyApp.csproj', Packages: [], CpmEnabled: false },
-            ]);
+            stubProjectParsing(() => ({
+                Name: 'FromCore',
+                Path: '/ws/MyApp/MyApp.csproj',
+                Packages: [],
+                CpmEnabled: false,
+            } as Project));
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({});
 
             assert.ok(result.ok);
             assert.strictEqual(result.value.Projects[0]!.Name, 'FromCore');
-            assert.strictEqual(call.firstCall.args[0], 'getProjects');
+            assert.strictEqual(coreStub!.firstCall.args[0], 'getProjects');
         });
 
         test('reports a failure when the core cannot parse the workspace', async () => {
             coreConfigured = true;
             const projectUri = { fsPath: '/ws/MyApp/MyApp.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([projectUri]);
-            sandbox.stub(coreProcess, 'CallAsync').rejects(new Error('core exploded'));
+            projectResolver = () => {
+                throw new Error('core exploded');
+            };
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({});
@@ -102,7 +163,7 @@ suite('HostAPI Tests', () => {
         test('returns sorted projects on success', async () => {
             const projectUri = { fsPath: '/ws/MyApp/MyApp.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([projectUri]);
-            stubProjectParsing(sandbox, () => ({
+            stubProjectParsing(() => ({
                 Name: 'MyApp',
                 Path: '/ws/MyApp/MyApp.csproj',
                 Packages: [],
@@ -132,7 +193,7 @@ suite('HostAPI Tests', () => {
             const uri2 = { fsPath: '/ws/B.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uri1, uri2]);
 
-            stubProjectParsing(sandbox, (projectPath) =>
+            stubProjectParsing((projectPath) =>
                 projectPath === '/ws/A.csproj'
                     ? ({ Name: 'A', Path: '/ws/A.csproj', Packages: [], CpmEnabled: false } as Project)
                     : null
@@ -342,7 +403,7 @@ suite('HostAPI Tests', () => {
             const uriB = makeProjectUri('/ws/B.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uriA, uriB]);
 
-            stubProjectParsing(sandbox, (projectPath) =>
+            stubProjectParsing((projectPath) =>
                 projectPath === '/ws/A.csproj'
                     ? makeProject('A', '/ws/A.csproj', '1.0.0')
                     : makeProject('B', '/ws/B.csproj', '2.0.0')
@@ -369,7 +430,7 @@ suite('HostAPI Tests', () => {
                 await gate;
                 return [uri];
             });
-            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0'));
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0'));
             setupNugetApi('2.0.0');
 
             const api = createHostAPI();
@@ -415,7 +476,7 @@ suite('HostAPI Tests', () => {
                 }],
             } as unknown as Project;
 
-            stubProjectParsing(sandbox, () => project);
+            stubProjectParsing(() => project);
             setupNugetApi('3.0.0');
 
             const api = createHostAPI();
@@ -433,7 +494,7 @@ suite('HostAPI Tests', () => {
             const uriA = makeProjectUri('/ws/A.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uriA]);
 
-            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '2.0.0'));
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '2.0.0'));
 
             setupNugetApi('2.0.0');
 
@@ -449,7 +510,7 @@ suite('HostAPI Tests', () => {
             const uri = makeProjectUri('/ws/A.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
 
-            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0-beta'));
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0-beta'));
 
             setupNugetApi('1.0.0');
 
@@ -465,7 +526,7 @@ suite('HostAPI Tests', () => {
         test('serves the persisted scan when PreferCache is set', async () => {
             const uri = makeProjectUri('/ws/A.csproj');
             const findFiles = sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
-            const parseStub = stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0'));
+            const parseStub = stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0'));
             setupNugetApi('2.0.0');
 
             let stored: unknown;
@@ -505,7 +566,7 @@ suite('HostAPI Tests', () => {
         sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
             String(pattern).includes('Directory.Packages.props') ? [] : [fake, real]
         );
-        const parseStub = stubProjectParsing(sandbox, (projectPath) =>
+        const parseStub = stubProjectParsing((projectPath) =>
             projectPath === fake.fsPath
                 ? null
                 : ({ Name: 'Real', Path: real.fsPath, Packages: [] } as unknown as Project)
@@ -533,7 +594,7 @@ suite('HostAPI Tests', () => {
 
             sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
             sandbox.stub(CpmResolver, 'FindCpmFilePathAsync').resolves(null);
-            stubProjectParsing(sandbox, (projectPath) => {
+            stubProjectParsing((projectPath) => {
                 const name = path.basename(projectPath, '.csproj');
                 const fixture = projects.find((p) => p.name === name);
                 if (!fixture) return null;
@@ -586,7 +647,7 @@ suite('HostAPI Tests', () => {
             );
 
             // The core supplies the per-TFM resolutions; this test covers the host's row shaping.
-            stubProjectParsing(sandbox, (projectPath) => {
+            stubProjectParsing((projectPath) => {
                 const net11 = projectPath.includes('net11');
                 const tfm = net11 ? 'net11.0' : 'net10.0';
                 const version = net11 ? '11.0.0-rc.2.26504.105' : '10.0.13';
@@ -874,7 +935,7 @@ suite('HostAPI Tests', () => {
             sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
                 String(pattern).includes('sln') ? [] : [{ fsPath: projectPath }] as vscode.Uri[]
             );
-            stubProjectParsing(sandbox, () => ({
+            stubProjectParsing(() => ({
                 Path: projectPath,
                 Name: 'App.csproj',
                 CpmEnabled: true,
@@ -1220,7 +1281,7 @@ suite('HostAPI Tests', () => {
         test('runs a package update as a job', async () => {
             setupWorkspace('unconditional-plus-conditional.props');
             sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').resolves();
-            stubProjectParsing(sandbox, () => ({
+            stubProjectParsing(() => ({
                 Path: projectPath,
                 Name: 'App.csproj',
                 CpmEnabled: true,
@@ -1641,7 +1702,7 @@ suite('HostAPI Tests', () => {
                     }],
                 }],
             } as unknown as Project;
-            stubProjectParsing(sandbox, () => project);
+            stubProjectParsing(() => project);
             sandbox.stub(vscode.workspace, 'findFiles').resolves([{ fsPath: projectPath } as vscode.Uri]);
 
             const relationalVersions = [
@@ -1720,7 +1781,7 @@ suite('HostAPI Tests', () => {
                     }],
                 }],
             } as unknown as Project;
-            stubProjectParsing(sandbox, () => project);
+            stubProjectParsing(() => project);
             sandbox.stub(vscode.workspace, 'findFiles').resolves([{ fsPath: projectPath } as vscode.Uri]);
 
             const relationalVersions = [
