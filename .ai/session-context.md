@@ -1,10 +1,43 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-10-30
+**Last Updated:** 2026-11-01
 **Project Version:** 2.2.0
-**Branch:** development/main
+**Branch:** spike/blazor-wasm-webview
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
+
+---
+
+## Current state (2026-11-01) — read this first
+
+The branch `spike/blazor-wasm-webview` carries a large, committed refactor; the older sections
+below describe the pre-refactor tree and are history, not current state.
+
+**Layout.** `NugetPackageManager.slnx` at the root; C# projects under `src/` with a test project
+each under `tests/`; the TypeScript sources are `src/NugetPackageManager.VSCode.{Common,Host,Webview}`
+with their own `tsconfig.json` extending `tsconfig.base.json` (which owns the `@/common`, `@/host`,
+`@/web` aliases); TS tests live in `tests/NugetPackageManager.VSCode.Tests`; MSBuild fixtures in
+`tests/__fixtures__`. Central package management is at the root and opts out of `__fixtures__`.
+
+**The .NET core.** A sidecar process (`dist/core`, launched by `nuget/core-process.ts`) now owns
+the NuGet source client (search, registration, dependency groups, advisories) and the project
+model (csproj reading, CPM resolution per framework, target-framework evaluation, and the CPM
+writer). `nuget/api.ts`, `utilities/project-parser.ts` and `utilities/project-framework-resolver.ts`
+are deleted.
+
+**Tests.** `dotnet test` 107/107 across three MSTest projects; `npm test` 487 passing;
+`npm run quality` (8 steps) includes the C# build and tests.
+
+**Remaining on the migration.** `utilities/cpm-resolver.ts` and `utilities/cpm-condition.ts` are the
+last TypeScript twins, and both are read-only in production. Finishing needs: a TS adapter for the
+`getCpmMap` handler (already implemented and tested in C#), inlining `getTfmMajorVersion`, switching
+the ~11 read call sites, then deleting both files. Plan and status:
+`.ai/plans/ts-to-csharp-migration.md`; the Blazor-vs-sidecar decision:
+`.ai/analysis/2026-11-01-blazor-wasm-webview-review.md`.
+
+**Caveat for the tests.** `host-api.test.ts` bridges the core's write methods to the TypeScript
+writer so the orchestration tests can assert file contents; that bridge must go when
+`cpm-resolver.ts` does.
 
 ---
 

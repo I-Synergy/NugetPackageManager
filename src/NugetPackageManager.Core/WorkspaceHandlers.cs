@@ -20,10 +20,38 @@ public sealed class WorkspaceHandlers
         new(StringComparer.Ordinal)
         {
             ["getProjects"] = HandleGetProjectsAsync,
+            ["getCpmMap"] = HandleGetCpmMapAsync,
             ["updateCpmVersions"] = HandleUpdateCpmVersionsAsync,
             ["removePackageVersion"] = HandleRemovePackageVersionAsync,
             ["updatePackageVersion"] = HandleUpdatePackageVersionAsync,
         };
+
+    private Task<object?> HandleGetCpmMapAsync(JsonElement parameters, CancellationToken cancellationToken)
+    {
+        _ = cancellationToken;
+
+        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        if (!File.Exists(propsFilePath))
+        {
+            return Task.FromResult<object?>(null);
+        }
+
+        var map = CpmPropsReader.Parse(File.ReadAllText(propsFilePath));
+
+        return Task.FromResult<object?>(new
+        {
+            // Keyed objects rather than arrays so the host can rebuild its Maps directly.
+            unconditional = map.Unconditional,
+            conditional = map.Conditional.Select(entry => new
+            {
+                condition = entry.Condition,
+                framework = entry.Framework,
+                versions = entry.Versions,
+                order = entry.Order,
+            }),
+            hasConditionalGroups = map.HasConditionalGroups,
+        });
+    }
 
     private async Task<object?> HandleUpdateCpmVersionsAsync(
         JsonElement parameters,

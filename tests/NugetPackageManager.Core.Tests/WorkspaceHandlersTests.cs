@@ -108,6 +108,54 @@ public class WorkspaceHandlersTests
         StringAssert.Contains(missingJson, "\"removed\":false");
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetCpmMap_ReturnsUnconditionalAndConditionalGroups()
+    {
+        File.WriteAllText(propsPath, """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Pkg.Shared" Version="1.0.0" />
+              </ItemGroup>
+              <ItemGroup Condition="$(TargetFramework.StartsWith('net10.0'))">
+                <PackageVersion Include="Pkg.Shared" Version="2.0.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        var handlers = CreateHandlers();
+
+        // Act
+        var result = await handlers["getCpmMap"](
+            Serialize(new { propsFilePath = propsPath }),
+            CancellationToken.None);
+
+        // Assert
+        var json = JsonSerializer.Serialize(result, ProtocolJson.Options);
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.AreEqual("1.0.0", root.GetProperty("unconditional").GetProperty("Pkg.Shared").GetString());
+        Assert.IsTrue(root.GetProperty("hasConditionalGroups").GetBoolean());
+        var group = root.GetProperty("conditional")[0];
+        Assert.AreEqual("net10.0", group.GetProperty("framework").GetString());
+        Assert.AreEqual("2.0.0", group.GetProperty("versions").GetProperty("Pkg.Shared").GetString());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetCpmMap_MissingFile_ReturnsNull()
+    {
+        var handlers = CreateHandlers();
+
+        var result = await handlers["getCpmMap"](
+            Serialize(new { propsFilePath = Path.Combine(directory, "Absent.props") }),
+            CancellationToken.None);
+
+        Assert.IsNull(result);
+    }
+
     private static Dictionary<string, RpcHandler> CreateHandlers() =>
         new WorkspaceHandlers(new WorkspaceModelService()).Create();
 
