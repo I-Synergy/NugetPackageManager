@@ -52,6 +52,33 @@ reads use explicit fixture maps. `utilities/cpm-reader.test.ts` covers the adapt
 
 ---
 
+## Completed: effective CPM versions via MSBuild (2026-11-01)
+
+Property-based versions (`<PackageVersion Version="$(FooBarVersion)" />`, and `$(...)` on a
+non-CPM `PackageReference`) are now evaluated instead of read as literal text.
+
+- **Read:** `CpmEvaluator` runs `dotnet msbuild -getItem:PackageVersion -getItem:PackageReference`
+  (cached, bounded, only when a version contains `$(`). `WorkspaceModelService` uses the flat
+  evaluation and one per-TFM evaluation for conditional groups; `CpmPropsReader.ResolveVersions`
+  and `ProjectFileReader.Read` gained optional effective-version maps. Failure falls back to the
+  raw XML value.
+- **Write (scope C):** `CpmPropertyLocator` runs `dotnet msbuild -pp`, parses the import boundary
+  comments, and returns the last unconditional property definition and its real file.
+  `CpmWriter` edits that property (same props file, `Directory.Build.props`, an import, or the
+  project file) when the change addresses only unconditional lines, all projects agree, and the
+  file is inside a workspace root. Shared properties are edited deliberately. Embedded
+  expressions, conditional definitions, missing roots and per-TFM (`Group`) updates fall back to
+  a literal edit.
+- **Transactions:** new `resolveCpmWriteTargets` RPC lets the host snapshot the property file
+  before writing; batch, project update and `updateCentralVersions` all roll it back on failure.
+  `WorkspaceHandlers` invalidates the evaluator cache after every CPM write.
+- **Tests:** Core.Workspace 145, Core.Tests 89, Core.NuGet.Tests 39; `npm test` 370; E2E 4/4
+  (including a real `Directory.Build.props` variable edit); `npm run quality` PASS.
+- **Known follow-up:** `WorkspaceModelService.cpmCache` (parsed raw map per props file) is still
+  not invalidated after a literal write — pre-existing, unchanged by this slice.
+
+Details: `.ai/completed/cpm-effective-version-evaluation.md`.
+
 ## Code-organisation pass (2026-11-01) — one type per file, no `*Dto`
 
 `src/` and `tests/` now honour `.ai/reference/critical-rules.md` rule 10 and the

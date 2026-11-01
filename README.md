@@ -34,6 +34,8 @@
 - [Configuration](#configuration)
 - [Private Feed Authentication](#private-feed-authentication)
 - [Central Package Management](#central-package-management)
+  - [Multi-framework version management](#multi-framework-version-management)
+  - [Property-based versions](#property-based-versions)
 - [Inline Version Decorations](#inline-version-decorations)
 - [Troubleshooting: SDK and Workload Errors](#troubleshooting-sdk-and-workload-errors)
 - [Contributing](#contributing)
@@ -61,7 +63,7 @@
 | 🧹 | **Cleanup** | Find and remove unused `PackageVersion` entries from `Directory.Packages.props`, with automatic backups — plus direct references that the graph already provides transitively |
 | 🌲 | **Project Tree** | Checkbox-based project selector — scope every operation to exactly the projects you want |
 | 🔐 | **Private Feeds** | Reads `NuGet.config`, supports Azure Artifacts Credential Provider and custom password scripts |
-| 📌 | **CPM Support** | Full Central Package Management — detects `Directory.Packages.props`, tracks version sources |
+| 📌 | **CPM Support** | Full Central Package Management — detects `Directory.Packages.props`, tracks version sources, and resolves `$(...)` version properties through MSBuild |
 | ✏️ | **Inline Decorations** | Optional gutter hints in `.csproj` files showing available updates right in the editor |
 | ⌨️ | **Keyboard Accessible** | Full keyboard navigation and ARIA support across all interactive elements |
 
@@ -152,6 +154,7 @@ Lists all packages where a newer version is available on the configured sources.
 
 - Each row shows the **installed version → latest version** with source attribution
 - **Select individual packages** with checkboxes, then click **Update selected** or **Update all**
+- Installed versions are **effective versions**: a `Version="$(FooBarVersion)"` in `Directory.Packages.props`, or a property-based `PackageReference`, is evaluated through MSBuild before the comparison, so rows never show a literal `$(...)` reference
 - Packages are written **one at a time**, with per-package progress; the Activity Bar badge updates as rows clear
 - `dotnet restore` runs **once after all selected versions are written**, so dependent packages resolve against the complete set
 - If a write or the final restore fails, the host restores the affected file snapshots and reports a rollback. Single-package installs, updates and uninstalls take the same snapshot and roll back when their restore fails.
@@ -372,6 +375,7 @@ NuGet Package Manager for Visual Studio Code has first-class support for [Centra
 - **Auto-detection** — projects using `Directory.Packages.props` are detected and labelled in the project tree
 - **Version source tracking** — each installed package shows whether its version comes from `project`, `central`, or `override`
 - **Framework-scoped versions** — conditional `<ItemGroup Condition="...">` groups are evaluated per target framework, so the same package can show and update different versions for `net10.0` and `net11.0`
+- **Property-based versions** — a version written as `$(FooBarVersion)` is resolved through MSBuild's object model instead of being read as literal text; updates keep the variable and edit the property where it is defined (see [Property-based versions](#property-based-versions))
 - **Aligned updates** — for runtime-aligned packages (`Microsoft.Extensions.*`, `Microsoft.AspNetCore.*`, `Microsoft.EntityFrameworkCore.*`, `Microsoft.Maui.*`, `System.*`), the primary update stays on the framework's major line; the overall latest version is offered as a separate action
 - **Consolidate** — understands CPM boundaries and applies consolidation correctly, scoped to the same framework group
 - **Restore handling** — uses the correct `dotnet` invocation for CPM workspaces
@@ -405,6 +409,45 @@ Use the framework dropdown to focus on one base `.NET` line, **Shared** for unco
 ![Installed packages grouped per target framework](docs/images/screenshot-installed-frameworks.png)
 
 ![Updates with per-framework rows and the Update all TFMs action](docs/images/screenshot-updates-frameworks.png)
+
+### Property-based versions
+
+Versions are often centralised in an MSBuild property instead of a literal:
+
+```xml
+<!-- Directory.Build.props, an imported .props, the project file, or the props file itself -->
+<PropertyGroup>
+  <FooBarVersion>1.2.3</FooBarVersion>
+</PropertyGroup>
+
+<!-- Directory.Packages.props -->
+<ItemGroup>
+  <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+</ItemGroup>
+```
+
+The extension asks MSBuild for the evaluated `PackageVersion` / `PackageReference` items (`dotnet msbuild -getItem:…`) instead of reading the XML text, so:
+
+- **Installed**, **Updates**, **Consolidate** and **Vulnerabilities** compare `1.2.3` — a row never shows `$(FooBarVersion)` or reports a false `$(FooBarVersion) != 1.4.0`;
+- conditional groups are evaluated **per target framework**, so a property-based version still produces one row per framework line;
+- a non-CPM `<PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />` is resolved the same way;
+- no restore is required, and evaluation only starts when a version actually contains `$(`.
+
+Updating a package that uses a **whole-value** reference keeps the reference: the property definition is rewritten in the file that declares it — `Directory.Packages.props`, `Directory.Build.props`, an imported `.props`/`.targets`, or the project file. A property shared by several `PackageVersion` entries moves all of them together, which is the point of the variable. A **per-framework** update is the exception: it writes a literal version into that condition's `PackageVersion`, so the other framework lines do not move.
+
+The extension falls back to a literal edit (leaving the property untouched) whenever the definition is not safely editable:
+
+| Situation | Behaviour |
+|---|---|
+| `Version="1.0.$(Minor)"` — a property embedded in other text | literal version on that `PackageVersion` |
+| A conditional `<FooBarVersion Condition="...">` | literal version |
+| More than one definition of the property | literal version |
+| The defining file is outside the workspace | literal version |
+| Projects sharing the props file resolve the property differently | literal version |
+
+Every file the update will touch — including the property file — is snapshotted before the first write, and a failed restore rolls it back with the rest of the transaction. Evaluations are cached per project and target framework and invalidated after a CPM write, so the next refresh sees the new value.
+
+Because the tabs and the write path use the same evaluation, this works with the existing [multi-framework rows](#multi-framework-version-management), transactional batch updates, **Consolidate** and **Cleanup** without a separate code path.
 
 ---
 
@@ -655,6 +698,7 @@ The extension has two isolated contexts that communicate via a typed RPC layer o
 
 - **Typed RPC** — `HostAPI` interface in `src/NugetPackageManager.VSCode.Common/rpc/types.ts` is the single source of truth for all IPC. Every method returns `Result<T>` (a discriminated union), so error paths are always explicit.
 - **.NET sidecar** — NuGet access, the project model, CPM resolution, dependency analysis and toolchain detection live in C# (`NugetPackageManager.slnx`) and are reached over a stdio JSON protocol. A missing or failing core surfaces as a structured error, never a crashed host.
+- **MSBuild-evaluated versions** — `dotnet msbuild -getItem:PackageVersion` supplies effective package versions, and `dotnet msbuild -pp` maps a property definition to the file that really declares it. Both live in `Core.Workspace/Cpm/` (`CpmEvaluator`, `CpmPropertyLocator`), are cached in the sidecar, and the write path snapshots a property file alongside `Directory.Packages.props`.
 - **Marketplace-style full-page UI** — the entire interface opens in an editor tab with framework-grouped cards, a sidebar launcher and VS Code theme-aware surfaces.
 - **Lit web components** — built with LitElement + native HTML elements styled via VS Code CSS variables. No frameworks, no heavy dependencies in the webview bundle.
 - **Dual bundle + sidecar** — esbuild produces two bundles, `dist/extension.js` (Node.js CommonJS for the host) and `dist/web.js` (ESM for the webview); `npm run build:core` publishes the C# sidecar to `dist/core`.
@@ -666,7 +710,7 @@ The extension has two isolated contexts that communicate via a typed RPC layer o
 src/
 ├── NugetPackageManager.Core/            # .NET sidecar entry point, protocol, handlers
 ├── NugetPackageManager.Core.NuGet/      # NuGet source client, nuget.config, advisories
-├── NugetPackageManager.Core.Workspace/  # csproj model, CPM, target frameworks, dependencies
+├── NugetPackageManager.Core.Workspace/  # csproj model, CPM + property evaluation, target frameworks, dependencies
 ├── NugetPackageManager.VSCode.Common/   # Shared between host and web (RPC protocol, types)
 │   └── rpc/                             # RpcHost, RpcClient, types, Result<T>
 ├── NugetPackageManager.VSCode.Host/     # Extension host (Node.js context)

@@ -223,5 +223,93 @@ public class ProjectFileReaderTests
             model.Packages.Select(package => package.Id).ToArray());
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Read_EvaluatedVersion_ReplacesPropertyExpression()
+    {
+        // Arrange
+        var project = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluated = new Dictionary<string, string> { ["Foo.Bar"] = "1.2.3" };
+
+        // Act
+        var model = ProjectFileReader.Read(project, evaluatedVersions: evaluated);
+
+        // Assert
+        Assert.AreEqual("1.2.3", model.Packages[0].Version);
+        Assert.AreEqual("project", model.Packages[0].VersionSource);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Read_EvaluatedVersion_DoesNotTouchLiteralVersion()
+    {
+        // Arrange
+        var project = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" Version="2.0.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluated = new Dictionary<string, string> { ["Foo.Bar"] = "1.2.3" };
+
+        // Act
+        var model = ProjectFileReader.Read(project, evaluatedVersions: evaluated);
+
+        // Assert — the evaluated map only applies to `$(…)` values.
+        Assert.AreEqual("2.0.0", model.Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Read_PropertyVersionWithoutEvaluation_KeepsRawValue()
+    {
+        // Arrange
+        var project = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        // Act
+        var model = ProjectFileReader.Read(project);
+
+        // Assert
+        Assert.AreEqual("$(FooBarVersion)", model.Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Read_EvaluatedVersionOverride_ReplacesPropertyExpression()
+    {
+        // Arrange
+        var project = WriteProject("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" VersionOverride="$(OverrideVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluated = new Dictionary<string, string> { ["Foo.Bar"] = "9.9.9" };
+
+        // Act
+        var model = ProjectFileReader.Read(project, evaluatedVersions: evaluated);
+
+        // Assert
+        Assert.AreEqual("9.9.9", model.Packages[0].Version);
+        Assert.AreEqual("override", model.Packages[0].VersionSource);
+    }
+
     private string WriteProject(string content) => workspace!.WriteFile("Sample.csproj", content);
 }

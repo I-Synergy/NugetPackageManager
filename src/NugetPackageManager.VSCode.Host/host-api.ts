@@ -143,9 +143,14 @@ function PlanCentralUpdates(
   return plan;
 }
 
-async function WriteCentralVersionsAsync(propsFile: string, plan: CentralUpdatePlan): Promise<void> {
+async function WriteCentralVersionsAsync(
+  propsFile: string,
+  plan: CentralUpdatePlan,
+  projectPaths: string[],
+  workspaceRoots: string[]
+): Promise<void> {
   if (plan.Changes.length > 0) {
-    await CpmWriter.UpdateCpmVersionsAsync(propsFile, plan.Changes);
+    await CpmWriter.UpdateCpmVersionsAsync(propsFile, plan.Changes, projectPaths, workspaceRoots);
   }
   if (plan.Conditional.length === 0) return;
 
@@ -393,19 +398,24 @@ async function runBatchUpdateAsync(
   const skipRestore = request.SkipRestore === true || getSetting<boolean>("skipRestore", false);
   const allProjectPaths = [...new Set(request.Updates.flatMap((update) => update.ProjectPaths))];
 
-  report("Snapshotting files…", 3);
-  const snapshots = transactional
-    ? await snapshotFilesAsync(await collectBatchFilesAsync(request.Updates, allProjectPaths))
-    : undefined;
-
-  report("Updating packages…", 5);
-  const results: BatchUpdateRow[] = [];
+  // Build the CPM map cache and context before snapshotting: the snapshot set now depends on the
+  // same plan the write uses, so a property file returned by `resolveCpmWriteTargets` can be
+  // captured before the first edit.
   const context: BatchUpdateContext = {
     cpmMapCache: new Map<string, Promise<CpmPackageMap>>(),
     skipRestore,
     transactional,
     signal,
+    workspaceRoots: getWorkspaceRoots(),
   };
+
+  report("Snapshotting files…", 3);
+  const snapshots = transactional
+    ? await snapshotFilesAsync(await collectBatchFilesAsync(request.Updates, allProjectPaths, context))
+    : undefined;
+
+  report("Updating packages…", 5);
+  const results: BatchUpdateRow[] = [];
 
   let transactionFailed = false;
   for (const [i, update] of request.Updates.entries()) {
@@ -459,11 +469,13 @@ type BatchUpdateContext = {
   skipRestore: boolean;
   transactional: boolean;
   signal: AbortSignal | undefined;
+  workspaceRoots: string[];
 };
 
 async function collectBatchFilesAsync(
   updates: BatchUpdateRequest["Updates"],
-  allProjectPaths: string[]
+  allProjectPaths: string[],
+  context: BatchUpdateContext
 ): Promise<string[]> {
   const affectedFiles = new Set<string>(allProjectPaths);
   for (const update of updates) {
@@ -471,8 +483,48 @@ async function collectBatchFilesAsync(
       const cpmFilePath = await CpmReader.FindCpmFilePathAsync(projectPath);
       if (cpmFilePath) affectedFiles.add(cpmFilePath);
     }
+
+    // A property-based version is written into the file that declares the property
+    // (e.g. Directory.Build.props), not the props file, so those targets must be snapshotted too.
+    for (const target of await resolveBatchWriteTargetsAsync(update, context)) {
+      affectedFiles.add(target);
+    }
   }
   return [...affectedFiles];
+}
+
+/**
+ * The files the CPM write for one batch update would edit, resolved read-only before snapshotting.
+ * Planning is best-effort: a failure for one update must not abort the batch, so the write path
+ * reports the real error per update.
+ */
+async function resolveBatchWriteTargetsAsync(
+  update: BatchUpdateRequest["Updates"][number],
+  context: BatchUpdateContext
+): Promise<string[]> {
+  if (!isValidPackageId(update.PackageId)) return [];
+  if (update.Version && !isValidNuGetVersion(update.Version)) return [];
+
+  try {
+    const { changesByFile, projectsByFile } = await resolveCpmChangesForUpdateAsync(
+      update,
+      context.cpmMapCache
+    );
+    const targets: string[] = [];
+    for (const [propsFilePath, changes] of changesByFile) {
+      const resolved = await CpmWriter.ResolveWriteTargetsAsync(
+        propsFilePath,
+        changes,
+        projectsByFile.get(propsFilePath) ?? [],
+        context.workspaceRoots
+      );
+      targets.push(...resolved);
+    }
+    return targets;
+  } catch {
+    // The snapshot stays as-is; the write path surfaces the error.
+    return [];
+  }
 }
 
 async function applyBatchUpdateAsync(
@@ -487,9 +539,17 @@ async function applyBatchUpdateAsync(
   }
 
   try {
-    const { changesByFile, nonCpmProjects } = await resolveCpmChangesForUpdateAsync(update, context.cpmMapCache);
+    const { changesByFile, nonCpmProjects, projectsByFile } = await resolveCpmChangesForUpdateAsync(
+      update,
+      context.cpmMapCache
+    );
     for (const [propsFilePath, changes] of changesByFile) {
-      await CpmWriter.UpdateCpmVersionsAsync(propsFilePath, changes);
+      await CpmWriter.UpdateCpmVersionsAsync(
+        propsFilePath,
+        changes,
+        projectsByFile.get(propsFilePath) ?? [],
+        context.workspaceRoots
+      );
     }
     for (const projectPath of nonCpmProjects) {
       // A transactional batch restores once at the end; letting `dotnet add`
@@ -516,9 +576,14 @@ async function applyBatchUpdateAsync(
 async function resolveCpmChangesForUpdateAsync(
   update: BatchUpdateRequest["Updates"][number],
   cpmMapCache: Map<string, Promise<CpmPackageMap>>
-): Promise<{ changesByFile: Map<string, CpmVersionChange[]>; nonCpmProjects: string[] }> {
+): Promise<{
+  changesByFile: Map<string, CpmVersionChange[]>;
+  nonCpmProjects: string[];
+  projectsByFile: Map<string, string[]>;
+}> {
   const changesByFile = new Map<string, CpmVersionChange[]>();
   const nonCpmProjects: string[] = [];
+  const projectsByFile = new Map<string, string[]>();
 
   for (const projectPath of update.ProjectPaths) {
     const cpmFilePath = await CpmReader.FindCpmFilePathAsync(projectPath);
@@ -540,9 +605,15 @@ async function resolveCpmChangesForUpdateAsync(
     };
     if (condition !== undefined) change.condition = condition;
     addCpmChange(changesByFile, cpmFilePath!, change);
+
+    // Track every project governed by this props file so the property locator can confirm they
+    // agree on where the property is defined.
+    const projects = projectsByFile.get(cpmFilePath!) ?? [];
+    if (!projects.includes(projectPath)) projects.push(projectPath);
+    projectsByFile.set(cpmFilePath!, projects);
   }
 
-  return { changesByFile, nonCpmProjects };
+  return { changesByFile, nonCpmProjects, projectsByFile };
 }
 
 async function loadBatchCpmMapAsync(
@@ -690,7 +761,7 @@ async function runProjectUpdateAsync(
   // snapshot all of them up front. A failed restore then leaves the workspace
   // exactly as it was, matching the batch path.
   report("Snapshotting files…", 10);
-  const snapshots = await snapshotProjectUpdateAsync(request, cpm.isCpmEnabled);
+  const snapshots = await snapshotProjectUpdateAsync(request, cpm, cpmScope);
 
   try {
     report("Writing package reference…", 30);
@@ -782,19 +853,63 @@ function resolveProjectCpmScope(request: UpdateProjectRequest, cpm: ProjectCpmSt
 
 async function snapshotProjectUpdateAsync(
   request: UpdateProjectRequest,
-  isCpmEnabled: boolean
+  cpm: ProjectCpmState,
+  cpmScope: ProjectCpmScope
 ): Promise<Map<string, FileSnapshot>> {
   const snapshotPaths = new Set<string>([request.ProjectPath]);
   const cpmFilePath = await CpmReader.FindCpmFilePathAsync(request.ProjectPath);
   if (cpmFilePath) snapshotPaths.add(cpmFilePath);
-  if (request.Type === "UNINSTALL" && isCpmEnabled) {
+  if (request.Type === "UNINSTALL" && cpm.isCpmEnabled) {
     const propsFiles = await vscode.workspace.findFiles(
       "**/Directory.Packages.props",
       "**/{bin,obj,node_modules,.git}/**"
     );
     for (const file of propsFiles) snapshotPaths.add(file.fsPath);
   }
+
+  // Preflight a CPM UPDATE so the file that declares a property-based version is snapshotted too.
+  for (const target of await resolveProjectUpdateTargetsAsync(request, cpm, cpmScope, cpmFilePath)) {
+    snapshotPaths.add(target);
+  }
+
   return snapshotFilesAsync([...snapshotPaths]);
+}
+
+/**
+ * The property file a single CPM UPDATE would edit, resolved read-only before the write.
+ * Best-effort: a planning failure only narrows the snapshot; the write reports the real error.
+ */
+async function resolveProjectUpdateTargetsAsync(
+  request: UpdateProjectRequest,
+  cpm: ProjectCpmState,
+  cpmScope: ProjectCpmScope,
+  cpmFilePath: string | null
+): Promise<string[]> {
+  if (
+    request.Type === "UNINSTALL" ||
+    !cpm.isCpmEnabled ||
+    !cpm.isCpmPackage ||
+    !cpmFilePath ||
+    !request.Version
+  ) {
+    return [];
+  }
+
+  try {
+    const scope = "scope" in cpmScope ? cpmScope.scope : "group";
+    const condition = "condition" in cpmScope ? cpmScope.condition : undefined;
+    const change: CpmVersionChange = { packageId: request.PackageId, version: request.Version, scope };
+    if (condition !== undefined) change.condition = condition;
+
+    return await CpmWriter.ResolveWriteTargetsAsync(
+      cpmFilePath,
+      [change],
+      [request.ProjectPath],
+      getWorkspaceRoots()
+    );
+  } catch {
+    return [];
+  }
 }
 
 async function applyProjectUpdateAsync(
@@ -821,7 +936,8 @@ async function applyProjectUpdateAsync(
       request.PackageId,
       request.Version!,
       condition,
-      scope
+      scope,
+      getWorkspaceRoots()
     );
     if (!skipRestore) {
       report("Restoring project…", 60);
@@ -971,7 +1087,12 @@ async function runConsolidateAsync(
 
     report("Writing package versions…", 60);
     for (const [propsFilePath, changes] of changesByFile) {
-      await CpmWriter.UpdateCpmVersionsAsync(propsFilePath, changes);
+      await CpmWriter.UpdateCpmVersionsAsync(
+        propsFilePath,
+        changes,
+        request.ProjectPaths,
+        getWorkspaceRoots()
+      );
     }
 
     await applyConsolidationAddsAsync(request, nonCpmProjects, signal);
@@ -2935,7 +3056,10 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
           await CpmWriter.UpdatePackageVersionAsync(
             request.ProjectPath,
             request.PackageId,
-            request.Version
+            request.Version,
+            undefined,
+            undefined,
+            getWorkspaceRoots()
           );
         } else {
           await TaskExecutor.ExecuteCommandAsync(
@@ -2998,17 +3122,49 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
           return ok({ Applied: [], Skipped: plan.Skipped, PropsFile: propsFile });
         }
 
-        // Snapshot before writing: the batch rolls back project files, but this
-        // props write is outside that snapshot, so a failed restore must undo it.
-        const originalContent = await fs.readFile(propsFile, "utf8");
-        await WriteCentralVersionsAsync(propsFile, plan);
+        const workspaceRoots = getWorkspaceRoots();
+
+        // Snapshot before writing: the batch rolls back project files, but this props write is
+        // outside that snapshot, so a failed restore must undo it — including any property file
+        // the write edits in place of the props file. The unconditional changes may resolve to a
+        // property definition elsewhere; the conditional ones stay literal.
+        const preflightChanges: CpmVersionChange[] = [
+          ...plan.Changes,
+          ...plan.Conditional.map((entry) => ({
+            packageId: entry.PackageId,
+            version: entry.Version,
+            condition: entry.Condition,
+            scope: "group" as const,
+          })),
+        ];
+        let targets: string[] = [propsFile];
+        try {
+          const resolved = await CpmWriter.ResolveWriteTargetsAsync(
+            propsFile,
+            preflightChanges,
+            projectPaths,
+            workspaceRoots
+          );
+          targets = [...new Set([propsFile, ...resolved])];
+        } catch {
+          targets = [propsFile];
+        }
+
+        const snapshots = new Map<string, string>();
+        for (const file of targets) {
+          snapshots.set(file, await fs.readFile(file, "utf8"));
+        }
+
+        await WriteCentralVersionsAsync(propsFile, plan, projectPaths, workspaceRoots);
 
         const failure = await restoreProjectsInternalAsync([projectPath], undefined, false);
         if (failure) {
-          // Undo the central write so a failed restore cannot leave the props
-          // file in a half-applied state (the batch snapshot does not cover it).
-          await fs.writeFile(propsFile, originalContent, "utf8");
-          Logger.warn(`updateCentralVersions: restore failed, reverted ${propsFile}`);
+          // Undo every snapshot so a failed restore cannot leave the props file — or a property
+          // file it wrote — in a half-applied state.
+          for (const [file, content] of snapshots) {
+            await fs.writeFile(file, content, "utf8");
+          }
+          Logger.warn(`updateCentralVersions: restore failed, reverted ${targets.join(", ")}`);
         }
         toolchainHealthCache = null;
         Logger.info(
@@ -3638,7 +3794,14 @@ async function applyConflictFixesAsync(
     const requiredVersion = conflict.SuggestedVersion!;
     if (cpmMap && CpmReader.HasPackage(cpmMap, packageId)) {
       Logger.info(`restoreWithConflictResolution: Updating CPM ${packageId} to ${requiredVersion}`);
-      await CpmWriter.UpdatePackageVersionAsync(projectPath, packageId, requiredVersion);
+      await CpmWriter.UpdatePackageVersionAsync(
+        projectPath,
+        packageId,
+        requiredVersion,
+        undefined,
+        undefined,
+        getWorkspaceRoots()
+      );
       fixedAny = true;
       continue;
     }

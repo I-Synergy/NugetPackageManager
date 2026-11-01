@@ -9,6 +9,11 @@ namespace NugetPackageManager.Core;
 /// <summary>Workspace-level methods the sidecar exposes over NDJSON.</summary>
 public sealed class WorkspaceHandlers
 {
+    // One instance for the lifetime of the sidecar so its per-project cache survives across RPCs.
+    // Passing it explicitly to every CpmWriter call that may edit a property is what keeps those
+    // writes on the property path instead of the literal fallback.
+    private static readonly CpmPropertyLocator propertyLocator = new();
+
     private readonly WorkspaceModelService workspace;
 
     public WorkspaceHandlers(WorkspaceModelService workspace)
@@ -25,6 +30,7 @@ public sealed class WorkspaceHandlers
             ["updateCpmVersions"] = HandleUpdateCpmVersionsAsync,
             ["removePackageVersion"] = HandleRemovePackageVersionAsync,
             ["updatePackageVersion"] = HandleUpdatePackageVersionAsync,
+            ["resolveCpmWriteTargets"] = HandleResolveCpmWriteTargetsAsync,
         };
 
     private Task<object?> HandleGetCpmMapAsync(JsonElement parameters, CancellationToken cancellationToken)
@@ -60,12 +66,49 @@ public sealed class WorkspaceHandlers
     {
         var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
         var changes = ReadChanges(parameters);
+        var projectPaths = ReadStringArray(parameters, "projectPaths");
+        var workspaceRoots = ReadStringArray(parameters, "workspaceRoots");
 
-        await CpmWriter.UpdateVersionsAsync(propsFilePath, changes, cancellationToken).ConfigureAwait(false);
-        return new { applied = changes.Count };
+        var written = await CpmWriter
+            .UpdateVersionsAsync(
+                propsFilePath,
+                changes,
+                cancellationToken,
+                projectPaths,
+                workspaceRoots,
+                propertyLocator)
+            .ConfigureAwait(false);
+
+        // A CPM write can edit a property in any imported .props file, so the evaluator cache
+        // (keyed on project/Directory.*.props stamps) may still hold the pre-write version.
+        workspace.InvalidateVersionCache();
+
+        return new { applied = changes.Count, changedFiles = written };
     }
 
-    private static async Task<object?> HandleRemovePackageVersionAsync(
+    private static async Task<object?> HandleResolveCpmWriteTargetsAsync(
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        var changes = ReadChanges(parameters);
+        var projectPaths = ReadStringArray(parameters, "projectPaths");
+        var workspaceRoots = ReadStringArray(parameters, "workspaceRoots");
+
+        var files = await CpmWriter
+            .ResolveWriteTargetsAsync(
+                propsFilePath,
+                changes,
+                projectPaths,
+                workspaceRoots,
+                propertyLocator,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return new { files };
+    }
+
+    private async Task<object?> HandleRemovePackageVersionAsync(
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
@@ -75,6 +118,8 @@ public sealed class WorkspaceHandlers
         var removed = await CpmWriter
             .RemovePackageVersionAsync(propsFilePath, packageId, cancellationToken)
             .ConfigureAwait(false);
+
+        workspace.InvalidateVersionCache();
 
         return new { removed };
     }
@@ -88,10 +133,21 @@ public sealed class WorkspaceHandlers
         var version = ReadRequiredString(parameters, "version");
         var condition = ReadOptionalString(parameters, "condition");
         var scope = ReadScope(parameters);
+        var workspaceRoots = ReadStringArray(parameters, "workspaceRoots");
 
         await CpmWriter
-            .UpdatePackageVersionAsync(projectPath, packageId, version, condition, scope, cancellationToken)
+            .UpdatePackageVersionAsync(
+                projectPath,
+                packageId,
+                version,
+                condition,
+                scope,
+                cancellationToken,
+                workspaceRoots,
+                propertyLocator)
             .ConfigureAwait(false);
+
+        workspace.InvalidateVersionCache();
 
         return new { updated = true };
     }
@@ -110,6 +166,32 @@ public sealed class WorkspaceHandlers
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    /// <summary>A missing or non-array value reads as an empty list; blank entries are dropped.</summary>
+    private static List<string> ReadStringArray(JsonElement parameters, string property)
+    {
+        var result = new List<string>();
+        if (parameters.ValueKind != JsonValueKind.Object
+            || !parameters.TryGetProperty(property, out var value)
+            || value.ValueKind != JsonValueKind.Array)
+        {
+            return result;
+        }
+
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                var text = item.GetString();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    result.Add(text);
+                }
+            }
+        }
+
+        return result;
+    }
 
     private static CpmWriteScope? ReadScope(JsonElement parameters)
     {

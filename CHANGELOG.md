@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- feat: versions written as MSBuild properties (for example `<PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />`, or a non-CPM `PackageReference`) are resolved with MSBuild's object model instead of being read as literal text, so the Installed, Updates, Consolidate and Vulnerabilities tabs show the effective version. Updating such a package keeps the `$(...)` reference and rewrites the property definition in the file that declares it — including `Directory.Build.props` and imported `.props`/`.targets` files — and the snapshot/rollback set covers that file. Per-framework updates write a literal into that condition's line so other frameworks are not bumped.
 - fix: a package id that does not exist is now reported as `packageNotFound` instead of `sourceUnreachable` — the core mapped a 404 on the registration index to a feed failure, so the host's "package not found" message never appeared and the user saw an unreachable-source error for a typo.
 - fix: after a single-row update the Updates status line no longer repeats the count ("8 updates available · 8 updates available"); the suffix now says what changed ("Updated Newtonsoft.Json to 13.0.3") and the header keeps the count.
 - test: an opt-in end-to-end suite (`npm run test:e2e`) drives the real sidecar and the real `dotnet` CLI against a fixture project: install → update → uninstall, a CPM version written to `Directory.Packages.props`, and an outdated scan against the configured feed.

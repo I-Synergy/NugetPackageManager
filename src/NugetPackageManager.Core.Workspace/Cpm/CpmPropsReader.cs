@@ -193,10 +193,20 @@ public static class CpmPropsReader
     /// not lost. A package whose condition matched none of the project's TFMs is returned with
     /// <c>Matched: false</c> so consumers warn instead of showing a wrong version.
     /// </summary>
+    /// <param name="map">The parsed props map the versions are resolved from.</param>
+    /// <param name="packageIds">The package ids to resolve a version for.</param>
+    /// <param name="tfms">The project's target frameworks; an empty set falls back to the pseudo-TFM mode.</param>
+    /// <param name="effectiveVersionsByTfm">
+    /// Optional map of <c>tfm → package id → effective version</c> from an MSBuild evaluation.
+    /// The key <c>""</c> is the default/unconditional evaluation. When supplied, a resolved row
+    /// takes the evaluated version for its framework over the raw XML winner; a package absent
+    /// from the evaluation keeps the raw value.
+    /// </param>
     public static Dictionary<string, List<CpmVersionResolution>> ResolveVersions(
         CpmPackageMap map,
         IEnumerable<string> packageIds,
-        IEnumerable<string> tfms)
+        IEnumerable<string> tfms,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? effectiveVersionsByTfm = null)
     {
         ArgumentNullException.ThrowIfNull(map);
         ArgumentNullException.ThrowIfNull(packageIds);
@@ -226,7 +236,9 @@ public static class CpmPropsReader
             // One row per version line: a condition matching several TFMs is still one line.
             var seenConditions = new HashSet<string>(StringComparer.Ordinal);
             List<CpmVersionResolution> resolutions =
-                [.. candidates.Where(resolution => seenConditions.Add(resolution.Condition))];
+                [.. candidates
+                    .Where(resolution => seenConditions.Add(resolution.Condition))
+                    .Select(resolution => ApplyEffectiveVersion(resolution, effectiveVersionsByTfm))];
 
             if (resolutions.Count > 0)
             {
@@ -235,6 +247,33 @@ public static class CpmPropsReader
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Replaces a row's version with the MSBuild-evaluated value for its framework when one is
+    /// available; otherwise the raw XML winner is kept.
+    /// </summary>
+    private static CpmVersionResolution ApplyEffectiveVersion(
+        CpmVersionResolution resolution,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? effectiveVersionsByTfm)
+    {
+        if (effectiveVersionsByTfm is null)
+        {
+            return resolution;
+        }
+
+        // A conditional row is matched to its framework's evaluation; an unconditional row
+        // carries an empty Tfm, which is exactly the default key. A row whose framework has no
+        // evaluation keeps the raw value rather than borrowing another framework's.
+        if (!effectiveVersionsByTfm.TryGetValue(resolution.Tfm, out var byId) || byId is null)
+        {
+            return resolution;
+        }
+
+        var effective = FindCaseInsensitive(byId, resolution.PackageId);
+        return string.IsNullOrEmpty(effective)
+            ? resolution
+            : resolution with { Version = effective };
     }
 
     public static bool HasPackage(CpmPackageMap map, string packageId)
@@ -358,7 +397,7 @@ public static class CpmPropsReader
             : $"({groupCondition}) And ({elementCondition})";
     }
 
-    private static string? FindCaseInsensitive(Dictionary<string, string> map, string key)
+    private static string? FindCaseInsensitive(IReadOnlyDictionary<string, string> map, string key)
     {
         if (map.TryGetValue(key, out var exact))
         {
