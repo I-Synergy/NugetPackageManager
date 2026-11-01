@@ -16,22 +16,22 @@ public interface INuGetSourceProvider
 }
 
 /// <summary>
-/// Caches one <see cref="HttpNuGetSource"/> per source URL so the service index is resolved
-/// once instead of on every call. A provider is owned by the sidecar's handler set and
-/// disposed with it.
+/// Caches one <see cref="ProtocolNuGetSource"/> per source URL so the service index and the
+/// resource graph are resolved once instead of on every call. A provider is owned by the
+/// sidecar's handler set and disposed with it.
 /// </summary>
 public sealed class NuGetSourceProvider : INuGetSourceProvider, IDisposable
 {
-    private readonly ConcurrentDictionary<string, HttpNuGetSource> sources = new(StringComparer.Ordinal);
-    private readonly Func<SourceDescriptor, HttpNuGetSource> factory;
+    private readonly ConcurrentDictionary<string, ProtocolNuGetSource> sources = new(StringComparer.Ordinal);
+    private readonly Func<SourceDescriptor, ProtocolNuGetSource> factory;
 
     public NuGetSourceProvider()
-        : this(source => new HttpNuGetSource(source))
+        : this(source => new ProtocolNuGetSource(source))
     {
     }
 
-    /// <summary>Test seam: lets a suite supply a source backed by a stubbed handler.</summary>
-    public NuGetSourceProvider(Func<SourceDescriptor, HttpNuGetSource> factory)
+    /// <summary>Test seam: lets a suite supply a source backed by fake resources.</summary>
+    public NuGetSourceProvider(Func<SourceDescriptor, ProtocolNuGetSource> factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
         this.factory = factory;

@@ -10,8 +10,8 @@ export class PackageViewModel {
   IconUrl: string;
   LicenseUrl: string;
   ProjectUrl: string;
-  TotalDownloads: number;
-  Verified: boolean;
+  TotalDownloads: number | null;
+  Verified: boolean | null;
   InstalledVersion: string;
   Version: string;
   Versions: Array<string>;

@@ -202,7 +202,8 @@ export class PackageRow extends LitElement {
     this.iconUrl = DEFAULT_ICON_URL;
   }
 
-  private formatDownloads(count: number): string {
+  private formatDownloads(count: number | null): string {
+    if (count === null) return "—";
     if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
     if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
     return count.toString();
@@ -288,7 +289,7 @@ export class PackageRow extends LitElement {
           ${this.package.Description
             ? html`<div class="description">${this.package.Description}</div>`
             : nothing}
-          ${this.package.TotalDownloads > 0
+          ${(this.package.TotalDownloads ?? 0) > 0
             ? html`
                 <div class="meta-line">
                   <span class="downloads">

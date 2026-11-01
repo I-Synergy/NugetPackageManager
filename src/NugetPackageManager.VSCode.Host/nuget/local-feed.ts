@@ -83,8 +83,12 @@ export default class LocalNuGetFeed {
     return packages.find((pkg) => pkg.Id.toLowerCase() === packageId.toLowerCase());
   }
 
-  async GetPackageDetailsAsync(nupkgPath: string): Promise<PackageDetails> {
-    const metadata = await this.ReadNuspecAsync(nupkgPath);
+  async GetPackageDetailsAsync(packageId: string, version: string): Promise<PackageDetails> {
+    const versions = this.index.get(packageId.toLowerCase()) ?? [];
+    const entry = versions.find(
+      (candidate) => candidate.metadata.Version.toLowerCase() === version.toLowerCase()
+    );
+    const metadata = entry ? await this.ReadNuspecAsync(entry.nupkgPath) : undefined;
     return metadata
       ? { dependencies: metadata.Dependencies }
       : { dependencies: { frameworks: {} } };
@@ -120,14 +124,11 @@ export default class LocalNuGetFeed {
         LicenseUrl: first.LicenseUrl,
         ProjectUrl: first.ProjectUrl,
         Registration: "",
-        TotalDownloads: 0,
-        Verified: false,
+        TotalDownloads: null,
+        Verified: null,
         InstalledVersion: "",
         Version: latest.metadata.Version,
-        Versions: allowed.map((entry) => ({
-          Version: entry.metadata.Version,
-          Id: entry.nupkgPath,
-        })),
+        Versions: allowed.map((entry) => ({ Version: entry.metadata.Version })),
         Tags: first.Tags,
       });
     }

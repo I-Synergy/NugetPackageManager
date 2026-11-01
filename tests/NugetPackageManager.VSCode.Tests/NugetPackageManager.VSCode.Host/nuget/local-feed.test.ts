@@ -53,9 +53,10 @@ suite('LocalNuGetFeed', () => {
     });
 
     test('reads nuspec dependencies from a package version', async () => {
-        const nupkg = await writePackageAsync('Local.Dependency', '1.2.3');
+        await writePackageAsync('Local.Dependency', '1.2.3');
         const feed = new LocalNuGetFeed(tempDir);
-        const details = await feed.GetPackageDetailsAsync(nupkg);
+        await feed.GetPackagesAsync('Local.Dependency', true, 0, 10);
+        const details = await feed.GetPackageDetailsAsync('Local.Dependency', '1.2.3');
 
         assert.deepStrictEqual(details.dependencies.frameworks['net8.0'], [{
             package: 'Dependency.One',

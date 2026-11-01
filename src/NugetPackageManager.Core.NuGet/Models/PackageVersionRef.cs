@@ -2,12 +2,6 @@ using System.Text.Json.Serialization;
 
 namespace NugetPackageManager.Core.NuGet.Models;
 
-/// <summary>A version and the registration leaf URL that identifies it.</summary>
-public sealed record PackageVersionRef
-{
-    [JsonPropertyName("Version")]
-    public required string Version { get; init; }
-
-    [JsonPropertyName("Id")]
-    public required string Id { get; init; }
-}
+/// <summary>One version the source offers. Addressed by id + version through NuGet.Protocol.</summary>
+public sealed record PackageVersionRef(
+    [property: JsonPropertyName("Version")] string Version);

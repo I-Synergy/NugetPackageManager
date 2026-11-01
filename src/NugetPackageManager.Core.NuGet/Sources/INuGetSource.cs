@@ -15,7 +15,11 @@ public interface INuGetSource
     /// <summary>Throws <see cref="NuGetSourceException"/> with <c>packageNotFound</c> when absent.</summary>
     Task<Package> GetPackageAsync(string id, bool prerelease, CancellationToken cancellationToken);
 
-    Task<PackageDetails> GetPackageDetailsAsync(string packageVersionUrl, CancellationToken cancellationToken);
+    /// <summary>Dependency groups for one package version; throws <c>packageNotFound</c> when absent.</summary>
+    Task<PackageDetails> GetPackageDetailsAsync(
+        string id,
+        string version,
+        CancellationToken cancellationToken);
 
     /// <summary>Drops cached package metadata, for one id or (null) for everything.</summary>
     void ClearPackageCache(string? packageId = null);

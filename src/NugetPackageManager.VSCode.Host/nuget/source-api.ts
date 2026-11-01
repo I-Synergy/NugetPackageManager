@@ -40,7 +40,8 @@ export interface INuGetSourceApi {
   ): Promise<GetPackageResponse>;
 
   GetPackageDetailsAsync(
-    packageVersionUrl: string,
+    packageId: string,
+    version: string,
     signal?: AbortSignal
   ): Promise<GetPackageDetailsResponse>;
 

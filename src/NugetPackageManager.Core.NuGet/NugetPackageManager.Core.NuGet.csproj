@@ -5,6 +5,10 @@
     <RootNamespace>NugetPackageManager.Core.NuGet</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="NugetPackageManager.Core.NuGet.Tests" />
+  </ItemGroup>
+
   <!-- Versions come from Directory.Packages.props. -->
   <ItemGroup>
     <PackageReference Include="NuGet.Configuration" />

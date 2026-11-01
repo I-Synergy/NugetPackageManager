@@ -68,14 +68,15 @@ export default class SidecarSourceApi implements INuGetSourceApi {
   }
 
   public async GetPackageDetailsAsync(
-    packageVersionUrl: string,
+    packageId: string,
+    version: string,
     signal?: AbortSignal
   ): Promise<GetPackageDetailsResponse> {
     if (this.localFeed) {
-      return { data: await this.localFeed.GetPackageDetailsAsync(packageVersionUrl) };
+      return { data: await this.localFeed.GetPackageDetailsAsync(packageId, version) };
     }
 
-    const data = await this.CallAsync<PackageDetails>("getPackageDetails", { packageVersionUrl }, signal);
+    const data = await this.CallAsync<PackageDetails>("getPackageDetails", { id: packageId, version }, signal);
     return { data };
   }
 

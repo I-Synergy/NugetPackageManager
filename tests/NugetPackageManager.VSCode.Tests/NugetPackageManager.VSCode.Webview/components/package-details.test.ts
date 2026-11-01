@@ -104,7 +104,9 @@ suite('PackageDetails Component', () => {
             return Promise.resolve(ok({ Package: null as unknown as PackageDetails }));
         };
 
-        packageDetails.packageVersionUrl = 'https://package.url';
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+
+        packageDetails.selectedVersion = '1.0.0';
         packageDetails.source = 'https://source.url';
 
         // Wait for async operations
@@ -121,8 +123,8 @@ suite('PackageDetails Component', () => {
         };
 
         packageDetails.source = 'https://source.url';
-        packageDetails.packageVersionUrl = 'https://package.url';
-
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.selectedVersion = '1.0.0';
         // Wait for async operations
         await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -142,7 +144,8 @@ suite('PackageDetails Component', () => {
 
         packageDetails.passwordScriptPath = passwordScript;
         packageDetails.source = source;
-        packageDetails.packageVersionUrl = versionUrl;
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.selectedVersion = '1.0.0';
 
         await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -170,7 +173,8 @@ suite('PackageDetails Component', () => {
         getPackageDetailsStub = () => promise;
 
         packageDetails.source = 'src';
-        packageDetails.packageVersionUrl = 'url';
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.selectedVersion = '1.0.0';
 
         // Wait for Lit update cycle so updated() triggers reloadDependencies()
         await packageDetails.updateComplete;
@@ -205,12 +209,13 @@ suite('PackageDetails Component', () => {
         packageDetails.source = 'src';
 
         // First change — trigger separate Lit update cycle
-        packageDetails.packageVersionUrl = 'url1';
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.selectedVersion = '1.0.0';
         await packageDetails.updateComplete;
         await new Promise(resolve => setTimeout(resolve, 20));
 
         // Second change — triggers a new reloadDependencies call
-        packageDetails.packageVersionUrl = 'url2';
+        packageDetails.selectedVersion = '0.9.0';
         await packageDetails.updateComplete;
         await new Promise(resolve => setTimeout(resolve, 20));
 
@@ -250,8 +255,8 @@ suite('PackageDetails Component', () => {
         }));
 
         packageDetails.source = 'https://source.url';
-        packageDetails.packageVersionUrl = 'https://package.url';
-
+        packageDetails.package = { Name: 'Contoso.Sdk' } as PackageViewModel;
+        packageDetails.selectedVersion = '1.0.0';
         // Wait for the reactive task to settle under the current jsdom runtime.
         for (let attempt = 0; attempt < 20 && !packageDetails.packageDetails; attempt++) {
             await new Promise(resolve => setTimeout(resolve, 10));

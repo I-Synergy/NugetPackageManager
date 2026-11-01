@@ -511,21 +511,6 @@ export class PackagesView extends LitElement {
     return null;
   }
 
-  get PackageVersionUrl(): string {
-    if (
-      this.selectedPackage?.Status !== "Detailed" ||
-      this.selectedPackage?.Model.Versions == undefined ||
-      this.selectedPackage.Model.Versions.length < 1 ||
-      !this.selectedPackage?.Model.Version
-    ) {
-      return "";
-    }
-    const matchingVersion = this.selectedPackage.Model.Versions.find(
-      (x) => x.Version === this.selectedVersion
-    );
-    return matchingVersion?.Id ?? "";
-  }
-
   private get effectiveProjectPaths(): string[] {
     if (this.showProjectTree) return this.selectedProjectPaths;
     // When the project tree is hidden, still scope to the solution-filtered project list
@@ -609,8 +594,8 @@ export class PackagesView extends LitElement {
       Description: "",
       LicenseUrl: "",
       ProjectUrl: "",
-      TotalDownloads: 0,
-      Verified: false,
+      TotalDownloads: null,
+      Verified: null,
       Version: "",
       InstalledVersion: "",
       Versions: [],
@@ -789,8 +774,8 @@ export class PackagesView extends LitElement {
           Description: "",
           LicenseUrl: "",
           ProjectUrl: "",
-          Verified: false,
-          TotalDownloads: 0,
+          Verified: null,
+          TotalDownloads: null,
           Tags: [],
           Registration: "",
           Authors: [],
@@ -1432,7 +1417,6 @@ export class PackagesView extends LitElement {
         <div class="separator"></div>
         <package-details
           .package=${this.selectedPackage}
-          .packageVersionUrl=${this.PackageVersionUrl}
           .source=${this.selectedPackage?.SourceUrl || this.filters.SourceUrl}
           .passwordScriptPath=${this.CurrentSource?.PasswordScriptPath}
           .selectedVersion=${this.selectedVersion}

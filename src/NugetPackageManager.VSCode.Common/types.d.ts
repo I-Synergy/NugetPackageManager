@@ -7,8 +7,10 @@ type Package = {
   LicenseUrl: string;
   ProjectUrl: string;
   Registration: string;
-  TotalDownloads: number;
-  Verified: boolean;
+  /** null when the feed does not publish a download count (registration-only metadata). */
+  TotalDownloads: number | null;
+  /** null when the feed does not publish the verified-owner flag. */
+  Verified: boolean | null;
   InstalledVersion: string;
   Version: string;
   Versions: Array<PackageVersion>;
@@ -17,7 +19,6 @@ type Package = {
 
 type PackageVersion = {
   Version: string;
-  Id: string;
 };
 
 type PackageDetails = {

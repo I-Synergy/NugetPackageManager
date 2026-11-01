@@ -22,7 +22,7 @@ function createMockPackage(overrides: Partial<Package> = {}): Package {
         Verified: true,
         InstalledVersion: '',
         Version: '1.0.0',
-        Versions: [{ Id: 'url1', Version: '1.0.0' }, { Id: 'url2', Version: '0.9.0' }],
+        Versions: [{ Version: '1.0.0' }, { Version: '0.9.0' }],
         Tags: ['tag1', 'tag2'],
         ...overrides
     };
@@ -570,30 +570,6 @@ suite('PackagesView Component', () => {
             assert.strictEqual(url, null);
         });
 
-        test('PackageVersionUrl should return version URL', () => {
-            const pkg = new PackageViewModel(createMockPackage({
-                Version: '1.0.0',
-                Versions: [
-                    { Id: 'https://nuget.org/v1', Version: '1.0.0' },
-                    { Id: 'https://nuget.org/v2', Version: '0.9.0' }
-                ]
-            }));
-            packagesView.selectedPackage = pkg;
-            packagesView.selectedVersion = '1.0.0';
-
-            const url = packagesView.PackageVersionUrl;
-
-            assert.strictEqual(url, 'https://nuget.org/v1');
-        });
-
-        test('PackageVersionUrl should return empty for MissingDetails status', () => {
-            const pkg = new PackageViewModel(createMockPackage(), 'MissingDetails');
-            packagesView.selectedPackage = pkg;
-
-            const url = packagesView.PackageVersionUrl;
-
-            assert.strictEqual(url, '');
-        });
     });
 
     suite('LoadProjectsPackages', () => {

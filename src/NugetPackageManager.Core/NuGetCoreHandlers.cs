@@ -70,15 +70,21 @@ public sealed class NuGetCoreHandlers
         CancellationToken cancellationToken)
     {
         var source = ReadSource(parameters);
-        var packageVersionUrl = ReadString(parameters, "packageVersionUrl");
-        if (string.IsNullOrWhiteSpace(packageVersionUrl))
+        var id = ReadString(parameters, "id");
+        if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException(RpcException.InvalidParams, "'packageVersionUrl' is required.");
+            throw new RpcException(RpcException.InvalidParams, "'id' is required.");
+        }
+
+        var version = ReadString(parameters, "version");
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            throw new RpcException(RpcException.InvalidParams, "'version' is required.");
         }
 
         return await GuardAsync(() => sources
             .GetSource(source)
-            .GetPackageDetailsAsync(packageVersionUrl, cancellationToken)).ConfigureAwait(false);
+            .GetPackageDetailsAsync(id, version, cancellationToken)).ConfigureAwait(false);
     }
 
     private Task<object?> HandleClearPackageCacheAsync(JsonElement parameters, CancellationToken cancellationToken)

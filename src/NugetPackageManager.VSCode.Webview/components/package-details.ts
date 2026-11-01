@@ -185,7 +185,6 @@ export class PackageDetailsComponent extends LitElement {
   ];
 
   @property({ attribute: false }) package: PackageViewModel | null = null;
-  @property() packageVersionUrl: string = "";
   @property() source: string = "";
   @property() passwordScriptPath?: string;
   @property() selectedVersion: string = "";
@@ -195,14 +194,15 @@ export class PackageDetailsComponent extends LitElement {
   @state() activeTab: DetailTab = "description";
 
   private readonly _detailsTask = new Task(this, {
-    task: async ([packageVersionUrl, source, passwordScriptPath], { signal }) => {
+    task: async ([packageId, version, source, passwordScriptPath], { signal }) => {
       this.packageDetails = undefined;
-      if (!packageVersionUrl || !source) return;
+      if (!packageId || !version || !source) return;
       this.packageDetailsLoading = true;
 
       try {
         const request: GetPackageDetailsRequest = {
-          PackageVersionUrl: packageVersionUrl,
+          Id: packageId,
+          Version: version,
           Url: source,
           ...(passwordScriptPath !== undefined && { PasswordScriptPath: passwordScriptPath }),
         };
@@ -215,10 +215,13 @@ export class PackageDetailsComponent extends LitElement {
         this.packageDetailsLoading = false;
       }
     },
-    args: () => [this.packageVersionUrl, this.source, this.passwordScriptPath] as const,
+    args: () => [this.package?.Name, this.selectedVersion, this.source, this.passwordScriptPath] as const,
   });
 
-  private formatDownloads(count: number): string {
+  private formatDownloads(count: number | null): string {
+    // The feed only publishes download counts on its search resource; registration-only
+    // metadata leaves this unknown, and an em dash is honest where 0 would be a lie.
+    if (count === null) return "—";
     if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
     if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
     return count.toString();

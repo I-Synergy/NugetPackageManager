@@ -46,7 +46,9 @@ export type GetPackageRequest = SourceContext &
   };
 
 export type GetPackageDetailsRequest = SourceContext & {
-  PackageVersionUrl: string;
+  /** Package id and exact version: NuGet.Protocol addresses metadata this way, not by leaf URL. */
+  Id: string;
+  Version: string;
 };
 
 export type GetOutdatedPackagesRequest = CacheControl & {

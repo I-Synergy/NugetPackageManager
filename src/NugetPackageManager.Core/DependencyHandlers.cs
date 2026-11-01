@@ -119,7 +119,7 @@ public sealed class DependencyHandlers
                     continue;
                 }
 
-                var details = await source.GetPackageDetailsAsync(versionReference.Id, cancellationToken)
+                var details = await source.GetPackageDetailsAsync(id, versionReference.Version, cancellationToken)
                     .ConfigureAwait(false);
 
                 var dependencies = SelectDependencyGroup(details.Dependencies.Frameworks, tfm);

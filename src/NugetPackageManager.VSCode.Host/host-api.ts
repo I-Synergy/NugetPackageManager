@@ -307,7 +307,7 @@ function sortPackages(packages: Package[], sort?: string): Package[] {
   if (!sort || sort === "relevance" || sort === "recent") return packages;
   const copy = [...packages];
   if (sort === "downloads") {
-    return copy.sort((a, b) => b.TotalDownloads - a.TotalDownloads);
+    return copy.sort((a, b) => (b.TotalDownloads ?? 0) - (a.TotalDownloads ?? 0));
   }
   if (sort === "name-asc") {
     return copy.sort((a, b) => a.Id.localeCompare(b.Id));
@@ -2471,15 +2471,16 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
 
     async getPackageDetailsAsync(request: GetPackageDetailsRequest, signal?: AbortSignal): Promise<Result<GetPackageDetailsResponse>> {
       if (!request.Url) return fail("SourceUrl is empty");
-      if (!request.PackageVersionUrl) return fail("PackageVersionUrl is empty");
+      if (!request.Id) return fail("Package id is empty");
+      if (!request.Version) return fail("Package version is empty");
 
       try {
         const api = await nugetApiFactory.GetSourceApiAsync(request.Url);
-        const details = await api.GetPackageDetailsAsync(request.PackageVersionUrl, signal);
+        const details = await api.GetPackageDetailsAsync(request.Id, request.Version, signal);
         return ok({ Package: details.data });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        Logger.error(`getPackageDetails: Failed for ${request.PackageVersionUrl}`, err);
+        Logger.error(`getPackageDetails: Failed for ${request.Id} ${request.Version}`, err);
         return fail(`Failed to fetch package details: ${message}`);
       }
     },
@@ -3902,7 +3903,7 @@ async function fetchDependencyFrameworksAsync(
           (entry) => compareVersions(entry.Version, version) === 0
         );
         if (!versionEntry) continue;
-        const details = await api.GetPackageDetailsAsync(versionEntry.Id, signal);
+        const details = await api.GetPackageDetailsAsync(packageId, version, signal);
         return details.data.dependencies.frameworks;
       } catch (err) {
         Logger.debug(

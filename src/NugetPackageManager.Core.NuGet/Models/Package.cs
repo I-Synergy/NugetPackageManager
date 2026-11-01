@@ -34,11 +34,16 @@ public sealed record Package
     [JsonPropertyName("Registration")]
     public required string Registration { get; init; }
 
+    /// <summary>
+    /// Total nuget.org downloads. <c>null</c> when the feed does not publish the figure: only the
+    /// search resource carries it, so a registration-only answer is unknown, not zero.
+    /// </summary>
     [JsonPropertyName("TotalDownloads")]
-    public required long TotalDownloads { get; init; }
+    public required long? TotalDownloads { get; init; }
 
+    /// <summary>Verified-owner flag; <c>null</c> when the feed does not publish it.</summary>
     [JsonPropertyName("Verified")]
-    public required bool Verified { get; init; }
+    public required bool? Verified { get; init; }
 
     [JsonPropertyName("InstalledVersion")]
     public required string InstalledVersion { get; init; }
