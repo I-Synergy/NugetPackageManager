@@ -137,6 +137,12 @@ export type BatchUpdateConflict = {
   BlockedByVersion: string;
   /** The NuGet range that rejects the effective version, e.g. `= 11.0.0-rc.2`. */
   RequiredRange: string;
+  /** Lower bound of that range, when it has one. */
+  RequiredVersion?: string;
+  /** Target framework whose dependency group declared the requirement. */
+  Tfm?: string;
+  /** Step of the plan: 0 = apply first, higher = must wait for earlier steps. */
+  Order?: number;
   /** Version the dependency graph would resolve for the blocked package. */
   EffectiveVersion: string;
   ProjectPath: string;
@@ -273,6 +279,8 @@ export type BatchUpdateResponse = {
    * without them instead of re-selecting by hand.
    */
   ConflictingPackages?: string[];
+  /** Structured cause of the failure, for the actionable error panel. */
+  Failure?: DotnetFailureInfo;
   /** True when the user cancelled; the transaction was rolled back. */
   Cancelled?: boolean;
 };
@@ -348,6 +356,224 @@ export type RpcCancel = {
 export type RpcMessage = RpcRequest | RpcResponse | RpcCancel;
 
 // ============================================================
+// Toolchain diagnostics
+// ============================================================
+
+/**
+ * Why a `dotnet` command failed, in a form the webview can render.
+ * `Detail` is the trimmed raw output; never render it inline by default.
+ */
+export type DotnetFailureKind =
+  | "WorkloadManifestConflict"
+  | "SdkResolutionFailure"
+  | "SdkPinMismatch"
+  | "SdkSelectionMismatch"
+  | "PinnedSdkMissing"
+  | "RestoreConflict"
+  | "VulnerabilityAudit"
+  | "SourceUnavailable"
+  | "PasswordScriptFailed"
+  | "DotnetMissing"
+  | "Unknown";
+
+export interface DotnetFailureInfo {
+  Kind: DotnetFailureKind;
+  /** One line, user-facing, no stack. */
+  Summary: string;
+  /** What the user can do about it. */
+  Hint: string;
+  /** Relevant lines of the raw output. */
+  Detail: string;
+  /** Structured conflict chains, when the failure is a NuGet version conflict. */
+  Conflicts?: RestoreConflictInfo[];
+  SdkVersion?: string;
+  GlobalJsonPath?: string;
+  PinnedSdkVersion?: string;
+  ProjectPath?: string;
+}
+
+/** A direct reference that the dependency graph already provides transitively. */
+export type DependencyIssueKind = "Redundant" | "Pinned";
+
+export type DependencyIssue = {
+  ProjectPath: string;
+  Tfm: string;
+  PackageId: string;
+  /** Version the project references directly. */
+  DirectVersion: string;
+  /** Version the restored graph resolves for this package. */
+  ResolvedVersion: string;
+  Kind: DependencyIssueKind;
+  /** How the package arrives without the direct reference, e.g. "ParentA -> ParentB". */
+  Chain: string;
+};
+
+export type GetDependencyIssuesRequest = {
+  ProjectPaths?: string[];
+  ForceRefresh?: boolean;
+};
+
+export type GetDependencyIssuesResponse = {
+  Issues: DependencyIssue[];
+  ProjectsScanned: number;
+  /** Projects without a usable `project.assets.json` (not restored yet). */
+  ProjectsSkipped: number;
+  /** Those projects, so the caller can restore them and re-analyse. */
+  SkippedProjectPaths: string[];
+};
+
+/** Serializable subset of a restore conflict, for the error card actions. */
+export type RestoreConflictInfo = {
+  Code: string;
+  PackageId: string;
+  SuggestedVersion?: string;
+  Message: string;
+  Chains: string[];
+};
+
+export type FixRestoreConflictRequest = {
+  ProjectPath: string;
+  PackageId: string;
+  Version: string;
+  /** `cpm` writes the props file group; `project` writes the PackageReference; omitted = auto-detect. */
+  Target?: "cpm" | "project";
+};
+
+/** Raises central `PackageVersion` entries (CPM) to the versions a batch needs. */
+export type UpdateCentralVersionsRequest = {
+  ProjectPaths?: string[];
+  Updates: Array<{
+    PackageId: string;
+    Version: string;
+    /** Write into an `ItemGroup` with this MSBuild condition (per-TFM groups). */
+    Condition?: string;
+  }>;
+};
+
+export type UpdateCentralVersionsResponse = {
+  Applied: string[];
+  /** Packages with no matching `PackageVersion` entry (transitive-only, or misspelled). */
+  Skipped: string[];
+  PropsFile?: string;
+  RestoreError?: string;
+};
+
+export type FixRestoreConflictResponse = {
+  Applied: boolean;
+  /** Restore output summary when the fix did not clear the conflict. */
+  RestoreError?: string;
+};
+
+export type InstalledSdkInfo = {
+  Version: string;
+  Path: string;
+  /** `system` = on PATH, `private` = installed by the extension under the user profile. */
+  Source: "system" | "private";
+};
+
+export type ToolchainIssue = {
+  Kind: DotnetFailureKind;
+  Summary: string;
+  Hint: string;
+  Detail?: string;
+};
+
+/**
+ * Health of the .NET toolchain as the extension will use it: the SDK selected
+ * from the workspace directory, the pin from the nearest `global.json`, and
+ * whether an actual project evaluation succeeds.
+ */
+export type ToolchainHealth = {
+  DotnetFound: boolean;
+  /** `dotnet --version` run with the workspace working directory. */
+  SdkVersion?: string;
+  /** `NETCoreSdkVersion` as resolved by MSBuild for a real project. */
+  BuildSdkVersion?: string;
+  /** `dotnet sdk check` status for the selected SDK, e.g. "Up to date." */
+  SdkStatus?: string;
+  /** True when `dotnet sdk check` could not run (offline, or no usable output). */
+  SdkCheckUnavailable?: boolean;
+  /** `sdk-manifests\<band>` folders no installed SDK owns (left-overs). */
+  OrphanedManifestBands?: string[];
+  /** The `dotnet` host that ran the check (PATH, or the extension's private install). */
+  DotnetPath?: string;
+  /** The project's own `global.json`, when one applies. */
+  GlobalJsonPath?: string;
+  PinnedSdkVersion?: string;
+  SdkMatchesPin?: boolean;
+  /** True when the smoke `dotnet msbuild -getProperty` evaluation failed. */
+  ProjectEvaluationFailed: boolean;
+  /** ISO timestamp of this check. */
+  CheckedAt: string;
+  InstalledSdks: InstalledSdkInfo[];
+  Issues: ToolchainIssue[];
+};
+
+export type GetToolchainHealthRequest = {
+  ForceRefresh?: boolean;
+  /** Projects used for the smoke evaluation; the first valid one is enough. */
+  ProjectPaths?: string[];
+};
+
+export type GetToolchainHealthResponse = {
+  Health: ToolchainHealth;
+};
+
+export type RunToolchainDiagnosticsRequest = {
+  ProjectPaths?: string[];
+};
+
+export type RunToolchainDiagnosticsResponse = {
+  /** Redacted, clipboard-ready report. */
+  Report: string;
+};
+
+/** Pins an installed SDK in the workspace's `global.json`. */
+export type SetWorkspaceSdkRequest = {
+  Version: string;
+  /** Projects whose nearest `global.json` should be updated. */
+  ProjectPaths?: string[];
+};
+
+export type SetWorkspaceSdkResponse = {
+  GlobalJsonPath: string;
+  Version: string;
+  /** Other properties adjusted to keep the file consistent with the pin. */
+  Notes: string[];
+};
+
+/** Maintenance commands that change installed workload manifests. */
+export type WorkloadAction = "update" | "repair";
+
+export type RunWorkloadCommandRequest = {
+  Action: WorkloadAction;
+  /** Projects that select the SDK band the command runs for. */
+  ProjectPaths?: string[];
+};
+
+export type RunWorkloadCommandResponse = {
+  Action: WorkloadAction;
+  Succeeded: boolean;
+  ExitCode: number | null;
+  /** Verbatim command output (truncated to 20k characters). */
+  Output: string;
+  /** The command failed because it needs administrator rights. */
+  NeedsElevation: boolean;
+};
+
+export type InstallSdkRequest = {
+  Version: string;
+};
+
+export type InstallSdkResponse = {
+  Installed: boolean;
+  /** Where the SDK was installed (the extension's private host). */
+  InstallRoot: string;
+  DotnetPath?: string;
+  SdkVersion: string;
+};
+
+// ============================================================
 // Host API Contract
 // ============================================================
 
@@ -380,6 +606,14 @@ export interface HostAPI {
   showConfirmationAsync(req: ShowConfirmationRequest): Promise<Result<ShowConfirmationResponse>>;
   getOperationProgressAsync(req: GetOperationProgressRequest): Promise<Result<GetOperationProgressResponse>>;
   getOutdatedScanProgressAsync(req: GetOutdatedScanProgressRequest): Promise<Result<GetOutdatedScanProgressResponse>>;
+  getToolchainHealthAsync(req: GetToolchainHealthRequest, signal?: AbortSignal): Promise<Result<GetToolchainHealthResponse>>;
+  runToolchainDiagnosticsAsync(req: RunToolchainDiagnosticsRequest): Promise<Result<RunToolchainDiagnosticsResponse>>;
+  setWorkspaceSdkAsync(req: SetWorkspaceSdkRequest): Promise<Result<SetWorkspaceSdkResponse>>;
+  installSdkAsync(req: InstallSdkRequest): Promise<Result<InstallSdkResponse>>;
+  runWorkloadCommandAsync(req: RunWorkloadCommandRequest): Promise<Result<RunWorkloadCommandResponse>>;
+  getDependencyIssuesAsync(req: GetDependencyIssuesRequest, signal?: AbortSignal): Promise<Result<GetDependencyIssuesResponse>>;
+  fixRestoreConflictAsync(req: FixRestoreConflictRequest): Promise<Result<FixRestoreConflictResponse>>;
+  updateCentralVersionsAsync(req: UpdateCentralVersionsRequest): Promise<Result<UpdateCentralVersionsResponse>>;
 }
 
 // ============================================================

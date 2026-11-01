@@ -8,10 +8,119 @@ import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
 import { buildFrameworkOptions, getFrameworkGroupKey, getFrameworkLabel, matchesFrameworkSelection, SHARED_FRAMEWORK } from "@/common/framework";
 import { OutdatedPackageViewModel, PackageViewModel } from "../types";
-import type { GetOutdatedPackagesRequest, GetOutdatedPackagesResponse, BatchUpdateRequest, BatchUpdateResponse } from "@/common/rpc/types";
+import type { GetOutdatedPackagesRequest, GetOutdatedPackagesResponse, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateConflict, DotnetFailureInfo } from "@/common/rpc/types";
+import { RangeLowerBound } from "@/common/package-range";
 import type { Result } from "@/common/rpc/result";
 import { runBatchUpdateJobAsync } from "@/web/jobs";
 import "./package-row";
+import "./actionable-error";
+
+type PlanLineKind = "direct" | "central" | "conditional" | "unresolved";
+
+/** `net11.0 → 11.0.0-rc.3`, without a template inside a template. */
+interface RequirementGroups {
+  Central: Array<{ Id: string; Version: string }>;
+  Mixed: Array<{ Id: string; ByTfm: Array<[string, string]> }>;
+  Unresolved: string[];
+}
+
+/** Splits required versions into unconditional, per-TFM and unresolvable ones. */
+function ClassifyRequirements(
+  missing: Map<string, { Id: string; ByTfm: Map<string, string> }>
+): RequirementGroups {
+  const groups: RequirementGroups = { Central: [], Mixed: [], Unresolved: [] };
+  for (const entry of missing.values()) {
+    const versions = [...new Set(entry.ByTfm.values())];
+    if (versions.length === 1 && versions[0] !== "unresolved") {
+      groups.Central.push({ Id: entry.Id, Version: versions[0]! });
+    } else if (versions.length > 1) {
+      groups.Mixed.push({ Id: entry.Id, ByTfm: [...entry.ByTfm.entries()] });
+    } else {
+      groups.Unresolved.push(entry.Id);
+    }
+  }
+  return groups;
+}
+
+/** Dependency step per package; a package nothing requires can go first. */
+function BuildStepLookup(conflicts: BatchUpdateConflict[]): (id: string) => number {
+  const orderByPackage = new Map<string, number>();
+  for (const conflict of conflicts) {
+    const id = conflict.BlockedByPackageId.toLowerCase();
+    const current = orderByPackage.get(id);
+    const next = conflict.Order ?? 0;
+    orderByPackage.set(id, current === undefined ? next : Math.min(current, next));
+  }
+  return (id: string): number => orderByPackage.get(id.toLowerCase()) ?? 0;
+}
+
+function BuildPlanSteps(
+  additions: OutdatedPackageViewModel[],
+  requirements: RequirementGroups,
+  stepOf: (id: string) => number
+): Array<[number, Array<{ Text: string; Kind: PlanLineKind }>]> {
+  const steps = new Map<number, Array<{ Text: string; Kind: PlanLineKind }>>();
+  const addLine = (order: number, text: string, kind: PlanLineKind): void => {
+    const existing = steps.get(order) ?? [];
+    existing.push({ Text: text, Kind: kind });
+    steps.set(order, existing);
+  };
+
+  for (const addition of additions) {
+    addLine(stepOf(addition.Id), `${addition.Id} → ${addition.LatestVersion}`, "direct");
+  }
+  for (const entry of requirements.Central) {
+    addLine(stepOf(entry.Id), `${entry.Id} → ${entry.Version}`, "central");
+  }
+  for (const entry of requirements.Mixed) {
+    addLine(stepOf(entry.Id), `${entry.Id}: ${entry.ByTfm.map(FormatTfmVersion).join(", ")}`, "conditional");
+  }
+  for (const id of requirements.Unresolved) {
+    addLine(0, `${id}: no resolvable version`, "unresolved");
+  }
+
+  return [...steps.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+/** A package required at different versions per TFM becomes conditional groups. */
+function BuildConditionalUpdates(
+  mixed: RequirementGroups["Mixed"]
+): Array<{ PackageId: string; Version: string; Condition: string }> {
+  return mixed.flatMap((entry) =>
+    entry.ByTfm
+      .filter(([tfm]) => tfm !== "all")
+      .map(([tfm, version]) => ({
+        PackageId: entry.Id,
+        Version: version,
+        Condition: `'$(TargetFramework)' == '${tfm}'`,
+      }))
+  );
+}
+
+function FormatPlanText(orderedSteps: Array<[number, Array<{ Text: string; Kind: PlanLineKind }>]>): string[] {
+  return [
+    "Apply in this order (dependencies first):",
+    ...orderedSteps.flatMap(([order, lines]) => [
+      `Step ${order + 1}:`,
+      ...lines.map((line) => `  [${line.Kind}] ${line.Text}`),
+    ]),
+    "",
+  ];
+}
+
+function FormatTfmVersion(entry: readonly [string, string]): string {
+  return `${entry[0]} → ${entry[1]}`;
+}
+
+/** Fallback when the host could not classify the failure. */
+function ActionableFailure(message: string): DotnetFailureInfo {
+  return {
+    Kind: "Unknown",
+    Summary: message,
+    Hint: "Open the NuGet Package Manager output channel for the full command output.",
+    Detail: "",
+  };
+}
 
 @customElement("updates-view")
 export class UpdatesView extends LitElement {
@@ -68,7 +177,99 @@ export class UpdatesView extends LitElement {
             accent-color: var(--vscode-focusBorder);
           }
 
-          .conflicts {
+          .update-plan {
+        margin: 6px 8px 0;
+        padding: 8px 10px;
+        border: 1px solid var(--npm-border, var(--vscode-panelSection-border));
+        border-left: 3px solid var(--vscode-focusBorder);
+        border-radius: var(--npm-radius, 8px);
+        background: var(--npm-surface-raised, var(--vscode-editorWidget-background));
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .plan-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .plan-flag {
+        color: var(--vscode-editorWarning-foreground);
+        font-size: 0.9em;
+      }
+
+      .plan-spacer {
+        flex: 1;
+      }
+
+      .plan-step {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+
+      .step-badge {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--vscode-badge-foreground);
+        background: var(--vscode-badge-background);
+      }
+
+      .plan-step:first-of-type .step-badge {
+        background: var(--vscode-focusBorder);
+        color: var(--vscode-editor-background);
+      }
+
+      .step-lines {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .plan-line {
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+        overflow-wrap: anywhere;
+      }
+
+      .kind {
+        flex: 0 0 auto;
+        font-size: 0.78em;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+        padding: 0 4px;
+        border-radius: 6px;
+        border: 1px solid currentColor;
+      }
+
+      .kind.direct {
+        color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      }
+
+      .kind.central {
+        color: var(--vscode-charts-green, var(--vscode-testing-iconPassed));
+      }
+
+      .kind.conditional {
+        color: var(--vscode-editorWarning-foreground);
+      }
+
+      .kind.unresolved {
+        color: var(--vscode-errorForeground);
+      }
+
+      .conflicts {
             margin: 6px 8px 10px;
             border: 1px solid var(--vscode-inputValidation-warningBorder, var(--npm-border, var(--vscode-panelSection-border)));
             border-radius: 8px;
@@ -178,6 +379,15 @@ export class UpdatesView extends LitElement {
   @state() isRefreshing: boolean = false;
   @state() isUpdating: boolean = false;
   @state() statusText: string = "";
+  /** Structured cause of the last failed update, if the host classified one. */
+  @state() private failure: DotnetFailureInfo | undefined = undefined;
+  /** Visible, colour-coded version of the preflight plan (survives the dialog). */
+  @state() private updatePlan:
+    | { Steps: Array<{ Order: number; Lines: Array<{ Text: string; Kind: PlanLineKind }> }>; Blocked: boolean }
+    | null = null;
+  @state() private failureHeading = "Update rolled back";
+  /** Set when a plan dialog was already shown; avoids a second, redundant dialog. */
+  private planDialogShown = false;
   @state() jobProgress: { Stage: string; Percent: number } | null = null;
   @state() scanProgress: {
     Stage: string;
@@ -583,6 +793,9 @@ export class UpdatesView extends LitElement {
     const error = result.ok
       ? (result.value.RestoreError ?? result.value.RollbackError ?? result.value.Results.find((r) => !r.Success)?.Error)
       : result.error;
+    const fallback = error ? ActionableFailure(error) : undefined;
+    this.failure = result.ok ? (result.value.Failure ?? fallback) : ActionableFailure(result.error);
+    this.failureHeading = result.ok && result.value.RolledBack ? "Update rolled back" : "Update failed";
     const errorSuffix = error ? `: ${error}` : "";
     this.statusText = result.ok && result.value.RolledBack
       ? `Update rolled back${errorSuffix}`
@@ -605,13 +818,19 @@ export class UpdatesView extends LitElement {
    * written. Conflicting rows are dropped only with the user's confirmation, so
    * one bad package cannot cost the rest of the batch.
    */
-  private async preflightAsync(packages: OutdatedPackageViewModel[]): Promise<OutdatedPackageViewModel[]> {
+  private async preflightAsync(
+    packages: OutdatedPackageViewModel[],
+    expansionDepth = 2
+  ): Promise<OutdatedPackageViewModel[]> {
     const check = await hostApi.checkBatchUpdateAsync({
       Updates: packages.map((pkg) => this.toUpdateRequest(pkg)),
       Transactional: true,
       SkipRestore: false,
     });
-    if (!check.ok || check.value.Conflicts.length === 0) return packages;
+    if (!check.ok || check.value.Conflicts.length === 0) {
+      this.updatePlan = null;
+      return packages;
+    }
 
     const conflicting = new Set(
       check.value.Conflicts.map((conflict) => `${conflict.PackageId.toLowerCase()}@${conflict.RequestedVersion}`)
@@ -619,7 +838,39 @@ export class UpdatesView extends LitElement {
     const remaining = packages.filter(
       (pkg) => !conflicting.has(`${pkg.Id.toLowerCase()}@${pkg.LatestVersion}`)
     );
+    // When the selection cannot be trimmed (nothing, or everything, conflicts),
+    // try completing it with the packages the conflicts ask for instead.
+    if (remaining.length === 0 || remaining.length === packages.length) {
+      const expanded = await this.tryExpandSelectionAsync(
+        check.value.Conflicts,
+        packages,
+        expansionDepth
+      );
+      if (expanded) return expanded;
+    }
+
     if (remaining.length === packages.length) return packages;
+
+    if (remaining.length === 0) {
+      if (this.planDialogShown) {
+        this.planDialogShown = false;
+        this.statusText =
+          "Update cancelled before writing — mixed target frameworks need conditional central versions";
+        return [];
+      }
+      const detail = check.value.Conflicts
+        .slice(0, 8)
+        .map((conflict) => `${conflict.PackageId} → ${conflict.RequestedVersion}: ${conflict.Reason}`);
+      if (check.value.Conflicts.length > 8) {
+        detail.push(`…and ${check.value.Conflicts.length - 8} more`);
+      }
+      await hostApi.showConfirmationAsync({
+        Message: "No updates can be applied: every selected version conflicts with the dependency graph.",
+        Detail: `${detail.join("\n")}\n\nInclude the packages these versions require and try again.`,
+      });
+      this.statusText = "Update cancelled before writing — the selection cannot be applied without its required packages";
+      return [];
+    }
 
     const detail = check.value.Conflicts
       .slice(0, 8)
@@ -639,6 +890,140 @@ export class UpdatesView extends LitElement {
 
     this.statusText = `Skipping ${packages.length - remaining.length} conflicting update${packages.length - remaining.length !== 1 ? "s" : ""}`;
     return remaining;
+  }
+
+  /** Selected packages the conflicts ask for, with the exact required version. */
+  /**
+   * Requirements a conflict asks for, grouped per package and target framework.
+   *
+   * The same package can be required at different versions per TFM (the preview
+   * set ships one dependency group per target framework), and a single
+   * unconditional `PackageVersion` cannot satisfy both.
+   */
+  private collectRequiredUpdates(
+    conflicts: BatchUpdateConflict[],
+    selected: OutdatedPackageViewModel[]
+  ): {
+    additions: OutdatedPackageViewModel[];
+    missing: Map<string, { Id: string; ByTfm: Map<string, string> }>;
+  } {
+    const selectedIds = new Set(selected.map((pkg) => pkg.Id.toLowerCase()));
+    const byId = new Map(this.packages.map((pkg) => [pkg.Id.toLowerCase(), pkg]));
+    const additions: OutdatedPackageViewModel[] = [];
+    const missing = new Map<string, { Id: string; ByTfm: Map<string, string> }>();
+
+    for (const conflict of conflicts) {
+      const dependencyId = conflict.BlockedByPackageId.toLowerCase();
+      if (selectedIds.has(dependencyId)) continue;
+
+      const version = conflict.RequiredVersion ?? RangeLowerBound(conflict.RequiredRange);
+      const row = byId.get(dependencyId);
+      if (!row || !version) {
+        const entry = missing.get(dependencyId) ?? { Id: conflict.BlockedByPackageId, ByTfm: new Map<string, string>() };
+        entry.ByTfm.set(conflict.Tfm ?? "all", version ?? "unresolved");
+        missing.set(dependencyId, entry);
+        continue;
+      }
+      if (!additions.some((candidate) => candidate.Id.toLowerCase() === dependencyId)) {
+        additions.push(
+          row.LatestVersion === version
+            ? row
+            : new OutdatedPackageViewModel({ ...row, LatestVersion: version })
+        );
+      }
+    }
+
+    return { additions, missing };
+  }
+
+  /**
+   * Preview framework sets must move together: when every selected version needs
+   * newer siblings, offer to include those siblings at the required version and
+   * re-run the preflight instead of dead-ending.
+   */
+  private async tryExpandSelectionAsync(
+    conflicts: BatchUpdateConflict[],
+    packages: OutdatedPackageViewModel[],
+    depth: number
+  ): Promise<OutdatedPackageViewModel[] | null> {
+    if (depth <= 0) return null;
+
+    const { additions, missing } = this.collectRequiredUpdates(conflicts, packages);
+    const requirements = ClassifyRequirements(missing);
+    const orderedSteps = BuildPlanSteps(additions, requirements, BuildStepLookup(conflicts));
+    const conditionalUpdates = BuildConditionalUpdates(requirements.Mixed);
+
+    this.updatePlan = {
+      Blocked: requirements.Unresolved.length > 0,
+      Steps: orderedSteps.map(([order, lines]) => ({ Order: order, Lines: lines })),
+    };
+    const planLines = FormatPlanText(orderedSteps);
+
+    const nothingToApply =
+      additions.length === 0 &&
+      requirements.Central.length === 0 &&
+      conditionalUpdates.length === 0;
+    if (requirements.Unresolved.length > 0 || nothingToApply) {
+      this.planDialogShown = true;
+      await hostApi.showConfirmationAsync({
+        Message: `${conflicts.length} conflict(s) cannot be resolved automatically — nothing was changed.`,
+        Detail: [
+          "The selection cannot be applied as one update. Required changes:",
+          "",
+          ...planLines,
+          "Apply them (or align the target frameworks) and update again.",
+        ].join("\n"),
+      });
+      this.statusText = "Update cancelled before writing — the dialog lists the required changes";
+      return null;
+    }
+
+    const include = await hostApi.showConfirmationAsync({
+      Message: `${conflicts.length} conflict(s) — apply the required changes and continue?`,
+      Detail: [...planLines, "Continue?"].join("\n"),
+    });
+    if (!include.ok || !include.value.Confirmed) {
+      this.planDialogShown = true;
+      return null;
+    }
+
+    if (requirements.Central.length > 0 || conditionalUpdates.length > 0) {
+      const raised = await this.raiseCentralVersionsAsync(requirements.Central, conditionalUpdates);
+      if (raised === null) return null;
+      if (raised === 0 && additions.length === 0) return null;
+    }
+
+    if (additions.length > 0) {
+      this.statusText = `Including ${additions.length} required update${additions.length === 1 ? "" : "s"}…`;
+    }
+    return await this.preflightAsync([...packages, ...additions], depth - 1);
+  }
+
+  /** Writes central raises and reports how many entries were applied, or `null` on failure. */
+  private async raiseCentralVersionsAsync(
+    central: Array<{ Id: string; Version: string }>,
+    conditional: Array<{ PackageId: string; Version: string; Condition: string }>
+  ): Promise<number | null> {
+    const raised = await hostApi.updateCentralVersionsAsync({
+      ProjectPaths: this.projectPaths,
+      Updates: [
+        ...central.map((entry) => ({ PackageId: entry.Id, Version: entry.Version })),
+        ...conditional,
+      ],
+    });
+    if (!raised.ok) {
+      this.statusText = `Could not raise central versions: ${raised.error}`;
+      return null;
+    }
+
+    const applied = raised.value.Applied.length;
+    const versionWord = applied === 1 ? "version" : "versions";
+    const skippedNote =
+      raised.value.Skipped.length > 0
+        ? ` (${raised.value.Skipped.length} not found in Directory.Packages.props)`
+        : "";
+    this.statusText = `Raised ${applied} central ${versionWord}${skippedNote}`;
+    return applied;
   }
 
   private async updatePackagesSequentiallyAsync(
@@ -668,6 +1053,7 @@ export class UpdatesView extends LitElement {
 
     const packageWord = packages.length === 1 ? "package" : "packages";
     this.statusText = `Updating ${packages.length} ${packageWord} transactionally...`;
+    this.failure = undefined;
     this.requestUpdate();
 
     const result = await this.updateAsJobAsync({
@@ -678,6 +1064,8 @@ export class UpdatesView extends LitElement {
 
     if (!result.ok) {
       this.statusText = `Update failed: ${result.error}`;
+      this.failure = ActionableFailure(result.error);
+      this.failureHeading = "Update failed";
       return;
     }
     if (result.value.Cancelled) {
@@ -698,6 +1086,8 @@ export class UpdatesView extends LitElement {
     response: BatchUpdateResponse
   ): Promise<void> {
     const reason = response.RestoreError ?? response.RollbackError;
+    this.failure = response.Failure ?? (reason ? ActionableFailure(reason) : undefined);
+    this.failureHeading = "Update rolled back";
     const reasonSuffix = reason ? `: ${reason}` : "";
     this.statusText = `Update rolled back${reasonSuffix}`;
     await hostApi.updateBadgeAsync({
@@ -730,6 +1120,7 @@ export class UpdatesView extends LitElement {
     }));
     const packageWord = packages.length === 1 ? "package" : "packages";
     this.statusText = `${packages.length} ${packageWord} updated and restored`;
+    this.failure = undefined;
     await hostApi.updateBadgeAsync({
       Count: this.packages.length,
       BlockedCount: this.blockedPackages.length,
@@ -865,6 +1256,48 @@ export class UpdatesView extends LitElement {
     return this.statusText ? html` · ${this.statusText}` : nothing;
   }
 
+  private renderUpdatePlan(): unknown {
+    const plan = this.updatePlan;
+    if (!plan || plan.Steps.length === 0) return nothing;
+
+    const steps = [...plan.Steps].sort((a, b) => a.Order - b.Order);
+    const stepWord = steps.length === 1 ? "step" : "steps";
+
+    return html`
+      <div class="update-plan">
+        <div class="plan-header">
+          <span class="codicon codicon-list-ordered"></span>
+          <b>Update plan — ${steps.length} ${stepWord}</b>
+          ${plan.Blocked
+            ? html`<span class="plan-flag">needs manual changes</span>`
+            : nothing}
+          <span class="plan-spacer"></span>
+          <button class="ghost-btn" @click=${() => { this.updatePlan = null; }}>Dismiss</button>
+        </div>
+        ${steps.map(
+          (step) => html`
+            <div class="plan-step">
+              <span class="step-badge" aria-label="Step ${step.Order + 1}">${step.Order + 1}</span>
+              <div class="step-lines">
+                ${step.Lines.map(
+                  (line) => html`
+                    <div class="plan-line">
+                      <span class="kind ${line.Kind}">${line.Kind}</span>
+                      <span>${line.Text}</span>
+                    </div>
+                  `
+                )}
+              </div>
+            </div>
+          `
+        )}
+        ${plan.Blocked
+          ? html`<div class="empty-hint">Nothing was written. Apply the steps above (dependencies first) and check for updates again.</div>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderInfoBanner(): unknown {
     if (this.visiblePackages.length === 0) return nothing;
     return html`<div class="info-banner">
@@ -992,6 +1425,14 @@ export class UpdatesView extends LitElement {
     `;
   }
 
+  private renderFailure(): unknown {
+    if (!this.failure) return nothing;
+    return html`<actionable-error
+      .failure=${this.failure}
+      heading=${this.failureHeading}
+    ></actionable-error>`;
+  }
+
   private renderPackageList(): unknown {
     const visible = this.visiblePackages;
     const show = this._loadTask.status !== TaskStatus.PENDING && visible.length > 0;
@@ -1041,8 +1482,10 @@ export class UpdatesView extends LitElement {
             ${this.renderHeaderActions()}
           </div>
         </div>
+        ${this.renderUpdatePlan()}
         ${this.renderInfoBanner()}
         ${this.renderConflicts()}
+        ${this.renderFailure()}
         ${this.renderJobProgress()}
         ${this.renderLoading()}
         ${this.renderEmpty()}

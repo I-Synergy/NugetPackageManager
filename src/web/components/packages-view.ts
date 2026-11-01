@@ -17,8 +17,10 @@ import type { VulnerabilitiesView } from "./vulnerabilities-view";
 import type { CleanupView } from "./cleanup-view";
 import type { DropdownOption } from "./dropdown";
 import "./dropdown";
+import "./toolchain-banner";
+import "./toolchain-view";
 
-type TabId = "browse" | "installed" | "updates" | "consolidate" | "cleanup" | "vulnerabilities";
+type TabId = "browse" | "installed" | "updates" | "consolidate" | "cleanup" | "vulnerabilities" | "toolchain";
 
 const PACKAGE_FETCH_TAKE = 50;
 const PACKAGE_CONTAINER_SCROLL_MARGIN = 196;
@@ -401,6 +403,7 @@ export class PackagesView extends LitElement {
   @state() consolidateCount: number | null = null;
   @state() cleanupCount: number | null = null;
   @state() vulnerabilitiesCount: number | null = null;
+  @state() toolchainCount: number | null = null;
   @state() filters: FilterEvent = {
     Prerelease: true,
     Query: "",
@@ -536,7 +539,7 @@ export class PackagesView extends LitElement {
   }
 
   private async handleTabKeydownAsync(e: KeyboardEvent): Promise<void> {
-    const tabs: TabId[] = ["browse", "installed", "updates", "consolidate", "vulnerabilities", "cleanup"];
+    const tabs: TabId[] = ["browse", "installed", "updates", "consolidate", "vulnerabilities", "cleanup", "toolchain"];
     const currentIdx = tabs.indexOf(this.activeTab);
     let newIdx: number;
 
@@ -1485,6 +1488,7 @@ export class PackagesView extends LitElement {
         ${this.renderProjectTreeColumn()}
         <div class="col" id="packages">
           ${this.renderTabBar()}
+          ${this.renderToolchainBanner()}
           ${this.renderSearchAndBanner()}
           ${this.renderActiveTab()}
         </div>
@@ -1510,6 +1514,19 @@ export class PackagesView extends LitElement {
     </div>`;
   }
 
+  /**
+   * Toolchain health is checked against the discovered projects, so the banner
+   * names the SDK that would actually be used for a restore.
+   */
+  private renderToolchainBanner(): unknown {
+    return html`
+      <toolchain-banner
+        .projectPaths=${this.projects.map((project) => project.Path)}
+        @open-toolchain=${async () => await this.setTabAsync("toolchain")}
+      ></toolchain-banner>
+    `;
+  }
+
   private renderTabBar(): unknown {
     return html`
       <div class="tab-bar" role="tablist" @keydown=${async (e: KeyboardEvent) => await this.handleTabKeydownAsync(e)}>
@@ -1521,6 +1538,7 @@ export class PackagesView extends LitElement {
         ${this.renderTabButton("consolidate", "Consolidate", this.renderCountBadge(this.consolidateCount))}
         ${this.renderTabButton("cleanup", "Cleanup", this.renderCountBadge(this.cleanupCount), "tab-cleanup")}
         ${this.renderTabButton("vulnerabilities", "Vulnerabilities", this.renderCountBadge(this.vulnerabilitiesCount))}
+        ${this.renderTabButton("toolchain", "Toolchain", this.renderCountBadge(this.toolchainCount))}
       </div>
     `;
   }
@@ -1609,6 +1627,8 @@ export class PackagesView extends LitElement {
         return this.renderCleanupTab();
       case "vulnerabilities":
         return this.renderVulnerabilitiesTab();
+      case "toolchain":
+        return this.renderToolchainTab();
       default:
         return nothing;
     }
@@ -1660,11 +1680,21 @@ export class PackagesView extends LitElement {
   private renderCleanupTab(): unknown {
     return html`<div class="tab-content" role="tabpanel" aria-label="cleanup tab">
       <cleanup-view
+        .projectPaths=${this.effectiveProjectPaths}
         @count-changed=${(e: CustomEvent<number>) => { this.cleanupCount = e.detail; }}
         @cleanup-completed=${async () => {
           await this.LoadProjectsAsync();
         }}
       ></cleanup-view>
+    </div>`;
+  }
+
+  private renderToolchainTab(): unknown {
+    return html`<div class="tab-content" role="tabpanel" aria-label="toolchain tab">
+      <toolchain-view
+        .projectPaths=${this.effectiveProjectPaths}
+        @count-changed=${(e: CustomEvent<number>) => { this.toolchainCount = e.detail; }}
+      ></toolchain-view>
     </div>`;
   }
 

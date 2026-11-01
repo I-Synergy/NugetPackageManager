@@ -296,11 +296,13 @@
         if (msg.method === 'getVulnerablePackagesAsync') window.__mockState.vulnerableDone = true;
 
         window.dispatchEvent(new MessageEvent('message', {
+          origin: window.location.origin,
           data: { type: 'rpc-response', id: msg.id, result: result },
         }));
       })
       .catch(function (err) {
         window.dispatchEvent(new MessageEvent('message', {
+          origin: window.location.origin,
           data: { type: 'rpc-response', id: msg.id, result: { ok: false, error: err.message } },
         }));
       });
@@ -442,6 +444,83 @@
       case 'restoreProjectsAsync':
         return delay(800).then(function () { return { ok: true, value: undefined }; });
 
+      case 'getToolchainHealthAsync':
+        return delay(400).then(function () {
+          return {
+            ok: true,
+            value: {
+              Health: {
+                DotnetFound: true,
+                SdkVersion: '10.0.403',
+                GlobalJsonPath: '/mock/global.json',
+                PinnedSdkVersion: '10.0.403',
+                SdkMatchesPin: true,
+                ProjectEvaluationFailed: false,
+                CheckedAt: new Date().toISOString(),
+                InstalledSdks: [
+                  { Version: '11.0.100-rc.3.26522.148', Path: 'C:/Program Files/dotnet/sdk', Source: 'system' },
+                  { Version: '10.0.403', Path: 'C:/Program Files/dotnet/sdk', Source: 'system' },
+                  { Version: '9.0.320', Path: 'C:/Program Files/dotnet/sdk', Source: 'system' },
+                ],
+                Issues: [],
+              },
+            },
+          };
+        });
+
+      case 'runToolchainDiagnosticsAsync':
+        return { ok: true, value: { Report: '--- NuGet Package Manager toolchain diagnostics (mock) ---' } };
+
+      case 'setWorkspaceSdkAsync':
+        return {
+          ok: true,
+          value: { GlobalJsonPath: '/mock/global.json', Version: params.Version, Notes: [] },
+        };
+
+      case 'installSdkAsync':
+        return delay(1200).then(function () {
+          return {
+            ok: true,
+            value: {
+              Installed: true,
+              InstallRoot: '~/.dotnet',
+              DotnetPath: '~/.dotnet/dotnet',
+              SdkVersion: params.Version,
+            },
+          };
+        });
+
+      case 'runWorkloadCommandAsync':
+        return delay(1200).then(function () {
+          return {
+            ok: true,
+            value: { Action: params.Action, Succeeded: true, ExitCode: 0, Output: 'mock output', NeedsElevation: false },
+          };
+        });
+
+      case 'getDependencyIssuesAsync':
+        return delay(400).then(function () {
+          return {
+            ok: true,
+            value: { Issues: [], ProjectsScanned: PROJECTS.length, ProjectsSkipped: 0, SkippedProjectPaths: [] },
+          };
+        });
+
+      case 'fixRestoreConflictAsync':
+        return delay(800).then(function () { return { ok: true, value: { Applied: true } }; });
+
+      case 'updateCentralVersionsAsync':
+        return delay(600).then(function () {
+          return {
+            ok: true,
+            value: {
+              Applied: (params.Updates || []).map(function (u) { return u.PackageId; }),
+              Skipped: [],
+              PropsFile: '/mock/Directory.Packages.props',
+            },
+          };
+        });
+
       case 'updateConfigurationAsync':
         return { ok: true, value: undefined };
 
@@ -477,6 +556,7 @@
         // Handle everything else locally
         Promise.resolve(getMockResponse(msg.method, msg.params)).then(function (result) {
           window.dispatchEvent(new MessageEvent('message', {
+            origin: window.location.origin,
             data: { type: 'rpc-response', id: msg.id, result: result },
           }));
         });

@@ -27,6 +27,7 @@
   - [Consolidate](#consolidate)
   - [Vulnerabilities](#vulnerabilities)
   - [Cleanup](#cleanup)
+  - [Toolchain](#toolchain)
 - [Activity Bar and Background Checks](#activity-bar-and-background-checks)
 - [Project Tree](#project-tree)
 - [Commands](#commands)
@@ -34,6 +35,7 @@
 - [Private Feed Authentication](#private-feed-authentication)
 - [Central Package Management](#central-package-management)
 - [Inline Version Decorations](#inline-version-decorations)
+- [Troubleshooting: SDK and Workload Errors](#troubleshooting-sdk-and-workload-errors)
 - [Contributing](#contributing)
 - [Architecture](#architecture)
 - [Credits](#credits)
@@ -53,7 +55,9 @@
 | 🛡️ | **Vulnerability Scanning** | Critical / High / Medium / Low severity, advisory links, transitive dependencies and a yellow banner across every tab |
 | 🗑️ | **Remove from Solution** | Remove a package reference from one project or from every project in the solution at once |
 | 🔀 | **Version Consolidation** | Finds and fixes version inconsistencies per framework line, never merging netX versions |
-| 🧹 | **Cleanup** | Find and remove unused `PackageVersion` entries from `Directory.Packages.props`, with automatic backups |
+| 🧰 | **Toolchain** | Selected SDK, `global.json` pin, workload repair, `dotnet sdk check` status, install and diagnostics — with a toolchain problem banner across every tab |
+| 🧭 | **Update plan** | The preflight explains which package versions must move, in dependency order, and writes per-TFM `PackageVersion` groups when target frameworks disagree |
+| 🧹 | **Cleanup** | Find and remove unused `PackageVersion` entries from `Directory.Packages.props`, with automatic backups — plus direct references that the graph already provides transitively |
 | 🌲 | **Project Tree** | Checkbox-based project selector — scope every operation to exactly the projects you want |
 | 🔐 | **Private Feeds** | Reads `NuGet.config`, supports Azure Artifacts Credential Provider and custom password scripts |
 | 📌 | **CPM Support** | Full Central Package Management — detects `Directory.Packages.props`, tracks version sources |
@@ -138,6 +142,7 @@ Shows every package installed across all selected projects. Select a package to 
 - **Version changes** — install, update, or change a package version per project without leaving the package list
 - **Framework filter** — collapses platform TFMs (windows, android, ios) to their base `.NET` line. **Shared** is a separate option, so unconditional versions are never mixed into a `.NET`-specific update run.
 
+
 ### Updates
 
 ![Updates](docs/images/screenshot-updates.png)
@@ -152,6 +157,7 @@ Lists all packages where a newer version is available on the configured sources.
 - Updates run as a **host-side job** with live stage/percentage progress, so a large solution that takes minutes to restore is never interrupted by a webview request deadline. The same applies to single installs, updates, uninstalls, consolidation and cleanup. A job keeps running if the tab is closed, and only one batch update runs at a time so two transactions cannot overwrite each other.
 - A webview request deadline no longer cancels host work: timeouts report that the operation is still running instead of reverting packages that were written successfully. A rollback happens only for a real write/restore failure or an explicit cancel.
 - Before writing, a multi-package update is checked against the restored dependency graph. Selections that would break a pin are listed in a confirmation dialog and the conflicting rows are skipped, so one incompatible package does not fail the other 63. If the final restore still fails, the rollback names the packages involved and offers to retry without them.
+- When the selection cannot be applied as one update, the preflight builds a **change plan**: the requirement closure (a new version requires a sibling, which requires another package), grouped into **`Step 1`, `Step 2`, …** so dependencies move first. The plan is also rendered as a colour-coded panel in the tab (`DIRECT`, `CENTRAL`, `CONDITIONAL`, `UNRESOLVED`), and a package that needs different versions per target framework is written as conditional `<PackageVersion>` groups instead of one wrong unconditional pin.
 - The restore phase reports `dotnet`'s own stages per project, and the progress banner has a **Cancel** button that rolls back what was already written. Cancel is also available on a busy project row, on a consolidating card, during cleanup, and during "remove from all projects" (which stops before touching the remaining projects).
 - The extension **never runs `dotnet build`**. After writing versions it runs `dotnet restore` only; building or rebuilding is left to your own build task or `dotnet build`.
 - Restore failures report the actual `dotnet` diagnostics. For `NU1107` the message names the contested package and the dependency chains, for example `Npgsql.EntityFrameworkCore.PostgreSQL 11.0.0-rc.2 requires = 11.0.0-rc.2.26504.105`.
@@ -193,7 +199,16 @@ Scans installed packages against the NuGet vulnerability database, including dep
 
 ### Cleanup
 
-Finds `PackageVersion` entries in `Directory.Packages.props` that no project references and removes them safely.
+Finds `PackageVersion` entries in `Directory.Packages.props` that no project references and removes them safely — and direct references that the dependency graph already provides transitively.
+
+**Transitive duplicates** are computed per target framework from `obj/project.assets.json`, with the chain that brings the package (`Parent -> … -> Package`):
+
+- **redundant** — removing the reference does not lower the resolved version → **Remove** / **Remove all safe** (confirmed, through the normal snapshot + restore + rollback job);
+- **pinned — kept** — the direct reference raises the version above what the graph requires (security pins, framework alignment), so it is listed but never offered for removal.
+
+Opening Cleanup restores any project whose `project.assets.json` is missing or stale (shown as "Restoring N projects…"), then analyses the fresh graph; a failed restore is reported with **Restore again** instead of guessing. Only projects the extension manages are considered — when the workspace has a solution, its projects; otherwise the workspace projects minus `excludeGlobs` and hidden folders such as `.ai/tmp`, so vendored samples and cached trees are never restored or analysed. At most 20 projects are restored in one pass; the rest are reported and can be continued with **Restore again**.
+
+The Cleanup tab badge counts both kinds of cleanup: unused `PackageVersion` entries plus removable duplicates.
 
 - Compares global CPM versions against every `PackageReference` in the workspace
 - Groups unused entries by props file
@@ -204,6 +219,23 @@ Finds `PackageVersion` entries in `Directory.Packages.props` that no project ref
 ![Cleanup](docs/images/screenshot-cleanup.png)
 
 Use **Remove unused** after reviewing the list. This replaces the PowerShell `Remove-UnusedPackages.ps1` workflow with an in-editor report and confirmation.
+
+### Toolchain
+
+![Toolchain](docs/images/screenshot-toolchain.png)
+
+The last tab reports the .NET SDK the extension will actually use, and lets you change it without leaving the editor.
+
+- Selected SDK from `dotnet --version`, plus `NETCoreSdkVersion` as **MSBuild actually resolves it** (the authoritative value; a mismatch is flagged)
+- SDK patch/out-of-support status from the official `dotnet sdk check` (cached for 10 minutes, and reported as unavailable when offline)
+- The `global.json` pin and whether the selected SDK satisfies it
+- Which `dotnet` host runs the commands (PATH, or the SDK the extension installed)
+- Installed SDKs in a selector — pick one to pin it for this workspace, or **Automatic** to follow the project's `global.json`
+- **Install `<version>`** when the pinned SDK is missing
+- Per-issue cause + hint, with the raw `dotnet` output behind **Show output**
+- **Re-check** and **Copy diagnostics**
+
+The same selector is available in *Settings → dotnet toolchain* and in a warning banner that appears above the package list whenever the toolchain cannot serve a restore.
 
 ---
 
@@ -243,6 +275,7 @@ Access these from the Command Palette (`Ctrl+Shift+P`):
 | **NuGet Package Manager for Visual Studio Code: Remove Package** | `nugetpackagemanager.remove` | Open the editor tab and switch to Installed |
 | **Settings** | `nugetpackagemanager.openSettings` | Open the NuGet Package Manager for Visual Studio Code settings view |
 | **Report Problem** | `nugetpackagemanager.reportProblem` | Open a new GitHub issue |
+| **Copy dotnet Toolchain Diagnostics** | `nugetpackagemanager.copyToolchainDiagnostics` | Copy the resolved SDK, `global.json` pin and per-project toolchain status to the clipboard (credentials redacted) |
 
 ---
 
@@ -383,6 +416,65 @@ Enable `nugetpackagemanager.enablePackageVersionInlineInfo` to see available upd
 ```
 
 Decorations appear in the gutter next to `<PackageReference>` entries whenever a newer version exists on your configured sources. They are informational.
+
+---
+
+## Troubleshooting: SDK and Workload Errors
+
+The extension runs `dotnet` **in the directory that owns the project's nearest `global.json`**, because that is where the `dotnet` host selects its SDK from. A project pinning `10.0.403` therefore restores with `10.0.403` even if a newer SDK is installed.
+
+When something in the toolchain is wrong, the extension says so instead of showing raw MSBuild output:
+
+- A banner above the package list appears when the selected SDK does not satisfy the `global.json` pin, the pinned SDK is missing, or a real `dotnet msbuild -getProperty` evaluation fails.
+- When a selection cannot be applied, the preflight computes a **change plan** and shows it in one dialog:
+
+- **Ordered steps** — every change is grouped into `Step 1`, `Step 2`, … by dependency depth, so a set that cannot go in at once can be applied across sessions: step 1 never needs anything a later step installs.
+- **Direct references to update** — rows the Updates tab already knows, each at the exact version the conflict asks for.
+- **`Directory.Packages.props` changes** — raised centrally in one write (then one restore) when every target framework agrees on the version.
+- **Needs conditional `<PackageVersion>` groups** — when the preview set requires different versions per TFM (`Microsoft.AspNetCore.Identity.EntityFrameworkCore` is `10.0.14` for `net10.0` but `11.0.0-rc.3…` for `net11.0`), a single unconditional version cannot satisfy both, so nothing is written and the dialog names each TFM and version.
+- **Requirements without a resolvable version** — listed so they can be pinned by hand.
+
+If the plan contains conditional or unresolved items, the update stops before writing anything. Otherwise it applies the central raises, includes the direct updates and re-runs the preflight. Requirements come from the package's dependency group for each project's target framework, and the check follows the closure: if a raised sibling itself requires a newer package, that requirement is part of the plan too (bounded to 250 inspected packages). The conclusion therefore matches what `dotnet restore` would enforce, not just the first level.
+
+This is the normal shape of a coordinated preview release: the new package versions require their siblings at the same preview version, and Central Package Management still pins the previous one.
+
+A failed update or restore shows the **cause**, a suggested fix, and a collapsed **Show output** section with the raw diagnostics. A promoted vulnerability audit (`NU1900`–`NU1905` in `WarningsAsErrors`) is reported as such — with the affected packages, severity and an **Open advisory** action — instead of being described as a version conflict.
+- Version conflicts (`NU1107`, `NU1605`, `NU1608`) carry their dependency chains and a **Pin `<Package>` to `<version>`** action: the suggested version is written to the `Directory.Packages.props` group (CPM) or the project's `PackageReference`, then restored through the same job, with the outcome reported in the card.
+- **Copy diagnostics** (in the banner, in the error card, and in *Settings → dotnet toolchain*) copies a redacted report: selected SDK, pin, nearest `global.json`, per-project working directory, `dotnet --list-sdks` and `dotnet --info`. The same report is written to the *NuGet Package Manager for Visual Studio Code* output channel, and is available from the Command Palette as **Copy dotnet Toolchain Diagnostics**.
+
+The most common case is a **workload manifest conflict**, which looks like this:
+
+```
+error MSB4242: SDK Resolver Failure: ... WorkloadManifestCompositionException:
+Workload pack 'Microsoft.NET.Runtime.Emscripten.Node.net10' in manifest
+'microsoft.net.workload.emscripten.net10' conflicts with manifest
+'microsoft.net.workload.emscripten.current'
+```
+
+That is a machine-level SDK problem, not a package problem: two installed manifests declare the same workload pack at different versions, so every SDK resolution fails before restore starts.
+
+The Toolchain tab offers **Update workloads** and **Repair workloads** for this issue, which run `dotnet workload update` / `dotnet workload repair` for the selected SDK and show the raw output. On MSI-based .NET installs these commands usually need an elevated terminal; the extension says so when it detects an access-denied failure.
+
+If the conflict mentions a band you no longer have installed, the hint names the left-over folder and the tab lists it under **left-over manifest bands (no installed SDK)**. `sdk-manifests\<band>` entries are not removed when an SDK is uninstalled, and neither `workload update` nor `repair` cleans them up — a newer SDK still composes them, which is enough to break every restore. **Copy cleanup command** puts an elevated `Rename-Item` (rename, not delete, so it is reversible) on the clipboard; run it, then press **Re-check**.
+
+Only stable band folders (`10.0.100`, `9.0.100`, …) are reported. Prerelease bands such as `11.0.100-rc.2` are routinely installed by Visual Studio and referenced by active workloads, so they are deliberately left out of the list.
+
+### Choosing a different SDK
+
+The Toolchain tab, the toolchain banner and *Settings → dotnet toolchain* show an **SDK** selector listing every SDK found by `dotnet --list-sdks` plus any SDK the extension installed itself.
+
+Picking a version writes it into the workspace's `global.json` — the file `dotnet` itself reads — so the pin is versioned with the repository instead of living in `settings.json`. The edit is surgical (comments, key order and unrelated sections survive) and keeps the rest of the file consistent with the pin:
+
+- `sdk.version` is the exact installed SDK, and `sdk.rollForward` is set to `disable` so the build uses that SDK rather than a newer patch.
+- `sdk.allowPrerelease` is set to `true` when the chosen SDK is a prerelease (otherwise the pin can never resolve).
+- `sdk.workloadVersion` is removed when it pins a workload set for a **different feature band** — a `10.0.400` workload set under an `11.0.100` SDK is inconsistent by construction.
+- `tools.dotnet` is kept in step with the pinned SDK.
+
+When the workspace has no `global.json`, it is created with Microsoft's template (`dotnet new globaljson --sdk-version <v> --roll-forward disable`); an existing file is never handed to the template, since that would drop sections such as `tools` and `test`.
+
+### Installing the pinned SDK
+
+When `global.json` pins an SDK that is not installed, the selector offers **Install `<version>`**. After you confirm, the extension downloads Microsoft's official `dotnet-install` script (`https://dot.net/v1/dotnet-install.<ps1|sh>`), installs that SDK under your user profile (`~/.dotnet`), pins it in `global.json`, and re-runs the health check. The action requires a trusted workspace and is the only place the extension executes downloaded code; credentials in the session are never sent with it.
 
 ---
 

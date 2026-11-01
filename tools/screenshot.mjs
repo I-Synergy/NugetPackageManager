@@ -28,6 +28,26 @@ async function waitForContent() {
   await page.waitForTimeout(800);
 }
 
+// Browse, Installed, Updates, Consolidate, Vulnerabilities, Toolchain, Cleanup.
+const EXPECTED_TABS = 7;
+
+/**
+ * Every shot must show the tab bar: it is the only way a reader can tell which
+ * view they are looking at, and an early capture (before the app mounts) or a
+ * scrolled page silently produces a tab-less image.
+ */
+async function assertTabBar() {
+  const tabs = await page.locator('[role="tab"]').count();
+  if (tabs < EXPECTED_TABS) {
+    throw new Error(`tab bar missing: found ${tabs} tab(s), expected ${EXPECTED_TABS}`);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const box = await page.locator('[role="tab"]').first().boundingBox();
+  if (!box || box.y < 0 || box.y > 60) {
+    throw new Error(`tab bar is not visible at the top of the viewport (y=${box ? box.y : 'none'})`);
+  }
+}
+
 async function clickTab(label) {
   await page.click(`[role="tab"]:has-text("${label}")`);
   await page.waitForTimeout(500);
@@ -35,8 +55,9 @@ async function clickTab(label) {
 }
 
 async function shot(filename) {
+  await assertTabBar();
   await page.screenshot({ path: `${OUT_DIR}/${filename}` });
-  console.log(`  ✓ ${filename}`);
+  console.log(`  ✓ ${filename} (${EXPECTED_TABS} tabs)`);
 }
 
 console.log('Taking screenshots...');
@@ -62,6 +83,11 @@ await shot('screenshot-consolidate.png');
 // Vulnerabilities tab
 await clickTab('Vulnerabilities');
 await shot('screenshot-vulnerabilities.png');
+
+// Toolchain tab
+await clickTab('Toolchain');
+await waitForContent();
+await shot('screenshot-toolchain.png');
 
 // Cleanup tab (must be last)
 await clickTab('Cleanup');

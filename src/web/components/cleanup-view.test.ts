@@ -52,6 +52,12 @@ suite('CleanupView Component', () => {
                     },
                 }),
                 showConfirmationAsync: async () => ok({ Confirmed: true }),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [],
+                    ProjectsScanned: 0,
+                    ProjectsSkipped: 0,
+                    SkippedProjectPaths: [],
+                }),
             },
             writable: true,
             configurable: true,
@@ -67,6 +73,40 @@ suite('CleanupView Component', () => {
             writable: true,
             configurable: true,
         });
+    });
+
+    test('hosts the transitive-duplicate section and adds it to the tab count', async () => {
+        const counts: number[] = [];
+        view.addEventListener('count-changed', (event) => {
+            counts.push((event as CustomEvent<number>).detail);
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const section = view.shadowRoot!.querySelector('dependency-issues');
+        assert.ok(section, 'the Cleanup tab should host dependency-issues');
+
+        section!.dispatchEvent(new CustomEvent('dependency-count-changed', {
+            detail: 3,
+            bubbles: true,
+            composed: true,
+        }));
+
+        await waitForAsync(() => counts.includes(5));
+        assert.ok(counts.includes(2), 'unused entries alone are 2');
+        assert.ok(counts.includes(5), 'badge includes 2 unused + 3 duplicates');
+    });
+
+    test('passes the scoped project list to the duplicate analysis', async () => {
+        view.projectPaths = ['D:/ws/src/App/App.csproj'];
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const section = view.shadowRoot!.querySelector('dependency-issues') as unknown as {
+            projectPaths: string[];
+        };
+        assert.deepStrictEqual(section.projectPaths, ['D:/ws/src/App/App.csproj']);
     });
 
     test('renders unused packages grouped by props file', async () => {

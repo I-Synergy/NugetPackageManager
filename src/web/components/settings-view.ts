@@ -1,13 +1,29 @@
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { Task, TaskStatus } from "@lit/task";
 
 import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { hostApi, configuration, router } from "../registrations";
 import { SourceViewModel } from "../types";
+import type { ToolchainHealth } from "@/common/rpc/types";
+import "./sdk-select";
 
 @customElement("settings-view")
 export class SettingsView extends LitElement {
+  @state() private copyFeedback = "";
+  @state() private toolchainRefresh = 0;
+
+  private readonly _toolchainTask = new Task(this, {
+    task: async ([refreshToken], { signal }): Promise<ToolchainHealth | null> => {
+      const result = await hostApi.getToolchainHealthAsync(
+        { ForceRefresh: refreshToken > 0 },
+        signal
+      );
+      return result.ok ? result.value.Health : null;
+    },
+    args: () => [this.toolchainRefresh] as const,
+  });
   static override readonly styles = [
     codicon,
     scrollableBase,
@@ -252,6 +268,52 @@ export class SettingsView extends LitElement {
     `;
   }
 
+  private renderSdkSelect(): unknown {
+    const health = this._toolchainTask.value;
+    if (!health) return nothing;
+    const candidates = [health.PinnedSdkVersion].filter(
+      (version): version is string => Boolean(version)
+    );
+    const recommended = candidates.find(
+      (version) => !health.InstalledSdks.some((sdk) => sdk.Version === version)
+    ) ?? "";
+    return html`
+      <sdk-select
+        .sdks=${health.InstalledSdks}
+        .selected=${health.PinnedSdkVersion ?? ""}
+        .recommended=${recommended}
+        @sdk-changed=${() => { this.toolchainRefresh += 1; }}
+      ></sdk-select>
+    `;
+  }
+
+  private renderToolchainStatus(): unknown {
+    if (this._toolchainTask.status === TaskStatus.PENDING) return "Checking the .NET SDK…";
+    if (this._toolchainTask.status === TaskStatus.ERROR) return "Could not check the .NET SDK.";
+    const health = this._toolchainTask.value;
+    if (!health) return "Could not check the .NET SDK.";
+    if (!health.DotnetFound) return "dotnet was not found on PATH.";
+    const pin = health.PinnedSdkVersion ? ` · global.json pins ${health.PinnedSdkVersion}` : " · no global.json pin";
+    const issueCount = health.Issues.length;
+    const plural = issueCount === 1 ? "" : "s";
+    const problems = issueCount === 0 ? "no problems detected" : `${issueCount} problem${plural}`;
+    return `SDK ${health.SdkVersion ?? "unknown"}${pin} · ${problems}`;
+  }
+
+  private async copyDiagnosticsAsync(): Promise<void> {
+    const result = await hostApi.runToolchainDiagnosticsAsync({});
+    if (!result.ok) {
+      this.copyFeedback = "Could not collect diagnostics.";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(result.value.Report);
+      this.copyFeedback = "Diagnostics copied (credentials redacted).";
+    } catch {
+      this.copyFeedback = "Copy failed — see the output channel.";
+    }
+  }
+
   override render(): unknown {
     return html`
       <div class="container">
@@ -290,6 +352,16 @@ export class SettingsView extends LitElement {
               />
               Show inline information about newer package versions in project files
             </label>
+          </div>
+
+          <div class="section">
+            <div class="title">dotnet toolchain</div>
+            <div class="subtitle">${this.renderToolchainStatus()}</div>
+            ${this.renderSdkSelect()}
+            <button class="add-source" aria-label="Copy dotnet toolchain diagnostics" @click=${async () => await this.copyDiagnosticsAsync()}>
+              Copy diagnostics
+            </button>
+            ${this.copyFeedback ? html`<div class="subtitle" role="status">${this.copyFeedback}</div>` : nothing}
           </div>
 
           <div class="section sources-section">
