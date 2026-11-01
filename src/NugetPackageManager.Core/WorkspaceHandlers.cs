@@ -2,6 +2,7 @@ using System.Text.Json;
 using NugetPackageManager.Core.Protocol;
 using NugetPackageManager.Core.Workspace;
 using NugetPackageManager.Core.Workspace.Cpm;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
 
@@ -99,7 +100,7 @@ public sealed class WorkspaceHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
+            ? throw new RpcException(Constants.InvalidParams, $"'{property}' is required.")
             : value;
     }
 
@@ -120,7 +121,7 @@ public sealed class WorkspaceHandlers
 
         return Enum.TryParse<CpmWriteScope>(scope, ignoreCase: true, out var parsed)
             ? parsed
-            : throw new RpcException(RpcException.InvalidParams, $"Unknown scope '{scope}'.");
+            : throw new RpcException(Constants.InvalidParams, $"Unknown scope '{scope}'.");
     }
 
     private static List<CpmVersionChange> ReadChanges(JsonElement parameters)
@@ -129,7 +130,7 @@ public sealed class WorkspaceHandlers
             || !parameters.TryGetProperty("changes", out var changes)
             || changes.ValueKind != JsonValueKind.Array)
         {
-            throw new RpcException(RpcException.InvalidParams, "'changes' must be an array.");
+            throw new RpcException(Constants.InvalidParams, "'changes' must be an array.");
         }
 
         var parsed = new List<CpmVersionChange>();
@@ -151,7 +152,7 @@ public sealed class WorkspaceHandlers
             || !parameters.TryGetProperty("projectPaths", out var paths)
             || paths.ValueKind != JsonValueKind.Array)
         {
-            throw new RpcException(RpcException.InvalidParams, "'projectPaths' must be an array.");
+            throw new RpcException(Constants.InvalidParams, "'projectPaths' must be an array.");
         }
 
         var projectPaths = paths.EnumerateArray()

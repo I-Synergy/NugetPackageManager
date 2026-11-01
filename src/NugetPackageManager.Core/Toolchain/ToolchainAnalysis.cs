@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using NuGet.Versioning;
 using NugetPackageManager.Core.Diagnostics;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Toolchain;
 
@@ -494,13 +495,6 @@ public static partial class ToolchainAnalysis
     }
 
     public sealed record OrphanedManifestBand(string Band, string Path, IReadOnlyList<string> Manifests);
-
-    private enum SdkCheckSection
-    {
-        None,
-        Sdks,
-        Runtimes,
-    }
 
     [GeneratedRegex(@"^(\S+)\s+\[(.+)\]\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex SdkListLine();

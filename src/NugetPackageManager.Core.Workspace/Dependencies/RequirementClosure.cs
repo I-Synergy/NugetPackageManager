@@ -1,4 +1,6 @@
 
+using NugetPackageManager.Common;
+
 namespace NugetPackageManager.Core.Workspace.Dependencies;
 
 /// <summary>Dependency metadata for one concrete package version and framework.</summary>
@@ -18,8 +20,6 @@ public delegate Task<IReadOnlyList<ClosureDependency>?> DependencyLookup(
 /// </summary>
 public static class RequirementClosure
 {
-    public const int DefaultMaxInspected = 250;
-
     /// <param name="selected">Packages the user is moving.</param>
     /// <param name="tfms">Target frameworks the selection applies to.</param>
     /// <param name="effective">Currently resolved versions, keyed by lower-case package id.</param>
@@ -61,7 +61,7 @@ public static class RequirementClosure
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var conflicts = new List<ClosureConflict>();
         var inspected = 0;
-        var budget = maxInspected > 0 ? maxInspected : DefaultMaxInspected;
+        var budget = maxInspected > 0 ? maxInspected : Constants.DefaultMaxInspected;
 
         while (queue.Count > 0 && inspected < budget)
         {

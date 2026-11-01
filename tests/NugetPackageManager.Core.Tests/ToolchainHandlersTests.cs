@@ -7,6 +7,7 @@
 using System.Text.Json;
 using NugetPackageManager.Core.Protocol;
 using NugetPackageManager.Core.Toolchain;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Tests;
 
@@ -57,7 +58,7 @@ public class ToolchainHandlersTests
                 Serialize(new { startDirectory = directory, version = "not-a-version" }),
                 CancellationToken.None));
 
-        Assert.AreEqual(RpcException.InvalidParams, error.Code);
+        Assert.AreEqual(Constants.InvalidParams, error.Code);
     }
 
     [TestMethod]
@@ -69,7 +70,7 @@ public class ToolchainHandlersTests
                 Serialize(new { version = "10.0.403" }),
                 CancellationToken.None));
 
-        Assert.AreEqual(RpcException.InvalidParams, error.Code);
+        Assert.AreEqual(Constants.InvalidParams, error.Code);
     }
 
     [TestMethod]
@@ -111,7 +112,7 @@ public class ToolchainHandlersTests
                 }),
                 CancellationToken.None));
 
-        Assert.AreEqual(RpcException.InvalidParams, error.Code);
+        Assert.AreEqual(Constants.InvalidParams, error.Code);
     }
 
     [TestMethod]
@@ -128,6 +129,6 @@ public class ToolchainHandlersTests
                 }),
                 CancellationToken.None));
 
-        Assert.AreEqual(RpcException.InvalidParams, error.Code);
+        Assert.AreEqual(Constants.InvalidParams, error.Code);
     }
 }

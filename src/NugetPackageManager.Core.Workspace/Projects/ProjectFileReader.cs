@@ -1,5 +1,6 @@
 using System.Xml.Linq;
 using NugetPackageManager.Core.Workspace.Models;
+using static NugetPackageManager.Common.Constants;
 
 namespace NugetPackageManager.Core.Workspace.Projects;
 
@@ -12,10 +13,6 @@ namespace NugetPackageManager.Core.Workspace.Projects;
 /// </summary>
 public static class ProjectFileReader
 {
-    public const string SourceProject = "project";
-    public const string SourceCentral = "central";
-    public const string SourceOverride = "override";
-
     /// <summary>
     /// Reads one project. <paramref name="cpmVersions"/> is the flat CPM map the caller has
     /// already resolved (package id → version); passing null leaves every version at its

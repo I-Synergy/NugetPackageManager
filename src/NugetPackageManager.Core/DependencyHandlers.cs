@@ -5,6 +5,7 @@ using NugetPackageManager.Core.NuGet.Models;
 using NugetPackageManager.Core.NuGet.Sources;
 using NugetPackageManager.Core.Protocol;
 using NugetPackageManager.Core.Workspace.Dependencies;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
 
@@ -70,7 +71,7 @@ public sealed class DependencyHandlers
             (id, tfm) => constrainAll
                 || (constrained.TryGetValue(tfm, out var ids)
                     && Enumerable.Contains(ids, id, StringComparer.OrdinalIgnoreCase)),
-            maxInspected == 0 ? RequirementClosure.DefaultMaxInspected : maxInspected,
+            maxInspected == 0 ? Constants.DefaultMaxInspected : maxInspected,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -312,7 +313,7 @@ public sealed class DependencyHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
+            ? throw new RpcException(Constants.InvalidParams, $"'{property}' is required.")
             : value;
     }
 

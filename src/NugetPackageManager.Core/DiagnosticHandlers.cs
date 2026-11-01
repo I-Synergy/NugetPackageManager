@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NugetPackageManager.Core.Diagnostics;
 using NugetPackageManager.Core.Protocol;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
 
@@ -25,7 +26,7 @@ public static class DiagnosticHandlers
         var output = ReadOptionalString(parameters, "output");
         if (output is null)
         {
-            throw new RpcException(RpcException.InvalidParams, "'output' is required.");
+            throw new RpcException(Constants.InvalidParams, "'output' is required.");
         }
 
         var context = new DotnetFailureContext(

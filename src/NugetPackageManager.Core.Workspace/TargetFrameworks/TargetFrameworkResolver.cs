@@ -3,17 +3,9 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.TargetFrameworks;
-
-/// <summary>Where the framework list came from.</summary>
-public enum TargetFrameworkSource
-{
-    MsBuild,
-    Xml,
-    Assets,
-    Override,
-}
 
 
 /// <summary>
@@ -29,7 +21,8 @@ public sealed partial class TargetFrameworkResolver : IDisposable
     private const int MaxCacheEntries = 500;
     private const string DotnetExecutableName = "dotnet";
     private static readonly TimeSpan evaluationTimeout = TimeSpan.FromSeconds(60);
-    private static readonly string[] frameworkPropertyNames = ["TargetFrameworks", "TargetFramework"];
+    private static readonly string[] frameworkPropertyNames =
+        [Constants.TargetFrameworks, Constants.TargetFramework];
 
     private readonly SemaphoreSlim evaluationSlots = new(16, 16);
     private readonly Dictionary<string, CacheEntry> cache = [];
@@ -116,7 +109,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         {
             var document = XDocument.Load(projectPath);
             var elements = document.Descendants()
-                .Where(element => element.Name.LocalName is "TargetFramework" or "TargetFrameworks")
+                .Where(element => element.Name.LocalName is Constants.TargetFramework or Constants.TargetFrameworks)
                 .ToList();
 
             if (elements.Count != 1)
@@ -193,7 +186,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
             var document = XDocument.Load(projectPath);
 
             var multi = document.Descendants()
-                .FirstOrDefault(element => element.Name.LocalName == "TargetFrameworks")?.Value.Trim() ?? string.Empty;
+                .FirstOrDefault(element => element.Name.LocalName == Constants.TargetFrameworks)?.Value.Trim() ?? string.Empty;
             if (multi.Length > 0 && !multi.Contains("$(", StringComparison.Ordinal))
             {
                 var frameworks = Normalize(multi.Split(';'));
@@ -204,7 +197,7 @@ public sealed partial class TargetFrameworkResolver : IDisposable
             }
 
             var single = document.Descendants()
-                .FirstOrDefault(element => element.Name.LocalName == "TargetFramework")?.Value.Trim() ?? string.Empty;
+                .FirstOrDefault(element => element.Name.LocalName == Constants.TargetFramework)?.Value.Trim() ?? string.Empty;
             if (single.Length > 0 && !single.Contains("$(", StringComparison.Ordinal))
             {
                 return new TargetFrameworkInfo(Normalize([single]), TargetFrameworkSource.Xml);
@@ -330,8 +323,8 @@ public sealed partial class TargetFrameworkResolver : IDisposable
                 continue;
             }
 
-            if (name.Equals("TargetFrameworks", StringComparison.OrdinalIgnoreCase)
-                || name.Equals("TargetFramework", StringComparison.OrdinalIgnoreCase))
+            if (name.Equals(Constants.TargetFrameworks, StringComparison.OrdinalIgnoreCase)
+                || name.Equals(Constants.TargetFramework, StringComparison.OrdinalIgnoreCase))
             {
                 results.AddRange(value.Split(';'));
             }

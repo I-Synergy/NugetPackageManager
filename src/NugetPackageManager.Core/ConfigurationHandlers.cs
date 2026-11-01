@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NugetPackageManager.Core.NuGet.Configuration;
 using NugetPackageManager.Core.Protocol;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
 
@@ -50,7 +51,7 @@ public static class ConfigurationHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
+            ? throw new RpcException(Constants.InvalidParams, $"'{property}' is required.")
             : value;
     }
 

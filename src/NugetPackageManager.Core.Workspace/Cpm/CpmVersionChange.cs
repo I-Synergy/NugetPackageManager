@@ -1,4 +1,6 @@
 
+using NugetPackageManager.Common;
+
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
 /// <summary>One version to write into a <c>Directory.Packages.props</c>.</summary>

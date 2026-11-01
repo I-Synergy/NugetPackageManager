@@ -6,6 +6,7 @@
 // pins the fall-throughs, which is what decides which source wins when a project is unusual.
 
 using NugetPackageManager.Core.Workspace.TargetFrameworks;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.Tests.TargetFrameworks;
 

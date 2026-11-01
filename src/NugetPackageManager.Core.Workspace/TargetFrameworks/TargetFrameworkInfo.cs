@@ -1,4 +1,6 @@
 
+using NugetPackageManager.Common;
+
 namespace NugetPackageManager.Core.Workspace.TargetFrameworks;
 
 /// <summary>The frameworks one project builds for, and how they were found.</summary>

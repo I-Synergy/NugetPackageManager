@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using static NugetPackageManager.Common.Constants;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
@@ -11,8 +12,6 @@ namespace NugetPackageManager.Core.Workspace.Cpm;
 /// </summary>
 public static class CpmPropsReader
 {
-    public const string PropsFileName = "Directory.Packages.props";
-
     private const string PackageVersionElement = "PackageVersion";
     private const string IncludeAttribute = "Include";
     private const string VersionAttribute = "Version";

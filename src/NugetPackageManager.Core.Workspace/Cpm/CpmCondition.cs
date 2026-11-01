@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
@@ -269,21 +270,6 @@ public static partial class CpmCondition
 
         var collapsed = WhitespaceRegex().Replace(withoutSyntax, " ").Trim();
         return collapsed.Length <= 40 ? collapsed : collapsed[..40];
-    }
-
-    private enum TokenType
-    {
-        Not,
-        LeftParen,
-        RightParen,
-        And,
-        Or,
-        Equal,
-        NotEqual,
-        StringValue,
-        Property,
-        Call,
-        Identifier,
     }
 
     private sealed record Token(TokenType Type, string Text = "", string Method = "", string Property = "");

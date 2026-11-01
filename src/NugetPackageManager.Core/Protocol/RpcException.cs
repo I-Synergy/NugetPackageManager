@@ -1,3 +1,4 @@
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Protocol;
 
@@ -5,8 +6,6 @@ namespace NugetPackageManager.Core.Protocol;
 public sealed class RpcException : Exception
 {
     /// <summary>Code for a request whose parameters are missing or malformed.</summary>
-    public const string InvalidParams = "invalidParams";
-
     public RpcException(string code, string message)
         : base(message)
     {
@@ -22,7 +21,7 @@ public sealed class RpcException : Exception
     public RpcException()
         : base("The request failed.")
     {
-        Code = "internalError";
+        Code = Constants.InternalError;
     }
 
     public string Code { get; }

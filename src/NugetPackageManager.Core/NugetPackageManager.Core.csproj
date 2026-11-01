@@ -11,6 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\NugetPackageManager.Common\NugetPackageManager.Common.csproj" />
     <ProjectReference Include="..\NugetPackageManager.Core.NuGet\NugetPackageManager.Core.NuGet.csproj" />
     <ProjectReference Include="..\NugetPackageManager.Core.Workspace\NugetPackageManager.Core.Workspace.csproj" />
   </ItemGroup>

@@ -5,6 +5,7 @@
 // record, then `dotnet msbuild`, then a literal XML fallback.
 
 using NugetPackageManager.Core.Workspace.TargetFrameworks;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.Tests.TargetFrameworks;
 

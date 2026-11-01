@@ -9,6 +9,7 @@
 using NugetPackageManager.Core.Workspace.Cpm;
 using System.Diagnostics.CodeAnalysis;
 using NugetPackageManager.TestUtilities;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.Tests.Cpm;
 

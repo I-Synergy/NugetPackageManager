@@ -7,6 +7,7 @@
 using System.Text.Json;
 using NugetPackageManager.Core.Diagnostics;
 using NugetPackageManager.Core.Protocol;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Tests;
 
@@ -50,6 +51,6 @@ public class DiagnosticHandlersTests
         var error = await Assert.ThrowsExactlyAsync<RpcException>(() =>
             Handler()(Serialize(new { projectPath = "/ws/App.csproj" }), CancellationToken.None));
 
-        Assert.AreEqual(RpcException.InvalidParams, error.Code);
+        Assert.AreEqual(Constants.InvalidParams, error.Code);
     }
 }

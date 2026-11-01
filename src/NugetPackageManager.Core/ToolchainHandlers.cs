@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NugetPackageManager.Core.Protocol;
 using NugetPackageManager.Core.Toolchain;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
 
@@ -33,7 +34,7 @@ public static class ToolchainHandlers
         }
         catch (ArgumentException exception)
         {
-            throw new RpcException(RpcException.InvalidParams, exception.Message);
+            throw new RpcException(Constants.InvalidParams, exception.Message);
         }
     }
 
@@ -50,9 +51,9 @@ public static class ToolchainHandlers
             GlobalJsonPath = ReadOptionalString(parameters, "globalJsonPath"),
             PinnedSdkVersion = ReadOptionalString(parameters, "pinnedSdkVersion"),
             Version = ReadCommandOutput(parameters, "version")
-                ?? throw new RpcException(RpcException.InvalidParams, "'version' output is required."),
+                ?? throw new RpcException(Constants.InvalidParams, "'version' output is required."),
             SdkList = ReadCommandOutput(parameters, "sdkList")
-                ?? throw new RpcException(RpcException.InvalidParams, "'sdkList' output is required."),
+                ?? throw new RpcException(Constants.InvalidParams, "'sdkList' output is required."),
             Evaluation = ReadCommandOutput(parameters, "evaluation"),
             SdkCheckOutput = ReadOptionalString(parameters, "sdkCheckOutput"),
             PrivateSdkVersions = ReadStringArray(parameters, "privateSdkVersions"),
@@ -102,7 +103,7 @@ public static class ToolchainHandlers
     {
         var value = ReadOptionalString(parameters, property);
         return string.IsNullOrWhiteSpace(value)
-            ? throw new RpcException(RpcException.InvalidParams, $"'{property}' is required.")
+            ? throw new RpcException(Constants.InvalidParams, $"'{property}' is required.")
             : value;
     }
 

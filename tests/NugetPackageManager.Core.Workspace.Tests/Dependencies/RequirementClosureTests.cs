@@ -5,6 +5,7 @@
 // lookup, exactly as the TypeScript suite did.
 
 using NugetPackageManager.Core.Workspace.Dependencies;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace.Tests.Dependencies;
 
@@ -27,7 +28,7 @@ public class RequirementClosureTests
         Dictionary<string, ClosureDependency[]> dependencies,
         Dictionary<string, string> effective,
         string[]? tfms = null,
-        int maxInspected = RequirementClosure.DefaultMaxInspected)
+        int maxInspected = Constants.DefaultMaxInspected)
     {
         var selected = new[] { new SelectedPackage("A", "2.0.0") };
         var frameworks = tfms ?? ["net10.0"];

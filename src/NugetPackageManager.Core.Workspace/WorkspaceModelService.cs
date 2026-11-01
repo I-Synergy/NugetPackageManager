@@ -3,6 +3,7 @@ using NugetPackageManager.Core.Workspace.Cpm;
 using NugetPackageManager.Core.Workspace.Models;
 using NugetPackageManager.Core.Workspace.Projects;
 using NugetPackageManager.Core.Workspace.TargetFrameworks;
+using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core.Workspace;
 

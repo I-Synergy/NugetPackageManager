@@ -19,6 +19,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\NugetPackageManager.Common\NugetPackageManager.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="NugetPackageManager.Core.Workspace.Tests" />
   </ItemGroup>
 
