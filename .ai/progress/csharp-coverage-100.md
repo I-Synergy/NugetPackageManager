@@ -3,6 +3,7 @@ Status: IN PROGRESS — 91.4% line / 65.5% branch
 Started: 2026-11-01
 
 Plan: `.ai/plans/csharp-coverage-100.md`
+Startable backlog for the rest: `.ai/plans/csharp-coverage-backlog.md` (phased, with per-file approach)
 Target: **100% line** on `src/**` (decided); documented `[ExcludeFromCodeCoverage]` allowed;
 SonarCloud stays on automatic analysis, so the reports are produced/uploaded but not imported.
 
