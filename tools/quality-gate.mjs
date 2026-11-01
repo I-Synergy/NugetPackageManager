@@ -78,7 +78,7 @@ const steps = [];
 function resolveDotnetHost() {
   const candidates = [
     process.env.DOTNET_HOST_PATH,
-    isWindows ? join(process.env.ProgramFiles ?? "C:\Program Files", "dotnet", "dotnet.exe") : null,
+    isWindows ? join(process.env.ProgramFiles ?? "C:\\Program Files", "dotnet", "dotnet.exe") : null,
     isWindows ? null : "/usr/share/dotnet/dotnet",
     isWindows ? null : "/usr/local/share/dotnet/dotnet",
     isWindows ? null : join(homedir(), ".dotnet", "dotnet"),
