@@ -236,16 +236,15 @@ public static partial class CpmWriter
     /// <param name="condition">The <c>ItemGroup</c> condition, for a group-scoped update.</param>
     /// <param name="scope">How many occurrences to rewrite.</param>
     /// <param name="cancellationToken">Cancels the update.</param>
-    /// <param name="workspaceRoots">
-    /// Directories a defining property file must live inside before it is edited.
-    /// </param>
-    /// <param name="propertyLocator">
-    /// Locates a property definition through MSBuild; <c>null</c> always writes a literal.
+    /// <param name="options">
+    /// The optional property-write settings: the workspace roots a defining file must live inside,
+    /// and the locator that resolves a property definition. <c>null</c> keeps every change on the
+    /// literal path.
     /// </param>
     [SuppressMessage(
         "Design",
         "CA1068:CancellationToken parameters must come last",
-        Justification = "The cancellation token keeps its original position so every existing call site stays source compatible; the new optional parameters follow it.")]
+        Justification = "The cancellation token keeps its original position so every existing call site stays source compatible; the new optional parameter follows it.")]
     public static async Task<IReadOnlyList<string>> UpdatePackageVersionAsync(
         string projectPath,
         string packageId,
@@ -253,8 +252,7 @@ public static partial class CpmWriter
         string? condition = null,
         CpmWriteScope? scope = null,
         CancellationToken cancellationToken = default,
-        IReadOnlyList<string>? workspaceRoots = null,
-        ICpmPropertyLocator? propertyLocator = null)
+        CpmWriteOptions? options = null)
     {
         var propsFilePath = CpmPropsReader.FindCpmFile(projectPath)
             ?? throw new WorkspaceException(
@@ -266,8 +264,8 @@ public static partial class CpmWriter
             [new CpmVersionChange(packageId, version, condition, scope)],
             cancellationToken,
             projectPaths: [projectPath],
-            workspaceRoots: workspaceRoots,
-            propertyLocator: propertyLocator).ConfigureAwait(false);
+            workspaceRoots: options?.WorkspaceRoots,
+            propertyLocator: options?.PropertyLocator).ConfigureAwait(false);
     }
 
     public static bool IsValidPackageId(string value) => PackageIdRegex().IsMatch(value);
@@ -338,15 +336,10 @@ public static partial class CpmWriter
         ICpmPropertyLocator? propertyLocator,
         CancellationToken cancellationToken)
     {
-        if (propertyLocator is null
-            || projectPaths is null
-            || projectPaths.Count == 0
-            || workspaceRoots is null
-            || workspaceRoots.Count == 0
-            || change.EffectiveScope == CpmWriteScope.Group)
+        // A per-framework update must not bump a shared property: that would move every
+        // framework's version at once.
+        if (!CanUsePropertyPath(change, projectPaths, workspaceRoots, propertyLocator))
         {
-            // A per-framework update must not bump a shared property: that would move every
-            // framework's version at once.
             return null;
         }
 
@@ -361,48 +354,16 @@ public static partial class CpmWriter
         }
 
         var addressed = AddressedOccurrences(occurrences, change);
-        if (addressed.Count == 0)
+        if (!TryReadPropertyReferences(occurrences, addressed, out var propertyName, out var references))
         {
             return null;
         }
 
-        string? propertyName = null;
-        List<(int Index, string RawVersion)> references = [];
-        foreach (var index in addressed)
-        {
-            var occurrence = occurrences[index];
-            if (occurrence.Condition.Length > 0)
-            {
-                return null;
-            }
-
-            var name = PropertyReference.GetPropertyName(occurrence.Version);
-            if (name is null)
-            {
-                return null;
-            }
-
-            if (propertyName is null)
-            {
-                propertyName = name;
-            }
-            else if (!string.Equals(propertyName, name, StringComparison.OrdinalIgnoreCase))
-            {
-                return null;
-            }
-
-            references.Add((index, occurrence.Version));
-        }
-
-        if (propertyName is null)
-        {
-            return null;
-        }
-
-        var definition = await ResolveDefinitionAsync(projectPaths, propertyName, propertyLocator, cancellationToken)
+        var definition = await ResolveDefinitionAsync(
+            projectPaths!, propertyName, propertyLocator!, cancellationToken)
             .ConfigureAwait(false);
 
-        if (definition is null || !IsInsideWorkspaceRoot(definition.FilePath, workspaceRoots))
+        if (definition is null || !IsInsideWorkspaceRoot(definition.FilePath, workspaceRoots!))
         {
             return null;
         }
@@ -415,6 +376,62 @@ public static partial class CpmWriter
 
         return new PropertyEdit(
             file.Path, definition.PropertyName, change.PackageId, change.Version, references);
+    }
+
+    /// <summary>
+    /// True when the change is even allowed to touch a property definition: a locator, projects and
+    /// workspace roots are all supplied, and the update is not scoped to one framework.
+    /// </summary>
+    private static bool CanUsePropertyPath(
+        CpmVersionChange change,
+        IReadOnlyList<string>? projectPaths,
+        IReadOnlyList<string>? workspaceRoots,
+        ICpmPropertyLocator? propertyLocator) =>
+        propertyLocator is not null
+        && projectPaths is { Count: > 0 }
+        && workspaceRoots is { Count: > 0 }
+        && change.EffectiveScope != CpmWriteScope.Group;
+
+    /// <summary>
+    /// Reads the addressed occurrences as property references. False as soon as one is conditional,
+    /// is not a whole-value property reference, or names a different property from the others.
+    /// </summary>
+    private static bool TryReadPropertyReferences(
+        List<(string Condition, string Version)> occurrences,
+        List<int> addressed,
+        [NotNullWhen(true)] out string? propertyName,
+        out List<(int Index, string RawVersion)> references)
+    {
+        propertyName = null;
+        references = [];
+
+        foreach (var index in addressed)
+        {
+            var occurrence = occurrences[index];
+            if (occurrence.Condition.Length > 0)
+            {
+                return false;
+            }
+
+            var name = PropertyReference.GetPropertyName(occurrence.Version);
+            if (name is null)
+            {
+                return false;
+            }
+
+            if (propertyName is null)
+            {
+                propertyName = name;
+            }
+            else if (!string.Equals(propertyName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            references.Add((index, occurrence.Version));
+        }
+
+        return propertyName is not null;
     }
 
     /// <summary>The one definition every supplied project agrees on, or <c>null</c> when they disagree.</summary>
@@ -493,62 +510,68 @@ public static partial class CpmWriter
         }
     }
 
+    /// <summary>The occurrence indices one change addresses, per its effective scope.</summary>
     private static List<int> AddressedOccurrences(
         List<(string Condition, string Version)> occurrences,
-        CpmVersionChange change)
+        CpmVersionChange change) =>
+        change.EffectiveScope switch
+        {
+            CpmWriteScope.Group => GroupOccurrences(occurrences, change.Condition),
+            CpmWriteScope.All => AllOccurrences(occurrences),
+            CpmWriteScope.Unconditional => UnconditionalOccurrences(occurrences),
+            CpmWriteScope.First or _ => FirstOccurrence(occurrences),
+        };
+
+    /// <summary>Every occurrence in the given condition; a change without one addresses nothing.</summary>
+    private static List<int> GroupOccurrences(
+        List<(string Condition, string Version)> occurrences,
+        string? condition)
     {
         List<int> indices = [];
-        var scope = change.EffectiveScope;
-
-        if (scope == CpmWriteScope.Group)
+        if (condition is null)
         {
-            var condition = change.Condition;
-            if (condition is null)
-            {
-                return indices;
-            }
-
-            for (var index = 0; index < occurrences.Count; index++)
-            {
-                if (string.Equals(occurrences[index].Condition, condition, StringComparison.Ordinal))
-                {
-                    indices.Add(index);
-                }
-            }
-
             return indices;
         }
 
-        if (scope == CpmWriteScope.All)
+        for (var index = 0; index < occurrences.Count; index++)
         {
-            for (var index = 0; index < occurrences.Count; index++)
+            if (string.Equals(occurrences[index].Condition, condition, StringComparison.Ordinal))
             {
                 indices.Add(index);
             }
-
-            return indices;
-        }
-
-        if (scope == CpmWriteScope.Unconditional)
-        {
-            for (var index = 0; index < occurrences.Count; index++)
-            {
-                if (occurrences[index].Condition.Length == 0)
-                {
-                    indices.Add(index);
-                }
-            }
-
-            return indices;
-        }
-
-        if (occurrences.Count > 0)
-        {
-            indices.Add(0);
         }
 
         return indices;
     }
+
+    private static List<int> AllOccurrences(List<(string Condition, string Version)> occurrences)
+    {
+        List<int> indices = [];
+        for (var index = 0; index < occurrences.Count; index++)
+        {
+            indices.Add(index);
+        }
+
+        return indices;
+    }
+
+    private static List<int> UnconditionalOccurrences(List<(string Condition, string Version)> occurrences)
+    {
+        List<int> indices = [];
+        for (var index = 0; index < occurrences.Count; index++)
+        {
+            if (occurrences[index].Condition.Length == 0)
+            {
+                indices.Add(index);
+            }
+        }
+
+        return indices;
+    }
+
+    /// <summary>Just the first occurrence, which is what a plain update rewrites.</summary>
+    private static List<int> FirstOccurrence(List<(string Condition, string Version)> occurrences) =>
+        occurrences.Count > 0 ? [0] : [];
 
     private static void ApplyPropertyEdits(WritePlan plan)
     {
@@ -1167,7 +1190,7 @@ public static partial class CpmWriter
     /// <summary>The resolved shape of one update: literals for the props file, edits for properties.</summary>
     private sealed class WritePlan(DraftFile props)
     {
-        private Dictionary<string, DraftFile> propertyFiles = [];
+        private readonly Dictionary<string, DraftFile> propertyFiles = [];
 
         public DraftFile Props { get; } = props;
 

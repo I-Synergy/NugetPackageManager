@@ -23,7 +23,7 @@ public sealed class CpmEvaluator : ICpmEvaluator, IDisposable
     private readonly Dictionary<string, CacheEntry> cache = [];
     private readonly object cacheLock = new();
 
-    private sealed record CacheEntry(string Stamp, CpmEvaluation? Evaluation);
+    private sealed record CacheEntry(string FileStamp, CpmEvaluation? Evaluation);
 
     public async Task<CpmEvaluation?> EvaluateAsync(
         string projectPath,
@@ -36,7 +36,7 @@ public sealed class CpmEvaluator : ICpmEvaluator, IDisposable
         var stamp = BuildStamp(projectPath);
         lock (cacheLock)
         {
-            if (cache.TryGetValue(cacheKey, out var cached) && cached.Stamp == stamp)
+            if (cache.TryGetValue(cacheKey, out var cached) && cached.FileStamp == stamp)
             {
                 return cached.Evaluation;
             }

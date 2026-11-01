@@ -31,7 +31,7 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
     private readonly Dictionary<string, CacheEntry> cache = [];
     private readonly object cacheLock = new();
 
-    private sealed record CacheEntry(string Stamp, PropertyDefinition? Definition);
+    private sealed record CacheEntry(string FileStamp, PropertyDefinition? Definition);
 
     public async Task<PropertyDefinition?> LocateAsync(
         string projectPath,
@@ -45,7 +45,7 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
         var stamp = BuildStamp(projectPath);
         lock (cacheLock)
         {
-            if (cache.TryGetValue(cacheKey, out var cached) && cached.Stamp == stamp)
+            if (cache.TryGetValue(cacheKey, out var cached) && cached.FileStamp == stamp)
             {
                 return cached.Definition;
             }
@@ -173,10 +173,24 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
             return null;
         }
 
-        var importedFiles = new Stack<string>();
-        PropertyDefinition? winner = null;
+        var walker = new PreprocessedWalker(projectPath, propertyName);
+        walker.Walk(document, insideTarget: false, conditionalAncestor: false);
+        return walker.Winner;
+    }
 
-        void Walk(XContainer container, bool insideTarget, bool conditionalAncestor)
+    /// <summary>
+    /// The recursive document walk behind <see cref="ParsePreprocessed"/>: tracks the import stack the
+    /// boundary comments build and keeps the last unconditional definition it sees.
+    /// </summary>
+    private sealed class PreprocessedWalker(string projectPath, string propertyName)
+    {
+        private readonly Stack<string> importedFiles = new();
+
+        /// <summary>The last accepted definition, or <c>null</c> when the walk found none.</summary>
+        public PropertyDefinition? Winner { get; private set; }
+
+        /// <summary>Visits one container in document order, descending into every element.</summary>
+        public void Walk(XContainer container, bool insideTarget, bool conditionalAncestor)
         {
             foreach (var node in container.Nodes())
             {
@@ -200,15 +214,12 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
                     && IsDefinition(element, container, propertyName))
                 {
                     var filePath = importedFiles.Count > 0 ? importedFiles.Peek() : projectPath;
-                    winner = new PropertyDefinition(filePath, element.Name.LocalName, element.Value.Trim());
+                    Winner = new PropertyDefinition(filePath, element.Name.LocalName, element.Value.Trim());
                 }
 
                 Walk(element, isTarget, conditional);
             }
         }
-
-        Walk(document, insideTarget: false, conditionalAncestor: false);
-        return winner;
     }
 
     /// <summary>A property element: the requested name, directly inside a <c>PropertyGroup</c>.</summary>
@@ -240,18 +251,9 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
                 continue;
             }
 
-            if (line.StartsWith('<'))
+            if (IsMarkupLine(line))
             {
-                if (line.StartsWith(ImportCloseTag, StringComparison.OrdinalIgnoreCase))
-                {
-                    closes = true;
-                }
-                else if (line.StartsWith(ImportOpenTag, StringComparison.OrdinalIgnoreCase)
-                    && !line.EndsWith("/>", StringComparison.Ordinal))
-                {
-                    opens = true;
-                }
-
+                ReadMarkupLine(line, ref opens, ref closes);
                 continue;
             }
 
@@ -268,6 +270,26 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
         else if (closes && importedFiles.Count > 0)
         {
             importedFiles.Pop();
+        }
+    }
+
+    /// <summary>True when the trimmed comment line is XML markup rather than the resolved path.</summary>
+    private static bool IsMarkupLine(string line) => line.StartsWith('<');
+
+    /// <summary>
+    /// Classifies one markup line: a close tag closes the import, and an opening tag that is not
+    /// self-closing (<c>/&gt;</c>) opens it. Anything else, such as a self-closing import, is ignored.
+    /// </summary>
+    private static void ReadMarkupLine(string line, ref bool opens, ref bool closes)
+    {
+        if (line.StartsWith(ImportCloseTag, StringComparison.OrdinalIgnoreCase))
+        {
+            closes = true;
+        }
+        else if (line.StartsWith(ImportOpenTag, StringComparison.OrdinalIgnoreCase)
+            && !line.EndsWith("/>", StringComparison.Ordinal))
+        {
+            opens = true;
         }
     }
 

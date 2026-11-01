@@ -14,6 +14,8 @@ public sealed class WorkspaceHandlers
     // writes on the property path instead of the literal fallback.
     private static readonly CpmPropertyLocator propertyLocator = new();
 
+    private const string PropsFilePathParameter = "propsFilePath";
+
     private readonly WorkspaceModelService workspace;
 
     public WorkspaceHandlers(WorkspaceModelService workspace)
@@ -37,7 +39,7 @@ public sealed class WorkspaceHandlers
     {
         _ = cancellationToken;
 
-        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        var propsFilePath = ReadRequiredString(parameters, PropsFilePathParameter);
         if (!File.Exists(propsFilePath))
         {
             return Task.FromResult<object?>(null);
@@ -64,7 +66,7 @@ public sealed class WorkspaceHandlers
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
-        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        var propsFilePath = ReadRequiredString(parameters, PropsFilePathParameter);
         var changes = ReadChanges(parameters);
         var projectPaths = ReadStringArray(parameters, "projectPaths");
         var workspaceRoots = ReadStringArray(parameters, "workspaceRoots");
@@ -90,7 +92,7 @@ public sealed class WorkspaceHandlers
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
-        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        var propsFilePath = ReadRequiredString(parameters, PropsFilePathParameter);
         var changes = ReadChanges(parameters);
         var projectPaths = ReadStringArray(parameters, "projectPaths");
         var workspaceRoots = ReadStringArray(parameters, "workspaceRoots");
@@ -112,7 +114,7 @@ public sealed class WorkspaceHandlers
         JsonElement parameters,
         CancellationToken cancellationToken)
     {
-        var propsFilePath = ReadRequiredString(parameters, "propsFilePath");
+        var propsFilePath = ReadRequiredString(parameters, PropsFilePathParameter);
         var packageId = ReadRequiredString(parameters, "packageId");
 
         var removed = await CpmWriter
@@ -143,8 +145,7 @@ public sealed class WorkspaceHandlers
                 condition,
                 scope,
                 cancellationToken,
-                workspaceRoots,
-                propertyLocator)
+                new CpmWriteOptions { WorkspaceRoots = workspaceRoots, PropertyLocator = propertyLocator })
             .ConfigureAwait(false);
 
         workspace.InvalidateVersionCache();
