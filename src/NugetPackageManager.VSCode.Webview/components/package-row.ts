@@ -1,0 +1,306 @@
+import { LitElement, css, html, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { PackageViewModel } from "../types";
+import { getBaseTargetFramework } from "@/common/framework";
+import codicon from "@/web/styles/codicon.css";
+import { sharedStyles } from "@/web/styles/shared.css";
+
+export interface PackageRowData {
+  Name: string;
+  IconUrl: string;
+  Authors: string;
+  Description: string;
+  Version: string;
+  InstalledVersion: string;
+  TotalDownloads: number;
+  Verified: boolean;
+  Selected: boolean;
+  Status: "Detailed" | "MissingDetails" | "Error";
+  AllowsUpdate: boolean;
+  UpdateVersion?: string;
+}
+
+const DEFAULT_ICON_URL = "https://nuget.org/Content/gallery/img/default-package-icon.svg";
+
+const styles = css`
+  .package-row {
+    margin: 5px 8px 0;
+    padding: 10px 12px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    cursor: default;
+    border: 1px solid var(--npm-border, var(--vscode-panelSection-border));
+    border-radius: var(--npm-radius, 10px);
+    background: var(--npm-surface-raised, var(--vscode-editorWidget-background));
+    min-height: 48px;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+
+    &.package-row-embedded {
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      min-height: auto;
+
+      &:hover {
+        transform: none;
+      }
+    }
+
+    &.package-row-selected {
+      border-color: var(--npm-accent, var(--vscode-focusBorder));
+      box-shadow: 0 0 0 1px var(--npm-accent, var(--vscode-focusBorder));
+      background: color-mix(in srgb, var(--npm-accent, #6c5ce7) 10%, var(--npm-surface-raised, #252526));
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+
+    &.package-row-error {
+      .name,
+      .package-version {
+        color: var(--vscode-errorForeground);
+      }
+    }
+
+    &:hover {
+      border-color: var(--vscode-focusBorder);
+      transform: translateY(-1px);
+    }
+
+    &:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .icon {
+      width: 40px;
+      height: 40px;
+      flex-shrink: 0;
+      border-radius: 10px;
+      object-fit: contain;
+      background: var(--npm-surface, transparent);
+    }
+
+    .package-content {
+      flex: 1;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    .package-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 4px;
+    }
+
+    .name-line {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow: hidden;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .name {
+      font-size: 13px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .authors {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .package-version {
+      font-weight: bold;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .description {
+      font-size: 11px;
+      color: var(--npm-muted, var(--vscode-descriptionForeground));
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 3px;
+    }
+
+    .meta-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--vscode-descriptionForeground);
+      margin-top: 2px;
+    }
+
+    .downloads {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+
+    .verified-badge {
+      color: var(--vscode-charts-blue, #3794ff);
+    }
+
+    .update-version {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 11px;
+      white-space: nowrap;
+
+      .old-version {
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .arrow {
+        font-size: 10px;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .new-version {
+        color: var(--vscode-charts-green, #10b981);
+        font-weight: bold;
+      }
+    }
+  }
+`;
+
+@customElement("package-row")
+export class PackageRow extends LitElement {
+  static override readonly styles = [codicon, sharedStyles, styles];
+
+  @property({ type: Boolean }) showInstalledVersion!: boolean;
+  @property() updateVersion: string = "";
+  @property({ type: Object }) package!: PackageViewModel;
+  @property({ type: Number }) revision: number = 0;
+  @property({ type: Boolean }) embedded: boolean = false;
+  @state() iconUrl: string | null = null;
+
+  get resolvedIconUrl(): string {
+    if (!this.package?.IconUrl) {
+      return DEFAULT_ICON_URL;
+    }
+    return this.iconUrl ?? this.package.IconUrl;
+  }
+
+  private onIconError(): void {
+    this.iconUrl = DEFAULT_ICON_URL;
+  }
+
+  private formatDownloads(count: number | null): string {
+    if (count === null) return "—";
+    if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+    if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+    return count.toString();
+  }
+
+  private renderVersionContent() {
+    if (this.updateVersion) {
+      return html`
+        <span class="update-version">
+          <span class="old-version">${this.package.InstalledVersion || this.package.Version}</span>
+          <span class="codicon codicon-arrow-right arrow"></span>
+          <span class="new-version">${this.updateVersion}</span>
+        </span>
+      `;
+    }
+
+    if (!this.showInstalledVersion) {
+      return html`${this.package.Version}`;
+    }
+
+    const hasUpdate =
+      this.package.Status === "Detailed" &&
+      this.package.Version !== this.package.InstalledVersion &&
+      this.package.AllowsUpdate;
+
+    return html`
+      ${this.package.InstalledVersion}
+      ${this.package.Status === "MissingDetails"
+        ? html`<span class="spinner small"></span>`
+        : nothing}
+      ${this.package.Status === "Error"
+        ? html`<span
+            class="codicon codicon-error"
+            title="Failed to fetch package information"
+          ></span>`
+        : nothing}
+      ${hasUpdate
+        ? html`<span class="codicon codicon-arrow-circle-up"></span>`
+        : nothing}
+    `;
+  }
+
+  override render() {
+    if (!this.package) {
+      return nothing;
+    }
+
+    return html`
+      <div
+        class="package-row ${this.embedded ? "package-row-embedded" : ""} ${this.package.Selected ? "package-row-selected" : ""} ${this.package.Status === "Error" ? "package-row-error" : ""}"
+        role="option"
+        tabindex="0"
+        aria-selected=${this.package.Selected ? "true" : "false"}
+        @keydown=${(e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            this.dispatchEvent(new Event("click", { bubbles: true, composed: true }));
+          }
+        }}
+      >
+        <img
+          class="icon"
+          alt=""
+          src=${this.resolvedIconUrl}
+          @error=${() => this.onIconError()}
+        />
+        <div class="package-content">
+          <div class="package-header">
+            <div class="name-line">
+              <span class="name">${this.package.Name}</span>
+              ${this.package.Verified
+                ? html`<span class="codicon codicon-verified-filled verified-badge" title="Verified owner"></span>`
+                : nothing}
+              ${this.package.CpmFramework
+                ? html`<span class="tfm-badge" title="Framework-scoped version">${getBaseTargetFramework(this.package.CpmFramework)}</span>`
+                : nothing}
+              ${this.package.Authors
+                ? html`<span class="authors">by ${this.package.Authors}</span>`
+                : nothing}
+            </div>
+            <div class="package-version">${this.renderVersionContent()}</div>
+          </div>
+          ${this.package.Description
+            ? html`<div class="description">${this.package.Description}</div>`
+            : nothing}
+          ${(this.package.TotalDownloads ?? 0) > 0
+            ? html`
+                <div class="meta-line">
+                  <span class="downloads">
+                    <span class="codicon codicon-cloud-download"></span>
+                    ${this.formatDownloads(this.package.TotalDownloads)}
+                  </span>
+                </div>
+              `
+            : nothing}
+        </div>
+      </div>
+    `;
+  }
+}

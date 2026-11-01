@@ -3,7 +3,7 @@
 // Replace {MethodName}, {EntityName}, {fieldName} throughout.
 // ============================================================
 
-// ── 1. src/common/rpc/types.ts ──────────────────────────────
+// ── 1. src/NugetPackageManager.VSCode.Common/rpc/types.ts ──
 
 export type Get{EntityName}Request = CacheControl & {
   // Add request fields (PascalCase)
@@ -16,12 +16,12 @@ export type Get{EntityName}Response = {
 };
 
 // Add to HostAPI interface:
-// get{EntityName}(req: Get{EntityName}Request): Promise<Result<Get{EntityName}Response>>;
+// get{EntityName}Async(req: Get{EntityName}Request): Promise<Result<Get{EntityName}Response>>;
 
 
-// ── 2. src/host/host-api.ts ─────────────────────────────────
+// ── 2. src/NugetPackageManager.VSCode.Host/host-api.ts ──────
 
-export async function get{EntityName}(
+export async function get{EntityName}Async(
   req: Get{EntityName}Request,
   context: HostContext
 ): Promise<Result<Get{EntityName}Response>> {
@@ -29,7 +29,7 @@ export async function get{EntityName}(
     // Implementation
     return ok({ Items: [] });
   } catch (e) {
-    return fail(`get{EntityName} failed: ${e instanceof Error ? e.message : String(e)}`);
+    return fail(`get{EntityName}Async failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -37,7 +37,7 @@ export async function get{EntityName}(
 // ── 3. Webview call site (inside a LitElement method) ───────
 
 private async load{EntityName}(): Promise<void> {
-  const result = await hostApi.get{EntityName}({ {fieldName}: this.value });
+  const result = await hostApi.get{EntityName}Async({ {fieldName}: this.value });
   if (!result.ok) {
     this.error = result.error;
     return;

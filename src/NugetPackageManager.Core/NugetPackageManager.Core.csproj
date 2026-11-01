@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Assembly name deliberately matches the project and root namespace. -->
+    <RootNamespace>NugetPackageManager.Core</RootNamespace>
+    <!-- Published framework-dependent and launched as `dotnet <assembly>.dll`:
+         no per-OS apphost binary is needed in the extension package. -->
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NugetPackageManager.Common\NugetPackageManager.Common.csproj" />
+    <ProjectReference Include="..\NugetPackageManager.Core.NuGet\NugetPackageManager.Core.NuGet.csproj" />
+    <ProjectReference Include="..\NugetPackageManager.Core.Workspace\NugetPackageManager.Core.Workspace.csproj" />
+  </ItemGroup>
+
+</Project>

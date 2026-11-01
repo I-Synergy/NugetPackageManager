@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "target": "ES6",
+    "lib": ["ES6", "DOM"],
+    "sourceMap": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "paths": {
+      "@/common/*": ["./src/NugetPackageManager.VSCode.Common/*"],
+      "@/host/*": ["./src/NugetPackageManager.VSCode.Host/*"],
+      "@/web/*": ["./src/NugetPackageManager.VSCode.Webview/*"]
+    }
+  }
+}

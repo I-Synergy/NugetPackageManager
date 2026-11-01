@@ -15,22 +15,26 @@ Template/
 └── .ai/                               # Shared knowledge base (source of truth)
     ├── reference/                     # Standards (all systems)
     ├── patterns/                      # Patterns (all systems)
-    ├── scripts/                       # sync-skills.py, migrate-to-ai.py
+    ├── scripts/                       # sync-platforms.py, migrate-to-ai.py
     ├── skills/                        # Skills source — edit here
     └── project/                       # Shared project context
 ```
 
 ### Skills Three-Tier Architecture
 
-Skills have a single source of truth in `.ai/skills/` and are synced to two targets automatically:
+Skills have a single source of truth in `.ai/skills/` and are exposed to every selected client by a
+folder junction (Windows) / symlink (Unix), created by `sync-platforms.py`:
 
 | Layer | Path | Format | Who uses it |
 |-------|------|--------|-------------|
 | Source | `.ai/skills/<name>/SKILL.md` | Full content | Edit here |
-| Claude Code | `.claude/skills/<name>/SKILL.md` | Thin wrapper: `!`cat .ai/skills/...`` | Claude Code executes at runtime |
-| GitHub Copilot | `.github/skills/<name>/SKILL.md` | Full content copy | Copilot reads directly |
+| Claude Code | `.claude/skills` → `.ai/skills` | Folder junction | Claude Code reads it directly |
+| GitHub Copilot | `.github/skills` → `.ai/skills` | Folder junction | Copilot reads it directly |
+| Reasonix Code | `.reasonix/skills` → `.ai/skills` | Folder junction | Reasonix reads it directly |
 
-**Sync:** A PostToolUse hook fires `sync-skills.py --from-hook` on every `.ai/skills/` write. Run `/update-skills` (or `python .ai/scripts/sync-skills.py`) manually to sync all at once.
+**Sync:** A PostToolUse hook fires `python .ai/scripts/sync-platforms.py` on every `.ai/skills/` or
+`.ai/agents/` write, and the SessionStart hook reconciles all junctions. Run it manually to sync all
+at once; the clients it creates are selected in `.ai/ai.json`.
 
 ## System Comparison
 

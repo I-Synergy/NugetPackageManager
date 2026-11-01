@@ -1,10 +1,14 @@
 .vscode/**
 .vscode-test/**
+.vs/**
 .claude/**
 .github/**
 .playwright-mcp/**
 out/**
 src/**
+tests/**
+Directory.Build.props
+NugetPackageManager.slnx
 docs/raw/**
 docs/images/social-preview.png
 docs/*.md
@@ -22,8 +26,17 @@ tools/**
 scripts/**
 **/tsconfig.json
 **/tsconfig.test.json
+tsconfig.base.json
+tsconfig.eslint.json
+Directory.Packages.props
+.sonarcloud.properties
+social.md
 **/*.map
 **/*.ts
+dist/core/**/*.pdb
+dist/core/**/*.xml
+# Stale sidecar publish output from before the move to dist/core.
+dist/nuget-core/**
 **/node_modules/**
 **/package-lock.json
 **/yarn.lock

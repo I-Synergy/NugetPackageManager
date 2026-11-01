@@ -3,10 +3,10 @@ name: design-interrogation
 description: >
   Structured design interrogation — interview the user relentlessly about a plan,
   architecture, or technical decision until every branch of the decision tree is
-  resolved. Use whenever a user says "grill me", "stress-test my plan", "poke holes
+  resolved. Consumes product-discovery output when available. Use whenever a user says "grill me", "stress-test my plan", "poke holes
   in this", "challenge my design", "interview me about this design", or wants a
   rigorous review of any design, architecture, or technical proposal — even if they
-  don't use these exact words. When in doubt, trigger this skill.
+  don't use these exact words. Use when a plan, architecture, or technical decision needs pressure-testing before you commit to it. When in doubt, trigger this skill.
 ---
 
 # Design Interrogation
@@ -14,6 +14,15 @@ description: >
 Relentless, structured interrogation of a plan or design. Walk every branch of the
 decision tree, resolve dependencies between decisions one-by-one, and reach a shared
 understanding before closing.
+
+## Upstream: product-discovery
+
+This skill consumes the output of [`product-discovery`](../product-discovery/SKILL.md) when available.
+If the user ran `product-discovery` first, Phase -1 recognises `docs/product/*` files and imports
+all pre-resolved decisions (`PD-nnn` entries from `discovery-decisions.md`) with a **Source** column
+in `session-decisions.md`, so interrogation focuses only on the remaining technical dimensions.
+When discovery did NOT run, Phase -1 offers a short capture pass for A1, A2, and A5 based on
+existing documents to draft Product Specification sections 1–3, then proceeds to full interrogation.
 
 ---
 
@@ -46,56 +55,86 @@ Then create the decision log (see **Progressive Document Capture** below) and st
 
 ### Phase -1: Document Intake
 
-Before asking any question, check if the user has existing documents to share.
+#### Session Start: Check for interrupted session first
+
+On start, detect if `docs/session-decisions.md` exists. If it does:
+
+> I found an earlier session. Would you like to **resume** it, **amend** (change some decisions), or **start over**?
+
+- **Resume**: reload decisions from the earlier session and continue with open items
+- **Amend**: show which decisions to revise, replay those branches
+- **Start over**: begin fresh (archive the earlier file)
+
+#### Check for product-discovery output
+
+If the user ran [`product-discovery`](../product-discovery/SKILL.md) first, `docs/product/` will
+contain `product-brief.md`, `audience-profile.md`, `ux-brief.md`, `ui-design-brief.md`,
+`platform-deliverables.md`, and `discovery-decisions.md`. When present:
+
+1. Read all files in `docs/product/` — do NOT ask questions already answered there
+2. Import each `PD-nnn` decision from `discovery-decisions.md` to `session-decisions.md` as **Pre-Resolved**,
+   with a **Source** column showing `docs/product/discovery-decisions.md`
+3. Pre-resolve Phase 0: **A1** (product type from discovery), **A2** (scope from product-brief), **A5** (surfaces from platform-deliverables)
+4. Pre-fill **A4** (Hard Constraints) from discovery Phase 13/14 constraints and the codebase, but **ask for confirmation**
+5. **Always ask A3** (Architecture Shape) — discovery does not resolve this
+6. Flag any `[TECH-OPEN]` items in discovery decisions as open questions for the matching dimension
+7. Proceed directly to Phase 0 (A3 + confirmed A4) with the product context loaded
+
+#### Otherwise: Check for other existing documents
 
 > Before we start: do you have any existing documents I should read first?
 > (business case, PRD, architecture spec, migration plan, functional design)
 > If so, share them — I'll save them to `docs/input/` and extract what's already decided.
+>
+> **Note:** Input files may hold customer data or commercial secrets. I'll confirm the repository
+> is private before saving; if you'd like to keep them out of version control, I can add
+> `docs/input/` to `.gitignore`.
 
 If documents are provided:
-1. Save them to `docs/input/` (e.g. `docs/input/business-case.md`)
-2. Read and analyze them — identify any bounded contexts already named in the documents
-3. Extract all decisions already made — log them to `session-decisions.md` as **Pre-Resolved**
-4. Run extractions **in parallel** using the skills below — do NOT define extraction logic here:
-   - If BCs already identifiable → spawn one extractor per BC, each running both skills in parallel
-   - If BCs not yet known → run both skills in parallel (single BC assumed, renamed after Phase 0)
+1. Save them to `docs/input/` (e.g. `docs/input/business-case.md`) and confirm repository visibility
+2. Read and analyze them — identify any bounded contexts already named
+3. Extract all decisions already made — log to `session-decisions.md` as **Pre-Resolved** with Source noted
+4. Run extractions **in parallel** using the skills below:
+   - If BCs already identifiable → spawn one extractor per BC
+   - If BCs not yet known → run both skills in parallel
    - → [`usecase-specification/SKILL.md` — Mode 0](../usecase-specification/SKILL.md) for use cases
    - → [`user-story/SKILL.md` — Mode 0](../user-story/SKILL.md) for user stories
 5. Announce: "Extracted [N] use cases and [M] user stories — [X] gaps marked [OPEN]."
-6. Proceed to Phase 0 with only the open questions remaining
+6. Proceed to Phase 0
 
-If no documents → proceed directly to Phase 0.
+If no documents and no earlier session → proceed directly to Phase 0.
 
 ---
 
 ### Phase 0: Strategic Anchor
 
-Before starting depth-first interrogation, ask these four questions together in a single
-response. They establish the business context and architectural shape in one round and
-allow the rest of the session to be focused — or skipped — accordingly.
+Before starting depth-first interrogation, establish the business context and architecture shape.
+If product-discovery ran, A1, A2, and A5 are pre-resolved; otherwise ask all five (A1–A5).
+Always ask A3 and confirm A4 regardless of discovery history.
 
-Present all four at once, clearly numbered A1–A4:
+**When discovery ran:** Present A3 + confirmed A4 only. When discovery did NOT run:
+present all five at once, clearly numbered A1–A5:
 
 ---
 
-**A1 — Business Case**
+**A1 — Business Case** *(Pre-resolved if discovery ran)*
 
 Is this greenfield (new system), migration (replacing an existing system), or
 an extension of an existing system?
 
-**My recommendation:** [infer from context the user provided]
+**My recommendation:** [infer from context; or from discovery product-type]
 
 ---
 
-**A2 — Purpose & Scope**
+**A2 — Purpose & Scope** *(Pre-resolved if discovery ran)*
 
 What are we building and what is explicitly out of scope?
 
-**My recommendation:** [scoped interpretation based on what the user described]
+**My recommendation:** [scoped interpretation; or from discovery product-brief]
 
 ---
 
-**A3 — Architecture Shape**
+**A3 — Architecture Shape** *(Always ask)*
 
 Event-driven with event sourcing, event-driven with state-based persistence,
 or direct request/response?
@@ -104,30 +143,39 @@ or direct request/response?
 
 ---
 
-**A4 — Hard Constraints**
+**A4 — Hard Constraints** *(Confirm if pre-filled; ask if no discovery)*
 
 What is non-negotiable? (team size, deadline, existing stack, compliance,
 cloud vs. on-premise)
 
-**My recommendation:** [infer from codebase — check `Directory.Packages.props` and
-Aspire AppHost for existing choices before asking]
+**My recommendation:** [from discovery Phase 13/14 if available; else infer from codebase
+— check `Directory.Packages.props` and Aspire AppHost for existing choices]
 
 ---
 
-After all four are answered, adapt the interrogation order based on A1:
-- **Greenfield** → standard dimension order (1 → 2 → 3 → … → 8)
-- **Migration** → pull Dimension 8 (Migration & Rollout) forward after Dimension 2
-- **Extension** → run codebase-first checks before any question; most decisions are pre-resolved
+**A5 — Surfaces & Deliverables** *(Pre-resolved if discovery ran)*
 
-Then proceed to Phase 1 if 2+ BCs were identified, otherwise depth-first on the
-highest-impact open dimension.
+What are the target platforms and surfaces? (web, iOS, Android, Windows, macOS, API, etc.)
+
+**My recommendation:** [from `platform-deliverables.md` if discovery ran; else
+infer from the problem domain and audience]
+
+---
+
+After A1–A5 are answered or confirmed, if product-discovery ran, propose bounded context candidates derived from the MoSCoW capabilities, top journeys, and glossary from `discovery-decisions.md`. Ask:
+
+> Based on the capabilities and journeys you described, I see these candidate bounded contexts: [names from discovery]. Do these match your mental model, or should we rename or split them?
+
+Confirm the list before proceeding to Phase 1. This confirms the BC count and enables the Phase 1 parallel trigger.
+
+Then adapt the interrogation order based on A1. See **Interrogation order** table below for the sequence per product type.
 
 ---
 
 ### Phase 1: Parallel BC Interrogation
 
 When Phase 0 (A2) identifies 2 or more bounded contexts, spawn one sub-agent per BC
-and run them in parallel. Each agent covers Dimensions 2–6 for its BC only.
+and run them in parallel. Each agent covers Dimensions 2–7 for its BC only. Dimension 8 (Migration & Rollout) is global and runs as a single-agent dimension after the domain block; then Dimensions 9–15 follow in dependency order.
 
 **Trigger:**
 ```
@@ -136,7 +184,7 @@ BCs identified in A2 ≥ 2?
   NO  → Continue single-agent depth-first from Phase 0
 ```
 
-**Per-BC dimensions:**
+**Per-BC dimensions (Dimensions 2–7):**
 
 | Dimension | BC-specific questions |
 |-----------|----------------------|
@@ -148,8 +196,8 @@ BCs identified in A2 ≥ 2?
 
 Each BC agent writes immediately to:
 - `session-decisions.md` — its own BC section
-- `docs/bounded-contexts/{BC}/use-cases.md` — draft use cases as flows resolve
-- `docs/bounded-contexts/{BC}/user-stories.md` — draft stories as criteria are agreed
+- `docs/bounded-contexts/{Domain}/use-cases.md` — draft use cases as flows resolve
+- `docs/bounded-contexts/{Domain}/user-stories.md` — draft stories as criteria are agreed
 - Follows the depth-first rule within its own BC
 
 **Coordination agent** (main session) batches one open question per BC per round:
@@ -164,8 +212,8 @@ Each BC agent writes immediately to:
 
 **After all BC agents complete:**
 1. Cross-BC integration questions (how do BCs communicate?)
-2. Dimension 7 — Non-functionals (global, single agent)
-3. Dimension 8 — Migration & Rollout (global, single agent)
+2. Dimension 8 — Migration & Rollout (global, single agent)
+3. Dimensions 9–15 in dependency order (see **Interrogation order** table)
 
 ---
 
@@ -190,7 +238,8 @@ moving to the next sibling.
 ### Decision Dimensions
 
 Cover these areas in dependency order — skip dimensions that are clearly irrelevant
-or already resolved:
+or already resolved. Dimensions 1–8 are ordered for backend/domain work; Dimensions 9–15
+cover client surfaces, operations, and quality gates (see **Interrogation order** table below).
 
 | # | Dimension | Key Questions |
 |---|-----------|---------------|
@@ -202,6 +251,34 @@ or already resolved:
 | 6 | **Failure Modes** | What happens when each component fails? |
 | 7 | **Non-Functionals** | Which quality attributes must this solution meet? — question set below |
 | 8 | **Migration & Rollout** | How is this deployed? What is the rollout strategy? |
+| 9 | **Client Surfaces & UX Architecture** | Per surface from A5: render/host model (Blazor Server/WASM/Auto/Hybrid/MAUI/WinUI/WPF), shared UI library vs per-platform, navigation & state management, design-system/tokens implementation, theming (light/dark/high-contrast), responsive & adaptive rules, offline & sync conflict policy, device-API access, localisation mechanism, accessibility implementation & test approach, form-factor handling. **Prototype fidelity:** token source of truth, component mapping, visual-regression baseline from mockups, design review gate |
+| 10 | **Identity, Access & Tenancy** | Identity provider, flows per surface, roles & permissions, tenancy model & isolation, session/token lifetime per platform, admin/impersonation, API client auth |
+| 11 | **Data Management & Privacy** | Stores per bounded context, retention & deletion, PII inventory & classification, consent, backup/restore & RPO/RTO, import/migration, export/portability, data residency |
+| 12 | **Delivery, Environments & Hosting** | Environments, CI/CD, branching & versioning, hosting/cloud & cost envelope, store/installer/updater pipelines, feature flags, rollback, signing & secrets. **Sizing:** end this dimension by asking: *"What is the T-shirt size (XS/S/M/L/XL) for each capability? Does this fit your budget and deadline?"* Log the answer and compare scope vs budget in the Product Specification. |
+| 13 | **Observability & Operations** | Structured logging, metrics, tracing, alerting thresholds, product analytics tracking plan & consent, crash reporting for native clients, support workflow, runbooks, SLA/SLO |
+| 14 | **Testing Strategy** | Test pyramid per BC, BDD scope, E2E & accessibility & visual regression (against the mockups), device/browser/OS matrix, test data, performance tests, definition of done. **Sizing confirmation:** end by confirming the sizing question answers from Dimension 12 against the testing strategy — does the test pyramid fit the estimate and deadline? |
+| 15 | **AI/ML Features** *(conditional)* | Asked only when discovery flags AI or the user mentions it: model/provider choice & swap-ability, prompt/data handling & privacy, evaluation & quality gates, human-in-the-loop, cost & rate limits, safety/abuse controls, transparency, EU AI Act classification |
+
+### Interrogation order
+
+Dimensions are resolved in dependency order (domain first; migration immediately after when A1=Migration; then quality first; identity and data before client surfaces; delivery, operations and testing last). The sequence below applies to **greenfield** and **extension** products. For **Migration**, Dimension 8 is pulled forward to immediately after the domain block (Dimensions 1–7).
+
+| Position | Dimension | Why |
+|----------|-----------|-----|
+| 1 | 1–7 (Domain + Quality) | Core design decisions; shape all downstream choices |
+| 2 | 8 (Migration & Rollout) *(greenfield/extension: moved here for migrations)* | If A1=Migration, immediately after domain; otherwise final dimension |
+| 3 | 11 (Data Management) | Determine storage and retention before designing surfaces |
+| 4 | 10 (Identity & Access) | Auth flow shapes client surface design |
+| 5 | 9 (Client Surfaces) | Navigate by audience, tech stack, data decisions already made |
+| 6 | 12 (Delivery & Hosting) | Constraints from hosting/CI/CD affect client and server choices |
+| 7 | 13 (Observability) | Measurement plan (tracking) seeds from goals (GL-nnn) |
+| 8 | 14 (Testing) | QA strategy last; scope set by all prior dimensions |
+| 9 | 15 (AI/ML) | Conditional; only when flagged by discovery or the user |
+
+**A1 branching — override this order when A1 ≠ Greenfield:**
+- **Greenfield:** Use order above (1–7 → 11 → 10 → 9 → 12 → 13 → 14 → 15); Dimension 8 is final
+- **Migration:** Execute Dimension 8 immediately after Dimension 7 (right after domain block); then 11 → 10 → 9 → 12 → 13 → 14 → 15
+- **Extension:** Run codebase-first checks before Phase 0 (what already exists, what is pre-resolved); most decisions 2–7 are confirmed from existing code, not asked
 
 ### Dimension 7 — Quality Attribute Questions
 
@@ -218,7 +295,7 @@ a questionnaire.
 | 1 | Functional suitability | Which stated business outcome has no use case yet, and which use case has no acceptance criterion behind it? |
 | 2 | Performance efficiency | What is the expected load, and what is the slowest acceptable response for the heaviest operation — as a number, not as "fast"? |
 | 3 | Compatibility | Which external systems must this exchange data with, in what shape (API version, file format, database dialect), and what must keep running unchanged alongside it? |
-| 4 | Interaction capability | Who uses it, through which surface, and how do they find out what to do and recover from a mistake? *No human surface → not applicable.* |
+| 4 | Interaction capability | Who uses it, through which surface, and how do they find out what to do and recover from a mistake? *No human surface → not applicable.* **If product-discovery ran, this is pre-resolved from `ux-brief.md` / `audience-profile.md` — do not re-ask; log the finding as Pre-Resolved and move on.** |
 | 5 | Reliability | Which failures are tolerable and which are not, and what happens to in-flight work when a dependency is down? Is running the same command twice safe? |
 | 6 | Security | Who must not be able to do or see this, where does the trust boundary sit, and what data classification applies? |
 | 7 | Maintainability | Which parts are expected to change fastest, and which bounded contexts must stay independently changeable? |
@@ -260,7 +337,7 @@ to the next top-level topic.
 
 Do not wait until the end of the session to write output. Capture decisions, domain terms, use
 cases, and user stories **as they emerge** — this ensures nothing is lost if the session is
-interrupted, and makes Steps 4–6 a finalization pass rather than a cold generation from memory.
+interrupted, and makes the finalization step a completion pass rather than a cold generation from memory.
 
 ### Session Start — Create Decision Log
 
@@ -270,7 +347,7 @@ Before asking the first question, create the decision log file:
 docs/session-decisions.md
 ```
 
-Use this header:
+Use this header. Include a **Source** column for decisions imported from `docs/product/`:
 
 ```markdown
 # Session Decisions — {SolutionName}
@@ -279,16 +356,21 @@ Use this header:
 
 ## Decisions
 
-| # | Dimension | Decision | Rationale |
-|---|-----------|----------|-----------|
+| # | Dimension | Decision | Rationale | Source |
+|---|-----------|----------|-----------|--------|
 ```
+
+When importing decisions from `docs/product/discovery-decisions.md`, populate the Source
+column with the file path and decision ID (e.g., `docs/product/discovery-decisions.md — PD-015`).
+When a decision meets a council trigger from `AGENTS.md`, flag it in the Rationale column:
+`Council recommended — [trigger name]`.
 
 ### After Each Resolved Question
 
 Immediately append to `session-decisions.md`:
 
 ```markdown
-| {N} | {Dimension} | {chosen approach} | {brief rationale} |
+| {N} | {Dimension} | {chosen approach} | {brief rationale} | |
 ```
 
 Announce:
@@ -306,7 +388,7 @@ skill finalizes it):
 
 | Term | Definition | Bounded Context | Notes |
 |------|-----------|-----------------|-------|
-| {Term} | {Definition} | {BC} | [DRAFT] |
+| {Term} | {Definition} | {Domain} | [DRAFT] |
 ```
 
 ### When a Use Case Becomes Clear
@@ -329,10 +411,10 @@ skill **Mode 1** to write the draft entry to
   [`user-story/SKILL.md` — Mode 1](../user-story/SKILL.md).
   Do NOT use a custom format here.
 
-### Steps 4–6 Become Finalization
+### Finalization: Complete the Session Deliverables
 
-When interrogation is complete, Steps 4–6 do not generate from scratch — they **complete and
-finalize** the drafts already written:
+When interrogation is complete, finalization does not generate from scratch — it **completes and
+finalizes** the drafts already written:
 
 - Remove all `[DRAFT]` markers
 - Fill gaps in use cases (alternate flows, Gherkin)
@@ -345,15 +427,19 @@ finalize** the drafts already written:
 
 ### Step 1: Load Relevant Instruction Files
 
-Before writing the architecture document, load any instruction files that apply to the
-technology choices made during interrogation. If your project maintains instruction files
-in `.github/instructions/` or `.ai/reference/`, load those relevant to:
+Before writing the architecture document, load these instruction files to pre-fill constraints and check for compliance:
 
-- Core architecture (Clean Architecture layers, DDD, naming conventions)
-- CQRS and error handling
-- Data access and ORM patterns
-- Authentication and authorization
-- Observability and testing patterns
+| File | Purpose |
+|------|---------|
+| `.ai/project/tech-stack.md` | Confirm technology choices, versions, and constraints |
+| `.ai/reference/forbidden-tech.md` | Check that chosen libraries/patterns are not banned |
+| `.ai/project/architecture.md` | Reference architecture patterns and ADR template |
+| `.ai/reference/quality-model.md` | ISO/IEC 25010 vocabulary for Dimension 7 answers |
+| `.ai/reference/standards.md` | Compliance requirements and validator rules |
+
+Before asking any question, check the codebase for existing choices in `Directory.Packages.props`,
+Aspire AppHost, and existing projects — pre-populate A4 constraints and A5 surfaces with what
+you find.
 
 ### Step 2: Check for Violations
 
@@ -375,13 +461,14 @@ Refer to `.ai/project/architecture.md` for the ADR template.
 ### Step 4: Finalize Session Deliverables (MANDATORY)
 
 The three required skills were loaded at session start and have been capturing drafts throughout
-the interrogation. This step **finalizes** those drafts — it is not a cold generation from memory.
+the interrogation. This step **finalizes** those drafts and compiles the Product Specification — it is not a cold generation from memory.
 
 | # | Deliverable | Skill | Output File | Action |
 |---|-------------|-------|-------------|--------|
 | 1 | **Ubiquitous Language Glossary** | [`ubiquitous-language`](../ubiquitous-language/SKILL.md) | `UBIQUITOUS_LANGUAGE.md` | Complete draft — remove `[DRAFT]`, resolve ambiguities, add missing terms |
-| 2 | **Use Case Specifications** | [`usecase-specification`](../usecase-specification/SKILL.md) | `docs/bounded-contexts/{BC}/use-cases.md` | Complete draft — fill alternate flows, add Gherkin for every flow |
-| 3 | **User Stories** | [`user-story`](../user-story/SKILL.md) | `docs/bounded-contexts/{BC}/user-stories.md` | Complete draft — add Gherkin, validate INVEST, ensure ≥3 criteria per story |
+| 2 | **Use Case Specifications** | [`usecase-specification`](../usecase-specification/SKILL.md) | `docs/bounded-contexts/{Domain}/use-cases.md` | Complete draft — fill alternate flows, add Gherkin for every flow |
+| 3 | **User Stories** | [`user-story`](../user-story/SKILL.md) | `docs/bounded-contexts/{Domain}/user-stories.md` | Complete draft — add Gherkin, validate INVEST, ensure ≥3 criteria per story |
+| 4 | **Product Specification** | None (compilation) | `docs/product/product-specification.md` | Compile from deliverables 1–3, session-decisions, architecture document, and `docs/product/*` files (if product-discovery ran) — see **Deliverable 4** subsection below |
 
 #### Finalization Order
 
@@ -396,35 +483,70 @@ Execute in this sequence — each builds on the previous:
 3. **User Stories third** — complete all draft stories using finalized terminology and use cases.
    Add Gherkin traced to every acceptance criterion. Validate INVEST.
 
-#### Announce Each Deliverable
+4. **Product Specification last** — compile the consolidated what-we-build + technical requirements document; see subsection below for structure.
 
-Before starting each deliverable:
-> **Deliverable 1 of 3 — Ubiquitous Language**
-> Finalizing draft terms from the interrogation…
+#### Announcements
 
-After completing each:
-> ✅ `UBIQUITOUS_LANGUAGE.md` finalized — N terms defined, M ambiguities resolved.
+For each deliverable, announce what is being finalized and confirm completion. For example:
+
+> **Deliverable 1 of 4 — Ubiquitous Language**
+> ✅ Complete — N terms defined.
+
+> **Deliverable 4 of 4 — Product Specification**
+> ✅ Complete — specification ready for handoff.
 
 #### Skip Only With Explicit User Consent
 
 If the user says "skip use cases" or "no stories needed", mark the deliverable as **Deferred**
 and include it in the closing summary. Never skip without recording it there.
 
-### Step 5: Solution Generation Handoff
+#### Deliverable 4 — Product Specification
 
-The session deliverables are direct pipeline inputs for solution generation:
+The Product Specification is a consolidated index document — written after deliverables 1–3 are complete.
+It joins what you are building (from product-discovery, if it ran) with the technical requirements (from this interrogation).
 
-| Document | Consumed By | Role |
-|----------|-------------|------|
-| `docs/architecture/{SolutionName}-architecture.md` | [`solution-generator`](../solution-generator/SKILL.md) | Primary input — generator derives all parameters from it |
-| `UBIQUITOUS_LANGUAGE.md` | [`solution-generator`](../solution-generator/SKILL.md) | Domain naming, aggregate identification |
-| `docs/bounded-contexts/{BC}/use-cases.md` | [`vertical-slices`](../vertical-slices/SKILL.md) | Each use case → blueprint JSON + Gherkin `.feature` files |
-| `docs/bounded-contexts/{BC}/user-stories.md` | [`vertical-slices`](../vertical-slices/SKILL.md) | Each story → individual vertical slice blueprint JSON |
+**Structure:** 11 sections — Vision/Problem/Audience → Scope/Release Plan → Experience/Journeys → Surfaces/Deliverables → Domain/Glossary → Technical Requirements → Compliance → Roadmap & Sizing → Traceability → Risks/Assumptions → Sign-Off
 
-**Pipeline execution order:**
-1. Run [`solution-generator`](../solution-generator/SKILL.md) — pass architecture document as input
-2. Translate each user story to a [`vertical-slices`](../vertical-slices/SKILL.md) blueprint JSON for feature-by-feature implementation
-3. Run [`gap-review`](../gap-review/SKILL.md) — mandatory after generation, validates against original design decisions
+**Source map (per-section origin):**
+- Sections 1–3 (What we build, Scope, Experience): from `product-brief.md`, `ux-brief.md`, `ui-design-brief.md`, prototype if discovery ran; else capture from A1, A2, A5 and goals (GL-nnn) + skip as [Deferred — run product-discovery]
+- Section 4 (Surfaces & Deliverables): from `platform-deliverables.md` if discovery ran; else from A5 + interrogation answers
+- Section 5 (Domain, Glossary): from deliverables 1–3 (UBIQUITOUS_LANGUAGE.md, use-cases.md, user-stories.md)
+- Section 6 (Technical Requirements): from architecture document + Dimensions 9–15 decisions in `session-decisions.md`
+- Sections 7–11: compiled from compliance answers, roadmap sizing, traceability coverage, risks/assumptions, sign-off
+- Per-section source tables for sections 7–11 documenting which dimension/decision each requirement came from
+
+**Rules:**
+- Skip only with explicit consent; record as **Deferred** in closing summary
+- All IDs traced verbatim: `SCR-001`, `UC-{BC}-001`, `US-{BC}-001`, `DLV-001`
+- Hyperlink all sections to source documents where they exist
+
+→ Copy and complete: [references/product-specification-template.md](references/product-specification-template.md)
+
+**When discovery did NOT run:**
+- Mark Sections 1–3 as [Deferred — run product-discovery], OR
+- Run a short capture pass (A1, A2, A5 answers + goals from Dimension 1) to draft Sections 1–3 now
+- Section 4 (Surfaces & Deliverables) is always populated from A5
+- State which approach is taken in the closing summary
+
+### Step 5: Solution Generation and Design Hand-off
+
+**Recommended pipeline execution sequence:**
+
+1. If product-discovery ran: extract theme tokens from `docs/product/ui-design-brief.md`
+2. Run [`css-theme-generator`](../css-theme-generator/SKILL.md) (or `blazor-` / `xaml-theme-generator`), passing the accent colour
+3. Run **designer** to refine component usage and design-system (Dimension 9)
+4. Run **ui-developer** and **maui-apple-design** for platform-specific surfaces
+5. Run [`solution-generator`](../solution-generator/SKILL.md) — pass architecture document and Product Specification as input
+6. Translate each user story to [`vertical-slices`](../vertical-slices/SKILL.md) blueprint JSON (feature-by-feature)
+7. Run [`playwright-tester`](../playwright-tester/SKILL.md) — consume the prototype as UI acceptance baseline
+8. Run [`gap-review`](../gap-review/SKILL.md) — mandatory after generation; validates against design decisions and prototype fidelity
+
+**Key deliverables consumed:**
+- `docs/product/product-specification.md` — overall product scope and technical requirements (Deliverable 4)
+- `docs/architecture/{SolutionName}-architecture.md` — architecture decisions and ADRs
+- `UBIQUITOUS_LANGUAGE.md`, use-cases.md, user-stories.md — domain model and acceptance criteria
+- Dimension 9 (Client Surfaces) + A5 — render mode, shared UI, design system — input to theme generators
+- Prototype — visual-regression baseline, component mapping reference, design review gate
 
 ---
 
@@ -438,24 +560,32 @@ When all branches are Resolved or Deferred, present a structured summary:
 ### Decisions Made
 - [Topic]: [chosen approach and brief rationale]
 
+### Council-Flagged Decisions
+When a decision met a council trigger, list it here (marked in `session-decisions.md` Rationale column as `Council recommended — [trigger name]`):
+- [Decision]: [trigger name] — flagged for council review before implementation
+
 ### Deferred Decisions
 - [Topic]: Deferred because [reason]
 
 ### Remaining Open Questions
 - [Any unknowns that require external input]
 
+### Traceability Coverage
+- Goals covered by use cases: [N] of [M]; uncovered: [list]
+- Acceptance criteria mapped to capabilities: [percentage]
+- Architecture decisions linked from Dimensions 1–15: [count]
+
 ### Session Deliverables
 | Deliverable | Status | File |
 |-------------|--------|------|
 | Architecture Document | ✅ Complete | `docs/architecture/{SolutionName}-architecture.md` |
 | Ubiquitous Language | ✅ Complete / ⏸️ Deferred | `UBIQUITOUS_LANGUAGE.md` |
-| Use Case Specifications | ✅ Complete / ⏸️ Deferred | `docs/bounded-contexts/{BC}/use-cases.md` |
-| User Stories | ✅ Complete / ⏸️ Deferred | `docs/bounded-contexts/{BC}/user-stories.md` |
+| Use Case Specifications | ✅ Complete / ⏸️ Deferred | `docs/bounded-contexts/{Domain}/use-cases.md` |
+| User Stories | ✅ Complete / ⏸️ Deferred | `docs/bounded-contexts/{Domain}/user-stories.md` |
+| **Product Specification** | ✅ Complete / ⏸️ Deferred | `docs/product/product-specification.md` |
 
-### Recommended Next Steps
-1. Run [`solution-generator`](../solution-generator/SKILL.md) — pass architecture document as input
-2. For each BC: translate user stories to [`vertical-slices`](../vertical-slices/SKILL.md) blueprint JSON
-3. Run [`gap-review`](../gap-review/SKILL.md) after generation
+### Next Steps (See Step 5)
+Follow the **pipeline execution sequence** in Step 5 above: theme generators → designer → solution-generator → vertical-slices → gap-review
 ```
 
 ---
@@ -489,7 +619,12 @@ an unrelated topic.
 
 | Skill | When to Load |
 |-------|-------------|
+| [`product-discovery`](../product-discovery/SKILL.md) | **Upstream** — when the user needs a product interview *before* architecture decisions. Produces pre-resolved input for this skill. |
 | [`architect`](../architect/SKILL.md) | Architectural decisions need to be formalized beyond the architecture document |
 | [`solution-generator`](../solution-generator/SKILL.md) | After interrogation — scaffold the solution |
 | [`vertical-slices`](../vertical-slices/SKILL.md) | Translate stories to implementation blueprints |
 | [`gap-review`](../gap-review/SKILL.md) | Validate the generated solution |
+| **designer** | Refine design-system decisions and component usage (Dimension 9) |
+| **ui-developer** | Build out client surfaces from approved mockups and Dimension 9 decisions |
+| **ui-tester** | Validate client surfaces against the prototype baseline |
+| **playwright-tester** | Test E2E workflows against the prototype baseline |

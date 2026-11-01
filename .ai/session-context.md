@@ -1,10 +1,109 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-10-30
+**Last Updated:** 2026-11-01
 **Project Version:** 2.2.0
-**Branch:** development/main
+**Branch:** spike/blazor-wasm-webview
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
+
+---
+
+## Current state (2026-11-01) — read this first
+
+The branch `spike/blazor-wasm-webview` carries a large, committed refactor; the older sections
+below describe the pre-refactor tree and are history, not current state.
+
+**Layout.** `NugetPackageManager.slnx` at the root; C# projects under `src/` with a test project
+each under `tests/`; the TypeScript sources are `src/NugetPackageManager.VSCode.{Common,Host,Webview}`
+with their own `tsconfig.json` extending `tsconfig.base.json` (which owns the `@/common`, `@/host`,
+`@/web` aliases); TS tests live in `tests/NugetPackageManager.VSCode.Tests`; the shared C# test
+helpers and MSBuild fixtures live in `tests/NugetPackageManager.TestUtilities` (`TestPaths`,
+`TemporaryDirectory`, `Fixtures/`). Central package management is at the root and opts out of
+`Fixtures`. `NugetPackageManager.slnx` lists the TypeScript entry points and configs under
+`/TypeScript*/` solution folders so Visual Studio shows both halves; they are solution items, not
+MSBuild projects.
+
+**The .NET core.** A sidecar process (`dist/core`, launched by `nuget/core-process.ts`) now owns
+the NuGet source client (search, registration, dependency groups, advisories), `nuget.config`
+discovery/parsing/merging, the project model (csproj reading, CPM resolution per framework,
+target-framework evaluation, and the CPM writer), the dependency operations (restored-graph
+analysis, requirement closure, apply order), `dotnet` failure classification, and toolchain
+detection (SDK checks, pin satisfaction, orphaned manifest bands, `global.json` writes). `nuget/api.ts`, `utilities/project-parser.ts`,
+`utilities/project-framework-resolver.ts`, `utilities/dependency-graph.ts`,
+`utilities/requirement-closure.ts`, `utilities/restore-diagnostics.ts` and the parsing halves of
+`utilities/global-json.ts`/`toolchain-health.ts`/`sdk-check.ts` are gone.
+
+**Tests.** `dotnet test` 201/201 across three MSTest projects; `npm test` 358 passing;
+`npm run quality` (8 steps) includes the C# build and tests.
+
+**Migration state.** Waves A–F of `.ai/plans/ts-to-csharp-migration.md` are complete. What
+remains in TypeScript is deliberate host plumbing: `vscode` activation/RPC jobs/status bar,
+`nuget/local-feed.ts` (reads `.nupkg` from disk), `utilities/sdk-install.ts` (downloads and runs
+Microsoft's install script — the trust boundary), `utilities/workload-commands.ts`,
+`utilities/sdk-locations.ts` and `utilities/dotnet-context.ts` (synchronous spawn context),
+`utilities/version.ts` (used by host loops and comparators), and the thin core adapters
+(`cpm-reader.ts`, `cpm-writer.ts`, `dotnet-failure.ts`, `global-json.ts`,
+`nuget-config-resolver.ts` + `nuget/config-client.ts`). Blazor-vs-sidecar
+decision: `.ai/analysis/2026-11-01-blazor-wasm-webview-review.md`.
+
+**Test seam.** `host-api.test.ts` no longer bridges the core's write methods to a TypeScript
+writer. The core stub records the CPM requests and the orchestration tests assert on them; CPM
+reads use explicit fixture maps. `utilities/cpm-reader.test.ts` covers the adapter seams.
+
+---
+
+## Code-organisation pass (2026-11-01) — one type per file, no `*Dto`
+
+`src/` and `tests/` now honour `.ai/reference/critical-rules.md` rule 10 and the
+`{Entity}` naming convention from `.ai/reference/naming-conventions.md`:
+
+- **`*Dto` postfix gone.** `PackageDto` → `Package`, `PackageDetailsDto` → `PackageDetails`,
+  `PackageDependencyGroupDto` → `PackageDependencyGroup`, `PackageDependencyDto` →
+  `PackageDependency` (all now one file each under `Core.NuGet/Models`), and
+  `DependencyIssueDto` → `DependencyIssue` (`Core.Workspace/Dependencies`). The C# package
+  shape now matches the `Package` interface the webview already used.
+- **One top-level type per file** across 14 C# files plus 6 TypeScript files. `RpcContracts.cs`,
+  `ProjectModels.cs`, `PackageDtos.cs` and `NuGetConfigModels.cs` no longer exist; the two
+  TypeScript barrels (`VSCode.Webview/types.ts`, `utilities/operation-jobs.ts`) re-export so no
+  import path changed. Private nested helpers stay with their owner.
+- Verified with `dotnet test` 204/204, `npm test` 358 passing and `npm run quality` PASS.
+
+Details: `.ai/completed/dto-rename-and-one-type-per-file.md`.
+
+## Async audit (2026-11-01) — rules now hold everywhere
+
+Compiler-API audit of `src/` + `tests/` (368 async declarations) plus a C# scan:
+
+- **C#:** compliant — 33 `async` methods and 17 non-async `Task`-returning members all end in
+  `Async`; no `async void`, `.Result`, `.Wait()`, `GetAwaiter().GetResult()` or `ContinueWith`.
+  Unawaited tasks stay compiler-enforced (`CS4014` + `TreatWarningsAsErrors`).
+- **TypeScript:** 6 async functions were missing the suffix (`recordRestoreFailure`,
+  `executeRemovePackage`, `executeAddPackage`, `getLatestVersion`, `packages-view.runNext`, and
+  `global-json.ts`'s core writer, now `WriteGlobalJsonSdkVersionAsync` — the file already had a
+  separate `UpdateGlobalJsonSdkVersionAsync` for the template path) and 7 promise calls were
+  fire-and-forget (`logger.ts` shutdown, `rpc-host.ts` postMessage, two `openExternal` calls,
+  `globalState.update`, `updateStatusBarAsync`, the debounced reload). All fixed with `void`.
+- Accepted exceptions: Lit's `task:` property name, test doubles implementing
+  `postMessage`/`writeText`/`update`, and `packages-view.connectedCallback`'s `void` load
+  (documented last-resort case).
+
+Details: `.ai/completed/async-audit-remediation.md`.
+
+## SonarCloud PR 46 remediation (2026-11-01)
+
+All 61 open findings from the PR analysis are addressed (S1192 ×14, S6444 ×12, S3776 ×6,
+S3358 ×5, S8970 ×5, S2325 ×3, S2583/S2589 ×3, S1118 ×2, S3267 ×2, and singles of S2094, S3218,
+S4158, S4036 ×2, S6966, plus four TS/JS findings).
+
+Shape changes worth knowing: `ConditionNode` → `IConditionNode` (an interface, renamed for
+CA1715); `CpmPropsReader` collectors return lists instead of pushing through an `Action`;
+`TargetFrameworkResolver` runs the same `dotnet` muxer the sidecar was started with instead of
+a PATH lookup; `tools/quality-gate.mjs` resolves `dotnet` from known install roots.
+`dotnet build`/`dotnet test` (204), `npm run typecheck`, `npm run lint`, `npm test` (358) and
+`npm run quality` (8/8) all pass. The issue count itself can only be re-confirmed by the next
+CI analysis.
+
+Details: `.ai/completed/sonar-pr46-remediation.md`.
 
 ---
 
@@ -18,6 +117,73 @@
 ---
 
 ## Recent Work (this session and last)
+
+### Completed: opt-in end-to-end suite (2026-11-01)
+- `tests/NugetPackageManager.VSCode.Tests/e2e/dotnet-roundtrip.e2e.ts` drives `createHostAPI()` with the **real** sidecar (`dist/core`) and the **real** `dotnet` CLI against a fixture project under `tests/.../e2e-workspace/` (gitignored, created per test).
+- Cases: install → update → uninstall rewrites the `.csproj`; a CPM project writes the version into `Directory.Packages.props` and leaves the reference unpinned; `getOutdatedPackagesAsync` reports the older install against nuget.org.
+- New `e2eTests` label in `.vscode-test.js` (`out/tests/**/*.e2e.js`) and `npm run test:e2e`; `npm test` is now scoped to `--label unitTests`, so the 358-test unit suite stays fast and offline.
+- Fixtures opt out of CPM with a local `Directory.Packages.props` (`ManagePackageVersionsCentrally=false`) because the fixture folder lives inside this repo, whose root props enable CPM.
+- Verified: 3/3 E2E passing (23 s), 358 unit tests, typecheck + lint clean.
+- Commit: `2a1a5d6` (the pre-E2E checkpoint) plus this change.
+
+### Completed: UI + process test sweep, two fixes, dev-mock completion (2026-11-01)
+- Suites: `npm test` 358 passing, `dotnet test` 204 passing (42 + 89 + 73).
+- UI driven with real clicks against `npm run dev`: all seven tabs, search (live nuget.org), prerelease, sort, source, project tree, details panel (Description/Dependencies/Versions), per-row install/update/uninstall/consolidate/cleanup, error alerts, copy diagnostics — no console errors.
+- Sidecar driven over NDJSON with `dist/core`: ping, classifyDotnetFailure (NU1107 → RestoreConflict), getProjects, getCpmMap, resolveNuGetConfig, evaluateToolchain, getPackages/getPackage/getPackageDetails against nuget.org, getVulnerabilities, and invalid-parameter errors.
+- Fix: a 404 on the registration index now maps to `packageNotFound` (`NuGetHttpClient.GetJsonAsync` gained a `notFoundCode`; `ReadRegistrationLeavesAsync` passes it for `GetPackageAsync`). Covered by `PackageLookupFailureTests` (3 cases: 404 → packageNotFound, search 404 → sourceUnreachable, 500 → sourceUnreachable).
+- Fix: `updates-view` no longer repeats the update count in the status suffix — `handleSingleSuccessAsync` now takes the target version and reports "Updated <id> to <version>". Asserted in `updates-view.test.ts`.
+- Dev tooling: `tools/mock-api.js` implements the job RPCs + scan progress + badge; `tools/dev-server.mjs` sorts search results like the host. Progress, completion and sorting are now exercisable in the browser.
+- Not covered: real install/update/consolidate/cleanup writes against a workspace and feed (needs a VS Code instance); no automated browser E2E suite exists.
+
+### Completed: sidecar packaging comparison — framework-dependent stays (2026-11-01)
+- Measured `PublishReadyToRun` and `PublishTrimmed` against the current IL build on this machine (`win-arm64`), 12 interleaved cold starts each: baseline 4.4 MB / 67 ms; R2R 11 MB / 67 ms (2.5x size, no gain); trimmed self-contained 29 MB and **does not start** (trimming disables reflection-based `System.Text.Json`, and the protocol serializes anonymous handler payloads).
+- Both alternatives are RID-specific, so they would break the single universal VSIX that also covers macOS. Decision (user): keep the framework-dependent build; no R2R/trimmed VSIX was produced.
+- Record: `.ai/completed/sidecar-packaging-comparison.md`; decision row added to `.ai/project/tech-stack.md`. Repo, `dist/core` and `package.json` untouched — experiment builds lived in `$TMPDIR`.
+
+### Completed: local test release (2026-11-01)
+- `npm run package` → `releases/nugetpackagemanager-2.2.0.vsix` (40 files, 9.47 MB), built from this working tree: bundles + `dist/core` sidecar (15 files).
+- Packaging fix: `.vscodeignore` now excludes `.vs/**`, the stale `dist/nuget-core/**` publish output, `.sonarcloud.properties`, `Directory.Packages.props`, `tsconfig.base.json`, `tsconfig.eslint.json` and `social.md` — the first build shipped them (74 files, 11.13 MB).
+- `.gitignore` gained `.vs/`.
+
+### Completed: fixtures folder renamed to `Fixtures` (2026-11-01)
+- `tests/NugetPackageManager.TestUtilities/__fixtures__` → `tests/NugetPackageManager.TestUtilities/Fixtures` (22 tracked files plus the generated `obj/` artifacts).
+- `Directory.Build.props` and `Directory.Packages.props` now match the segment `/Fixtures/` after normalising separators — `IsSidecarProject=false` still applies to every fixture project (verified with `dotnet msbuild -getProperty:IsSidecarProject`: fixture `false`, core `true`).
+- Updated: `TestUtilities.csproj` `DefaultItemExcludes`, `TestPaths.FixturesRoot`, `tsconfig.json`, `tsconfig.test.json`, `.vscode-test.js`, `.gitignore`, `.sonarcloud.properties` (which also now points `sonar.tests` at `tests/` instead of the stale `src`), the fixture-local `Directory.Packages.props`, the two C# test comments, `host-api.test.ts` `fixturesRoot()`, AGENTS.md, README, and this file.
+- Verification: `dotnet build` + `dotnet test` 201/201, `npm run typecheck`/`lint` clean, `npm test` 358 passing, `validate-agents-md.py`/`validate-prose.py`/`git diff --check` clean.
+- Archived records (`.ai/plans/`, `.ai/completed/`, `.ai/analysis/`) still name the old folder on purpose — they describe what happened at the time.
+
+### Completed: NuGet config resolution moved to the C# core (2026-11-01)
+- Plan: `.ai/plans/nuget-config-resolver-slice.md`; progress: `.ai/completed/nuget-config-resolver-slice.md`.
+- New `src/NugetPackageManager.Core.NuGet/Configuration/`: `NuGetConfigModels`, `NuGetConfigParser`, `NuGetConfigDiscovery`, `NuGetConfigResolver`; new `src/NugetPackageManager.Core/ConfigurationHandlers.cs` with the `resolveNuGetConfig` method.
+- TypeScript: new `src/NugetPackageManager.VSCode.Host/nuget/config-client.ts`; `utilities/nuget-config-resolver.ts` shrank from 440 to ~200 lines and keeps only the VS Code half (settings sources, trust gate, `passwordScriptAllowlist` + realpath, password-script execution, local-feed classification, logging).
+- Security invariants are now pinned by tests: `%VAR%` expands only above workspace level; a workspace `<clear/>` sets `ClearFound` and a user-level one does not; password scripts still require trust + allowlist + realpath in TS before the spawn.
+- Verification: `dotnet build` clean; `dotnet test` 201/201 (was 172); `npm run typecheck`/`lint` clean; `npm test` 358 passing (was 374 — the four parsing/discovery suites moved to MSTest, which gained 29 cases); `validate-agents-md.py`, `validate-prose.py`, `git diff --check` clean.
+
+### Completed: C# test utility layer + fixtures relocation (2026-11-01)
+- Plan: `.ai/plans/test-utility-layer.md`; progress: `.ai/completed/test-utility-layer.md`.
+- New project `tests/NugetPackageManager.TestUtilities` (net8.0, `IsPackable=false`, no test SDK, `Fixtures/**` excluded from its item globs) referenced by `Core.Workspace.Tests`.
+- `TestPaths` — `RepositoryRoot`, `FixturesRoot`, `Fixture(...)`, `ReadFixture(...)`, `Repository(...)`; replaces four byte-identical `FindRepositoryRoot()` copies.
+- `TemporaryDirectory` — `IDisposable` temp workspace with `Combine`, `CreateDirectory`, `WriteFile`; replaces ~30 inline `Path.GetTempPath` + create/delete sequences in `CpmPropsReaderTests`, `CpmWriterTests`, `ProjectFileReaderTests`, `WorkspaceModelServiceTests`.
+- The 22 tracked fixture files moved to `tests/NugetPackageManager.TestUtilities/Fixtures/`. `host-api.test.ts` `fixturesRoot()` updated; `tsconfig.json`, `tsconfig.test.json`, `.vscode-test.js` now exclude `**/Fixtures/**`.
+- AGENTS.md §7, README source tree and this file's layout note updated; solution file lists the new project.
+- Verification: `dotnet build` clean under analyzers; `dotnet test` 172/172; `npm run typecheck` / `test-compile` / `lint` clean; `npm test` 374 passing; `validate-agents-md.py`, `validate-prose.py`, `git diff --check` clean.
+
+### Completed: dual-stack documentation alignment (2026-11-01)
+- Plan: `.ai/plans/dual-stack-docs-alignment.md`; progress: `.ai/completed/dual-stack-docs-alignment.md`.
+- The repo is documented as what it is: a **.NET/C# core** (`src/NugetPackageManager.Core*`, sidecar `dist/core`) plus a **TypeScript extension** (`src/NugetPackageManager.VSCode.*`). AGENTS.md, CLAUDE.md, README.md and `.github/copilot-instructions.md` all carry the dual-stack identity, the sidecar in their architecture maps, and `dotnet build/test` in their command lists.
+- AGENTS.md: MANDATORY progress-file wording, `## Subagent Delegation (HARD RULE)`, 9-agent roster including `designer`, `@/common|host|web` aliases, `tests/NugetPackageManager.VSCode.Tests/**/*.test.ts`, C# CPM resolver paths (`Core.Workspace/Cpm/` + `cpm-reader|cpm-writer|cpm-conditional`), `sync-platforms.py`.
+- README: new architecture diagram with the sidecar, corrected source/test layout, .NET SDK 8+ prerequisite, `npm run build:core`, `npm run typecheck`, and an **AI Agent Roster** section (no Model column).
+- `.ai/reference/task-execution.md` and `critical-rules.md`: no `programmer` agent, no `Sonnet`/`Haiku`/`Pro` names; `.ai/reference/copilot-integration.md` and `templates/rpc-method.ts.txt` updated to junction sync + real paths + `Async` suffix.
+- `.ai/project/architecture.md` and `tech-stack.md` gained the `## .NET Sidecar Core` / `## .NET Core Projects` sections; `.ai/project/standards-overrides.md` records the standards demotion re-application step.
+- `.ai/progress/async-naming-refactor.md` moved to `.ai/completed/` as `SUPERSEDED`; trailing whitespace fixed in `.ai/skills/design-interrogation/SKILL.md`.
+- Verification: settings 6/6, copilot 4/4, agents-md PASS, claude-md PASS, structure 47/47, references 32/32, tokens PASS, skills 80/80, standards PASS, prose PASS, `git diff --check` clean. Pre-existing and unrelated: `validate-upgrade-script.py` 11/13 (expects a `product-discovery` skill this template does not ship).
+
+### Completed: verify-config audit (2026-11-01)
+- Ran the `verify-config` audit: 9 hard requirements + 12 documented conventions checked against the tree.
+- Fixed (approved): `.ai/ai.json` now selects `claude`, `copilot`, `reasonix`; `python .ai/scripts/sync-platforms.py` recreated `.github/skills`, `.github/agents`, `.reasonix/skills`, `.reasonix/agents`. `validate-copilot.py` 4/4 PASS.
+- Fixed (approved): `.ai/reference/standards.md` row 1 `ISO/IEC/IEEE 29119-3:2021` demoted `Evidence` → `Aligned` (no `docs/slices/` or `docs/test-reports/` exist), validator cell `—`, demotion sentence in the row. `validate-standards.py` exits 0.
+- Generated both standards surfaces: `COMPLIANCE.md` at the root (8 rows, `Note` = `—`) and the `## Standards Compatibility` block appended to `README.md` (last section, between the markers). Provenance: `generated=2026-11-01 revision=389efd0 validators=none`.
+- All other findings from this audit were resolved in the entry above (settings hook name, copilot Session Memory parity, stale paths/aliases/tests/agents, model names, stale progress file, skill whitespace).
 
 ### In progress: remaining Sonar findings — PR #41 (2026-10-30)
 - Follow-up to PR #40: 17 main-branch findings cleared; PR #41 → `main`: https://github.com/I-Synergy/NugetPackageManager/pull/41
@@ -48,7 +214,7 @@
 - Non-CPM `dotnet add` calls inside a transactional batch now pass `--no-restore`; exactly one `dotnet restore` covers the batch.
 - A failed restore is attributed back to batch rows (`attributeRestoreConflicts` → `BatchUpdateResponse.ConflictingPackages`); the tab offers "Retry without …" once.
 - `TaskExecutor.ExecuteCommandAsync` accepts an `onProgress` callback; `restoreProjectsInternalAsync` forwards per-project `dotnet` stages, which the batch maps into its 80–95 % band.
-- `BatchUpdateResponse.Cancelled` + `onStarted(jobId)` in `src/web/jobs.ts` back a **Cancel** button in the Updates progress banner (`cancelJobAsync`), which rolls back.
+- `BatchUpdateResponse.Cancelled` + `onStarted(jobId)` in `src/NugetPackageManager.VSCode.Webview/jobs.ts` back a **Cancel** button in the Updates progress banner (`cancelJobAsync`), which rolls back.
 - Cancel is wired into every job-triggering UI: `project-row` (busy row), `consolidate-view` (per-card), `cleanup-view`, and `packages-view` "remove from all projects" (stops the per-project loop). Each runner reports cancellation with a message saying what was rolled back or left applied.
 - Tests: **434 passing**; `npm run esbuild`, `npm run lint`, `npm run test-compile` clean.
 - Version bumped 2.1.0 → **2.2.0** (package.json/package-lock, CHANGELOG, RELEASE_NOTES);
@@ -57,10 +223,10 @@
 ### Completed: every long mutation is a host job (2026-10-28)
 - Plan: `.ai/plans/mutation-jobs-project-consolidate-cleanup.md`; progress: `.ai/completed/mutation-jobs-project-consolidate-cleanup.md`
 - Builds on the detach fix: `updateProjectAsync`, `consolidatePackagesAsync` and `cleanupUnusedPackagesAsync` no longer hold a request open for the length of a repo-wide write/restore, so a slow run neither times out nor loses its result.
-- `src/host/utilities/operation-jobs.ts` replaces `batch-update-jobs.ts`: a generic `JobRegistry<T>` (bounded retention, running jobs never pruned, explicit cancel wins over the abort failure) plus `OperationJobs` for `batchUpdate`, `projectUpdate`, `consolidate` and `cleanup`.
+- `src/NugetPackageManager.VSCode.Host/utilities/operation-jobs.ts` replaces `batch-update-jobs.ts`: a generic `JobRegistry<T>` (bounded retention, running jobs never pruned, explicit cancel wins over the abort failure) plus `OperationJobs` for `batchUpdate`, `projectUpdate`, `consolidate` and `cleanup`.
 - RPC surface is now `startBatchUpdateAsync` / `startProjectUpdateAsync` / `startConsolidateAsync` / `startCleanupAsync` → `{ JobId }`, `getJobAsync` → a `GetJobResponse` union discriminated by `Kind`, and `cancelJobAsync`. The legacy single-call RPCs remain and delegate to the same implementations.
 - Host implementations moved to `runBatchUpdateAsync`, `runProjectUpdateAsync`, `runConsolidateAsync`, `runCleanupAsync` with stage/percent reporting.
-- `src/web/jobs.ts` adds `waitForJobAsync` (poll 250 ms, optional `AbortSignal`, no stray timers) and typed runners; `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view` use them.
+- `src/NugetPackageManager.VSCode.Webview/jobs.ts` adds `waitForJobAsync` (poll 250 ms, optional `AbortSignal`, no stray timers) and typed runners; `updates-view`, `project-row`, `packages-view`, `consolidate-view` and `cleanup-view` use them.
 - Tests: **421 passing**; `npm run esbuild`, `npm run lint`, `npm run test-compile` clean.
 - Not converted: `restoreProjectsAsync` (never writes versions; only its result can be lost) and `getOutdatedPackagesAsync` (already uses `ScanProgress` + `ScanId`).
 
@@ -78,7 +244,7 @@
 - Plan: `.ai/plans/prerelease-badge-and-scan-progress.md`; progress: `.ai/completed/prerelease-badge-and-scan-progress.md`
 - Root cause of the stale badge: `UpdatePackagesFiltersAsync` never refreshed the update count on a Prerelease change. Only a mounted `updates-view` reported `count-changed`, and no scan ever called `updateBadgeAsync` for the Activity Bar badge.
 - `packages-view` now clears the count immediately (`…` in the tab badge), re-scans when no Updates tab is mounted, and keeps the tree badge in sync through a new `badge-changed` event (count + blocked count).
-- New `ScanId` on `GetOutdatedPackagesRequest` + `getOutdatedScanProgressAsync` RPC backed by `src/host/utilities/scan-progress.ts`. The host reports resolving sources → parsing projects (n/N) → latest versions (n/N) → dependency constraints (n/N) → preparing results.
+- New `ScanId` on `GetOutdatedPackagesRequest` + `getOutdatedScanProgressAsync` RPC backed by `src/NugetPackageManager.VSCode.Host/utilities/scan-progress.ts`. The host reports resolving sources → parsing projects (n/N) → latest versions (n/N) → dependency constraints (n/N) → preparing results.
 - `updates-view` polls progress every 400 ms while loading and renders the stage, item counts and a determinate progress bar; polling stops on completion, error, cancellation and disconnect.
 - Tests: **395 passing**; `npm run esbuild` and `npm run lint` clean.
 - Version bumped 2.0.0 → **2.1.0**; `CHANGELOG.md` and `RELEASE_NOTES.md` updated; local test build at
@@ -169,7 +335,7 @@
 - `CpmResolver`: `ResolveVersions` (one version line per condition), `UpdateCpmVersionsAsync` (single read/write per props file, verification before write, group/all/first scopes)
 - `host-api.ts`: Installed/Updates/Consolidate/Vulnerabilities now share per-TFM resolution; aligned latest version per TFM major; deduplicated NuGet lookups; `packageSourceMapping`-aware source selection; bin/obj exclusions
 - UI: per-TFM rows and framework filter, **Update all TFMs**, explicit latest-overall action, TFM badges for vulnerabilities
-- Tests: 277 passing; fixtures in `src/host/utilities/__fixtures__/cpm` and `.../projects`; host integration covers net10/net11/multi/platform projects
+- Tests: 277 passing; fixtures in `src/NugetPackageManager.VSCode.Host/utilities/__fixtures__/cpm` and `.../projects`; host integration covers net10/net11/multi/platform projects
 - Verified against `D:\Projects\I-Synergy\I-Synergy.Framework`: 69 unconditional + 2×31 conditional groups, net10 → 10.0.13, net11 → 11.0.0-rc.2, scoped writes only touch the addressed `ItemGroup`
 - Screenshots: `docs/images/screenshot-{installed,updates}-frameworks.png`, `...-net9.png`
 
@@ -221,7 +387,7 @@
 ## Established Patterns
 
 ### RPC Pattern
-All host↔webview calls use typed RPC (`src/common/rpc/types.ts`). Every method returns `Result<T>`. Add new methods by:
+All host↔webview calls use typed RPC (`src/NugetPackageManager.VSCode.Common/rpc/types.ts`). Every method returns `Result<T>`. Add new methods by:
 1. Adding request/response types to `types.ts`
 2. Adding the method signature to `HostAPI` interface in `types.ts`
 3. Implementing in `host-api.ts`
@@ -250,8 +416,8 @@ Used for anonymous usage telemetry (operation counts, error rates). Connects to 
 ### ESLint Version
 Staying on ESLint 9.x — ESLint 10 has breaking config changes that aren't worth migrating now.
 
-### src/common/ Isomorphism
-Files in `src/common/` are bundled into BOTH the host (Node.js) and web (browser) bundles. They must not import Node.js-only modules. Use `globalThis.crypto` instead of `import { randomBytes } from "crypto"`.
+### src/NugetPackageManager.VSCode.Common/ Isomorphism
+Files in `src/NugetPackageManager.VSCode.Common/` are bundled into BOTH the host (Node.js) and web (browser) bundles. They must not import Node.js-only modules. Use `globalThis.crypto` instead of `import { randomBytes } from "crypto"`.
 
 ---
 
@@ -288,6 +454,6 @@ was completed on 2026-10-24 and archived to `.ai/completed/`.
 
 1. **If releasing**: Update `package.json` version, run `npm run package`, verify `.vsix`
 2. **If adding RPC method**: types.ts → host-api.ts → webview call
-3. **If editing `src/common/`**: Ensure no Node.js-only imports (test with `npm run esbuild`)
+3. **If editing `src/NugetPackageManager.VSCode.Common/`**: Ensure no Node.js-only imports (test with `npm run esbuild`)
 4. **Before any commit**: `npm run quality` (build + lint with SonarJS + type check + tests + audit; 0 errors required)
 5. **After changing AI context**: `bash .ai/tests/run-all-tests.sh` (11 suites) and regenerate junctions with `python .ai/scripts/sync-skills.py`

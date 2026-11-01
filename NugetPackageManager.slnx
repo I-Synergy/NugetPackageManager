@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/Projects/">
+    <Project Path="src/NugetPackageManager.Core.NuGet/NugetPackageManager.Core.NuGet.csproj" />
+    <Project Path="src/NugetPackageManager.Core.Workspace/NugetPackageManager.Core.Workspace.csproj" />
+    <Project Path="src/NugetPackageManager.Core/NugetPackageManager.Core.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Packages.props" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NugetPackageManager.Core.Tests/NugetPackageManager.Core.Tests.csproj" />
+    <Project Path="tests/NugetPackageManager.Core.NuGet.Tests/NugetPackageManager.Core.NuGet.Tests.csproj" />
+    <Project Path="tests/NugetPackageManager.Core.Workspace.Tests/NugetPackageManager.Core.Workspace.Tests.csproj" />
+    <Project Path="tests/NugetPackageManager.TestUtilities/NugetPackageManager.TestUtilities.csproj" />
+  </Folder>
+</Solution>

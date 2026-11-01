@@ -1,6 +1,6 @@
 ---
 name: verify-config
-description: Audits AGENTS.md and .ai/ reference files against actual codebase patterns and hard requirements. Use to detect configuration drift and ensure documentation stays in sync.
+description: Audits AGENTS.md and .ai/ reference files against actual codebase patterns and hard requirements. Use to detect configuration drift and ensure documentation stays in sync. Use when you need to verify AGENTS.md and .ai/ references still match the codebase, or to compute the standards compatibility manifest.
 ---
 
 # Verify Configuration Skill
@@ -26,6 +26,8 @@ Audits project documentation against actual codebase conventions and enforces ha
    - Read 2-3 Model records from `Models/`
    - Read 2-3 Response records
    - Check `Extensions/ServiceCollectionExtensions.cs`
+   - List every `Abstractions/` folder and verify each interface sits in the highest project that both its consumers and its implementation already reference — an interface buried in the implementing project is **Drift**, an interface used only inside one internal implementation may sit beside it (`.ai/reference/critical-rules.md` rule 27)
+   - Confirm each file declares a single top-level type, and that no model type or model file carries a `Dto` suffix (`.ai/reference/critical-rules.md` rules 10 and 28)
    - For each documented convention, verify it matches actual code
    - Categorize: **Correct** / **Drift** / **Missing** / **Stale**
 
@@ -89,7 +91,7 @@ Audits project documentation against actual codebase conventions and enforces ha
    - Compute each row's status: an `Evidence` row keeps `Evidence` only when its validator exits `0`,
      every path in its `Implementing artifact` cell exists, and at least one pattern in its `Evidence a
      project produces` cell matches something the project produced — substitute `*` for each `{…}` and
-     glob it against the working tree, so `docs/slices/{BC}/{Entity}.{Operation}/test-plan.md` is
+     glob it against the working tree, so `docs/slices/{Domain}/{Entity}.{Operation}/test-plan.md` is
      tested as `docs/slices/*/*/test-plan.md`. Where a pattern matches nothing, the row is naming a
      file this project does not hold, and it renders one step lower — `Aligned` — with the cause in the
      generated `Note` column, naming what was not found. One step, never a fourth value, never a silent

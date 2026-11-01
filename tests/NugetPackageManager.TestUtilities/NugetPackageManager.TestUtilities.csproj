@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>NugetPackageManager.TestUtilities</RootNamespace>
+    <IsPackable>false</IsPackable>
+
+    <!--
+      Test data, not source. The `Fixtures` tree holds .props/.csproj files the tests read
+      at runtime, plus generated `obj/` artifacts from earlier evaluator runs. Nothing in it may
+      be globbed into this project's compile, content or None items.
+    -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Fixtures/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+</Project>

@@ -69,6 +69,87 @@
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   }
 
+  // ── Job-backed mutations ───────────────────────────────────────────────────
+  // The real host runs every write as a job (start → poll getJobAsync → cancel).
+  // These mocks mirror that, so the progress bar, completion and cancel paths are
+  // reachable in the browser too.
+
+  var mockJobs = new Map();
+  var mockJobSeq = 0;
+
+  function applyProjectMutation(params) {
+    var project = PROJECTS.find(function (p) { return p.Path === params.ProjectPath; });
+    if (!project) return null;
+    if (params.Type === 'INSTALL') {
+      project.Packages.push({ Id: params.PackageId, Version: params.Version, IsPinned: false, VersionSource: 'project' });
+    } else if (params.Type === 'UPDATE') {
+      var pkg = project.Packages.find(function (p) { return p.Id === params.PackageId; });
+      if (pkg) pkg.Version = params.Version;
+    } else if (params.Type === 'UNINSTALL') {
+      project.Packages = project.Packages.filter(function (p) { return p.Id !== params.PackageId; });
+    }
+    return project;
+  }
+
+  function applyBatchMutation(params) {
+    (params.Updates || []).forEach(function (update) {
+      (update.ProjectPaths || []).forEach(function (path) {
+        var project = PROJECTS.find(function (p) { return p.Path === path; });
+        if (!project) return;
+        var pkg = project.Packages.find(function (p) { return p.Id === update.PackageId; });
+        if (pkg) pkg.Version = update.Version;
+      });
+    });
+  }
+
+  function startMockJob(kind, stage, response, mutate) {
+    mockJobSeq += 1;
+    var jobId = 'mock-job-' + mockJobSeq;
+    mockJobs.set(jobId, {
+      Kind: kind,
+      Stage: stage,
+      State: 'running',
+      Percent: 40,
+      FinishAt: Date.now() + 600,
+      Response: response,
+      Mutate: mutate,
+    });
+    return { ok: true, value: { JobId: jobId } };
+  }
+
+  function jobSnapshot(job) {
+    if (job.State === 'running' && Date.now() >= job.FinishAt) {
+      if (job.Mutate) job.Mutate();
+      job.State = 'completed';
+    }
+    var done = job.State !== 'running';
+    var snapshot = {
+      Kind: job.Kind,
+      State: job.State,
+      Stage: done ? 'Completed' : job.Stage,
+      Percent: done ? 100 : job.Percent,
+    };
+    if (done && job.State !== 'cancelled') {
+      snapshot.Response = typeof job.Response === 'function' ? job.Response() : job.Response;
+    }
+    if (job.Error) snapshot.Error = job.Error;
+    return snapshot;
+  }
+
+  function cleanupResponse() {
+    return {
+      Report: {
+        PropsFiles: [{ Path: '/mock/Directory.Packages.props', Defined: ['AutoMapper', 'MediatR', 'Newtonsoft.Json', 'Serilog'], Unused: [] }],
+        Used: ['Newtonsoft.Json', 'Serilog'],
+        Missing: [],
+        Unused: [],
+      },
+      Removed: ['AutoMapper', 'MediatR'],
+      Backups: ['/mock/Directory.Packages.props.backup.mock'],
+      Errors: [],
+    };
+  }
+
   /** Semver-aware version comparison. Returns negative/0/positive. */
   function compareVersions(a, b) {
     var aParts = (a || '').split('-'), bParts = (b || '').split('-');
@@ -526,6 +607,71 @@
 
       case 'updateStatusBarAsync':
       case 'openUrlAsync':
+        return { ok: true, value: undefined };
+
+      case 'startBatchUpdateAsync':
+        return startMockJob(
+          'batchUpdate',
+          'Applying versions…',
+          function () {
+            return {
+              Results: (params.Updates || []).map(function (update) {
+                return { PackageId: update.PackageId, Success: true };
+              }),
+            };
+          },
+          function () { applyBatchMutation(params); });
+
+      case 'startProjectUpdateAsync':
+        return startMockJob(
+          'projectUpdate',
+          'Updating project…',
+          function () {
+            var project = PROJECTS.find(function (p) { return p.Path === params.ProjectPath; });
+            return { Project: project, IsCpmEnabled: false };
+          },
+          function () { applyProjectMutation(params); });
+
+      case 'startConsolidateAsync':
+        return startMockJob(
+          'consolidate',
+          'Consolidating versions…',
+          undefined,
+          function () {
+            (params.ProjectPaths || []).forEach(function (path) {
+              var project = PROJECTS.find(function (p) { return p.Path === path; });
+              if (!project) return;
+              var pkg = project.Packages.find(function (p) { return p.Id === params.PackageId; });
+              if (pkg) pkg.Version = params.TargetVersion;
+            });
+          });
+
+      case 'startCleanupAsync':
+        return startMockJob('cleanup', 'Removing unused packages…', cleanupResponse, function () {
+          window.__mockState.vulnerableDone = true;
+        });
+
+      case 'getJobAsync':
+        var job = mockJobs.get(params.JobId);
+        return job
+          ? { ok: true, value: jobSnapshot(job) }
+          : { ok: false, error: 'Unknown job: ' + params.JobId };
+
+      case 'cancelJobAsync':
+        var cancellable = mockJobs.get(params.JobId);
+        if (cancellable) {
+          cancellable.State = 'cancelled';
+          cancellable.Response = undefined;
+        }
+        return { ok: true, value: undefined };
+
+      case 'getOutdatedScanProgressAsync':
+        return {
+          ok: true,
+          value: { Stage: 'Preparing results', Percent: 100, Completed: 3, Total: 3, Active: false },
+        };
+
+      case 'updateBadgeAsync':
         return { ok: true, value: undefined };
 
       case 'showConfirmationAsync':

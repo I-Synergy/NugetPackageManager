@@ -33,7 +33,7 @@ all clients.
 - Every `async` method ends with `Async`; Lit lifecycle overrides are exempt.
 - Host RPC methods return `Result<T>` via `ok()` / `fail()`.
 - Use `@lit/task` for async work in Lit lifecycle methods.
-- No Node.js-only imports in `src/common/`.
+- No Node.js-only imports in `src/NugetPackageManager.VSCode.Common/`.
 - No raw `innerHTML`; use Lit templates and VS Code CSS variables.
 
 ## Documentation

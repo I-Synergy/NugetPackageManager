@@ -263,7 +263,21 @@ async function proxyGetPackagesAsync(services, params) {
   searchUrl.searchParams.set('semVerLevel', '2.0.0');
   const res = await fetch(searchUrl.toString());
   const data = await res.json();
-  return { ok: true, value: { Packages: (data.data || []).map(mapSearchItem) } };
+  return { ok: true, value: { Packages: sortPackages((data.data || []).map(mapSearchItem), params.Sort) } };
+}
+
+/**
+ * The host sorts results after the feed answers (`sortPackages` in host-api.ts); the dev proxy
+ * has to do the same, otherwise "Sort by" looks inert in the browser.
+ */
+function sortPackages(packages, sort) {
+  if (sort === 'downloads') {
+    return packages.sort((left, right) => (right.TotalDownloads ?? 0) - (left.TotalDownloads ?? 0));
+  }
+  if (sort === 'name-asc') {
+    return packages.sort((left, right) => String(left.Name).localeCompare(String(right.Name)));
+  }
+  return packages;
 }
 
 async function proxyGetPackageAsync(services, params, sourceUrl) {

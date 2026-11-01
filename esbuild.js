@@ -23,7 +23,7 @@ const extensionConfig = {
   platform: "node",
   mainFields: ["module", "main"],
   format: "cjs",
-  entryPoints: ["./src/host/extension.ts"],
+  entryPoints: ["./src/NugetPackageManager.VSCode.Host/extension.ts"],
   outfile: "./dist/extension.js",
   external: ["vscode"],
 };
@@ -32,7 +32,7 @@ const webConfig = {
   ...baseConfig,
   target: "es6",
   format: "esm",
-  entryPoints: ["./src/web/main.ts"],
+  entryPoints: ["./src/NugetPackageManager.VSCode.Webview/main.ts"],
   outfile: "./dist/web.js",
 };
 

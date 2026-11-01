@@ -111,6 +111,7 @@ def test_template_owned_completeness() -> bool:
         ".vscode/settings.json",
         ".gitignore",
         ".github/workflows/validate-template.yml",
+        ".github/workflows/ci.yml",
     }
 
     missing = required - owned
@@ -179,6 +180,7 @@ def test_collect_template_files() -> bool:
     expected_contains = [
         ".ai/skills/dotnet-engineer/SKILL.md",
         ".ai/skills/refactor/SKILL.md",
+        ".ai/skills/product-discovery/SKILL.md",
         ".ai/skills/design-interrogation/SKILL.md",
         ".ai/patterns/cqrs-patterns.md",
         ".ai/reference/critical-rules.md",
@@ -420,6 +422,7 @@ def test_design_interrogation_pipeline() -> bool:
     print("-" * 40)
 
     pipeline_skills = [
+        "product-discovery",
         "ubiquitous-language",
         "usecase-specification",
         "user-story",

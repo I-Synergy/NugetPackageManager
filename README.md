@@ -40,6 +40,7 @@
 - [Architecture](#architecture)
 - [Credits](#credits)
 - [License](#license)
+- [Standards Compatibility](#standards-compatibility)
 
 ---
 
@@ -492,7 +493,7 @@ Please use the [GitHub Issues](https://github.com/I-Synergy/NugetPackageManager/
 
 ### Development Setup
 
-**Prerequisites:** Node.js 19+, npm
+**Prerequisites:** Node.js 19+, npm, and .NET SDK 8+ (the `NugetPackageManager.Core*` projects target `net8.0`)
 
 ```bash
 # 1. Clone the repository
@@ -502,10 +503,13 @@ cd NugetPackageManager
 # 2. Install dependencies
 npm install
 
-# 3. Build the extension
+# 3. Build the extension bundles
 npm run esbuild
 
-# 4. Start the UI dev server (browser, no VS Code needed)
+# 4. Publish the .NET sidecar to dist/core
+npm run build:core
+
+# 5. Start the UI dev server (browser, no VS Code needed)
 npm run dev
 ```
 
@@ -526,9 +530,12 @@ npm run dev
 ```bash
 npm run lint          # Check for lint errors (ESLint 9)
 npm run lint:fix      # Auto-fix fixable issues
+npm run typecheck     # tsc over src and the TS test project
+dotnet build NugetPackageManager.slnx -c Release   # C# core
 ```
 
 - **TypeScript strict mode** — `any` is a warning, avoid it
+- **C#** — `net8.0`, nullable enabled, warnings are errors, analyzers on (`Directory.Build.props`)
 - Unused variables: prefix with `_` to suppress the warning
 - CSS in Lit components uses the `css` tagged template literal and VS Code CSS variables (`--vscode-*`)
 - All written content in English: code comments, commit messages, JSDoc, documentation
@@ -538,16 +545,20 @@ npm run lint:fix      # Auto-fix fixable issues
 ```bash
 npm test              # Full test suite (VSCode Test CLI + Mocha)
 npm run test-compile  # Compile tests to out/ (required before npm test)
+npm run test:e2e      # End-to-end: real sidecar + real dotnet against a fixture project
 ```
 
-Tests live alongside source files as `*.test.ts`. The test runner opens a headless VS Code Extension Host.
+TypeScript tests live in `tests/NugetPackageManager.VSCode.Tests/**/*.test.ts`, mirroring the
+`src/NugetPackageManager.VSCode.*` layout; C# tests are the MSTest projects under
+`tests/NugetPackageManager.Core*.Tests`. The TypeScript runner opens a headless VS Code Extension
+Host; `dotnet test NugetPackageManager.slnx` runs the C# suites.
 
 ### Quality Gate
 
 The same checks run locally and in CI (`.github/workflows/quality-gate.yml`):
 
 ```bash
-npm run quality            # build, lint (ESLint + SonarJS), type check, tests, npm audit
+npm run quality            # bundles, lint (ESLint + SonarJS), typecheck, C# build + tests, TS tests, npm audit
 npm run quality:coverage   # same, and writes coverage/lcov.info for SonarCloud
 ```
 
@@ -598,47 +609,84 @@ release-notes file is committed. See [`docs/publishing.md`](docs/publishing.md).
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
 `feat:`, `fix:`, `refactor:`, `chore:`, `docs:`, `test:`, `perf:`
 
+### AI Agent Roster
+
+AI-assisted work in this repository is orchestrated from `AGENTS.md` and delegated to the agents in
+`.ai/agents/` (mirrored into `.claude/agents`, `.github/agents` and `.reasonix/agents`):
+
+| Agent | Use for |
+|---|---|
+| `architect` | Feature design, pattern selection, component boundaries, architecture analysis |
+| `designer` | Visual design — colour, typography, spacing, branding, design tokens, contrast |
+| `reviewer` | Code quality, TypeScript/Lit and C# review, security review, architecture audit |
+| `security` | Blast-radius and exposure analysis, threat modelling, OWASP review, dependency and secret audits |
+| `tester` | Mocha/Sinon and MSTest test design, integration strategy |
+| `developer` | TypeScript and C# implementation — host, RPC, core handlers, adapters, refactoring, builds |
+| `ui-developer` | Lit components, layouts, CSS, UX patterns |
+| `ui-tester` | Playwright E2E tests, accessibility checks, visual regression |
+| `writer` | READMEs, CHANGELOG, ADRs, technical prose |
+
 ---
 
 ## Architecture
 
-The extension runs in two isolated processes that communicate via a typed RPC layer over `postMessage`:
+The extension has two isolated contexts that communicate via a typed RPC layer over `postMessage`, and delegates the NuGet domain to a .NET sidecar process:
 
 ```
 ┌─────────────────────────────────────────────┐   ┌──────────────────────────────────────────────┐
 │  VS Code Extension Host  (Node.js)           │   │  Webview  (Browser / Lit)                    │
 │                                             │   │                                              │
-│  extension.ts                               │   │  main.ts  →  nuget-package-manager (root element) │
-│  host-api.ts  ──  RpcHost                  │◄──►│  RpcClient  →  packages-view                │
-│  nuget/api.ts  (axios → NuGet API)         │   │  components/*  (@state, @property)           │
-│  utilities/  (csproj parser, decorator)    │   │  registrations.ts  (singletons)              │
+│  src/NugetPackageManager.VSCode.Host/       │   │  src/NugetPackageManager.VSCode.Webview/     │
+│  extension.ts, host-api.ts, utilities/      │◄──►│  main.ts  →  packages-view                    │
+│  nuget/  (core-process, core-client)        │   │  components/*  (@state, @property)           │
 └─────────────────────────────────────────────┘   └──────────────────────────────────────────────┘
          postMessage RPC: { type, id, method, params } / { type, id, result }
+                    │
+                    │ sidecar JSON-RPC over stdio
+                    ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│  .NET core  (dist/core, net8.0) — src/NugetPackageManager.Core*                             │
+│  Core: protocol + handlers      Core.NuGet: source client, config, advisories               │
+│  Core.Workspace: csproj model, CPM resolution, target frameworks, dependency graph          │
+└─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key design decisions:**
 
-- **Typed RPC** — `HostAPI` interface in `src/common/rpc/types.ts` is the single source of truth for all IPC. Every method returns `Result<T>` (a discriminated union), so error paths are always explicit.
+- **Typed RPC** — `HostAPI` interface in `src/NugetPackageManager.VSCode.Common/rpc/types.ts` is the single source of truth for all IPC. Every method returns `Result<T>` (a discriminated union), so error paths are always explicit.
+- **.NET sidecar** — NuGet access, the project model, CPM resolution, dependency analysis and toolchain detection live in C# (`NugetPackageManager.slnx`) and are reached over a stdio JSON protocol. A missing or failing core surfaces as a structured error, never a crashed host.
 - **Marketplace-style full-page UI** — the entire interface opens in an editor tab with framework-grouped cards, a sidebar launcher and VS Code theme-aware surfaces.
 - **Lit web components** — built with LitElement + native HTML elements styled via VS Code CSS variables. No frameworks, no heavy dependencies in the webview bundle.
-- **Dual bundle** — esbuild produces two separate bundles: `dist/extension.js` (Node.js CommonJS for the host) and `dist/web.js` (ESM for the webview).
+- **Dual bundle + sidecar** — esbuild produces two bundles, `dist/extension.js` (Node.js CommonJS for the host) and `dist/web.js` (ESM for the webview); `npm run build:core` publishes the C# sidecar to `dist/core`.
+- **One solution, both languages** — `NugetPackageManager.slnx` lists the TypeScript entry points and configs under `/TypeScript*/` solution folders so Visual Studio shows both halves; those are solution items, and `dotnet build` ignores them.
 
 **Source layout:**
 
 ```
 src/
-├── common/            # Shared between host and web (types, RPC protocol, utilities)
-│   ├── rpc/           # RpcHost, RpcClient, types, Result<T>
-│   └── types.ts       # Domain types (Package, Project, Configuration, …)
-├── host/              # Extension host (Node.js context)
-│   ├── extension.ts   # Activation, full-page WebviewPanel, activity-bar launcher
-│   ├── host-api.ts    # HostAPI implementation
-│   └── nuget/         # NuGet API client (axios), .csproj / .sln parsing
-└── web/               # Webview UI (browser context)
-    ├── main.ts         # Root element, routing
-    ├── components/     # LitElement components (packages-view, updates-view, …)
-    ├── styles/         # Shared CSS (VS Code variables, codicons, scrollbars)
-    └── registrations.ts# Module-level singletons (hostApi, router, configuration)
+├── NugetPackageManager.Core/            # .NET sidecar entry point, protocol, handlers
+├── NugetPackageManager.Core.NuGet/      # NuGet source client, nuget.config, advisories
+├── NugetPackageManager.Core.Workspace/  # csproj model, CPM, target frameworks, dependencies
+├── NugetPackageManager.VSCode.Common/   # Shared between host and web (RPC protocol, types)
+│   └── rpc/                             # RpcHost, RpcClient, types, Result<T>
+├── NugetPackageManager.VSCode.Host/     # Extension host (Node.js context)
+│   ├── extension.ts                     # Activation, full-page WebviewPanel, activity-bar launcher
+│   ├── host-api.ts                      # HostAPI implementation
+│   ├── nuget/                           # Core bridge (core-process, core-client), source adapters
+│   └── utilities/                       # CPM adapters, task executor, jobs, SDK, decorator
+└── NugetPackageManager.VSCode.Webview/  # Webview UI (browser context)
+    ├── main.ts                          # Root element, routing
+    ├── components/                      # LitElement components (packages-view, updates-view, …)
+    ├── styles/                          # Shared CSS (VS Code variables, codicons, scrollbars)
+    └── registrations.ts                 # Module-level singletons (hostApi, router, configuration)
+
+tests/
+├── NugetPackageManager.VSCode.Tests/    # TypeScript tests (Mocha + Sinon)
+├── NugetPackageManager.Core.Tests/      # MSTest — sidecar protocol and handlers
+├── NugetPackageManager.Core.NuGet.Tests/
+├── NugetPackageManager.Core.Workspace.Tests/
+└── NugetPackageManager.TestUtilities/   # Shared C# test helpers (TestPaths, TemporaryDirectory)
+    └── Fixtures/                        # MSBuild/CPM fixtures evaluated at runtime
 ```
 
 ---
@@ -656,3 +704,24 @@ NuGet Package Manager for Visual Studio Code builds on the work of:
 ## License
 
 [MIT](LICENSE)
+
+<!-- BEGIN standards-status -->
+## Standards Compatibility
+
+Engineering artifacts produced by this repository correspond to published standards, and their status
+is computed from validator runs rather than asserted. The full view — what is produced, what is
+aligned in practice only, and what stays outside a code repository's reach — is in
+[`COMPLIANCE.md`](COMPLIANCE.md).
+
+| Compatibility | Meaning | Standards |
+|---|---|---|
+| **Evidence** | An artifact a certification auditor can sample directly | *(none)* |
+| **Aligned** | Engineering practice follows the standard's model; no audit artifact is produced | ISO/IEC/IEEE 29119-3:2021, ISO/IEC 25010:2023 |
+| **Organizational** | Certifiable only at organization level; this repository supplies nothing for it | ISO/IEC 27001, ISO/IEC 27701 / ISO/IEC 27017 / ISO/IEC 27018, ISO 9001, ISO/IEC 15504 / ISO/IEC 33001, IEC 62304, ISO/IEC 42001 |
+
+**This is not a certification and it asserts no conformity with any standard.** Certification is
+issued by an accredited third-party body after auditing an organizational management system; it
+cannot be established by a code repository.
+
+<!-- standards-status: source=.ai/reference/standards.md generated=2026-11-01 revision=389efd0 validators=none -->
+<!-- END standards-status -->

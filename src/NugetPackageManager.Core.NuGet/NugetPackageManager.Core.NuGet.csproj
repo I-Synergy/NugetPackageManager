@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>NugetPackageManager.Core.NuGet</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="NugetPackageManager.Core.NuGet.Tests" />
+  </ItemGroup>
+
+  <!-- Versions come from Directory.Packages.props. -->
+  <ItemGroup>
+    <PackageReference Include="NuGet.Configuration" />
+    <PackageReference Include="NuGet.Frameworks" />
+    <PackageReference Include="NuGet.Protocol" />
+    <PackageReference Include="NuGet.Versioning" />
+  </ItemGroup>
+
+</Project>

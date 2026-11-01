@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "sources": {
+    "template": {
+      "repo": "I-Synergy/AI",
+      "ref": "2026.11101.11332",
+      "resolve": "remote"
+    },
+    "aspire-skills": {
+      "repo": "microsoft/aspire-skills",
+      "ref": "main",
+      "resolve": "remote",
+      "license": "MIT"
+    },
+    "awesome-copilot": {
+      "repo": "github/awesome-copilot",
+      "ref": "main",
+      "resolve": "remote",
+      "license": "MIT"
+    },
+    "dotnet-maui": {
+      "repo": "dotnet/maui-labs",
+      "ref": "main",
+      "resolve": "remote",
+      "license": "MIT",
+      "paths": {
+        "skill": [
+          "plugins/dotnet-maui/skills"
+        ],
+        "agent": [
+          ".github/agents"
+        ],
+        "instruction": [
+          ".github/instructions"
+        ],
+        "plugin": [],
+        "hook": []
+      }
+    },
+    "dotnet-maui-tooling": {
+      "repo": "dotnet/maui-labs",
+      "ref": "main",
+      "resolve": "remote",
+      "license": "MIT",
+      "paths": {
+        "skill": [
+          "plugins/dotnet-maui-tooling/skills"
+        ],
+        "agent": [],
+        "instruction": [],
+        "plugin": [],
+        "hook": []
+      }
+    }
+  },
+  "clients": [
+    "claude",
+    "copilot",
+    "reasonix"
+  ],
+  "skills": [
+    "api-endpoints",
+    "api-security",
+    "architect",
+    "blazor-fluentui",
+    "blazor-specialist",
+    "blazor-theme-generator",
+    "book-to-skill",
+    "code-reviewer",
+    "council",
+    "css-theme-generator",
+    "database-migration",
+    "design-interrogation",
+    "devops-engineer",
+    "dotnet-engineer",
+    "gap-review",
+    "hugo",
+    "integration-specialist",
+    "keycloak-theme-colors",
+    "maui-apple-design",
+    "maui-blazor",
+    "maui-specialist",
+    "mobile-release",
+    "performance-engineer",
+    "playwright-tester",
+    "refactor",
+    "security",
+    "skill-creator",
+    "software-security",
+    "solution-generator",
+    "technical-writer",
+    "ubiquitous-language",
+    "ui-blazor",
+    "ui-core",
+    "ui-maui",
+    "ui-uwp",
+    "ui-winui",
+    "ui-wpf",
+    "unit-tester",
+    "upgrade-template",
+    "usecase-specification",
+    "user-story",
+    "verify-config",
+    "vertical-slices",
+    "winui-specialist",
+    "xaml-theme-generator"
+  ],
+  "agents": [
+    "architect",
+    "designer",
+    "developer",
+    "reviewer",
+    "security",
+    "tester",
+    "ui-developer",
+    "ui-tester",
+    "writer"
+  ],
+  "instructions": [],
+  "prompts": [],
+  "plugins": [],
+  "hooks": [],
+  "materialize": "copy",
+  "exclude": [],
+  "locked": []
+}

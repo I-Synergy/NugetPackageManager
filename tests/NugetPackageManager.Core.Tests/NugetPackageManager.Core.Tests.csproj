@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>NugetPackageManager.Core.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <!-- Test stack: MSTest is the project standard (.ai/reference/forbidden-tech.md
+       forbids xUnit and NUnit); Moq for isolation. Versions are central. -->
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Moq" />
+    <PackageReference Include="MSTest.TestAdapter" />
+    <PackageReference Include="MSTest.TestFramework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NugetPackageManager.Core\NugetPackageManager.Core.csproj" />
+    <ProjectReference Include="..\..\src\NugetPackageManager.Core.NuGet\NugetPackageManager.Core.NuGet.csproj" />
+    <ProjectReference Include="..\NugetPackageManager.TestUtilities\NugetPackageManager.TestUtilities.csproj" />
+  </ItemGroup>
+
+</Project>

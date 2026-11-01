@@ -2,18 +2,28 @@
 
 ## Runtime & Language
 
-- **Runtime**: Node.js v19+ (host), Browser (webview)
-- **Language**: TypeScript 5.x (`strict: true`)
+- **Runtime**: Node.js v19+ (host), Browser (webview), .NET 8 (sidecar core, `net8.0` with `RollForward=LatestMajor`)
+- **Languages**: TypeScript 5.x (`strict: true`) for the extension; C# (`LangVersion=latest`, nullable enabled, warnings as errors) for the core
 - **Node.js requirement**: v19+ for `globalThis.crypto.randomUUID()`
+
+## .NET Core Projects
+
+| Project | Purpose |
+|---|---|
+| `src/NugetPackageManager.Core` | Sidecar entry point, JSON protocol, handlers |
+| `src/NugetPackageManager.Core.NuGet` | NuGet source client, nuget.config resolution, advisories |
+| `src/NugetPackageManager.Core.Workspace` | csproj model, CPM resolution/writer, target frameworks, dependency graph |
+
+MSTest for all C# tests; the sidecar is published to `dist/core` by `npm run build:core`.
 
 ## Core Dependencies
 
 | Category | Package | Version | Notes |
 |----------|---------|---------|-------|
 | **UI Framework** | `lit` | ^3.3.2 | LitElement web components |
-| **HTTP Client** | `axios` | ^1.7.4 | NuGet API calls, proxy/auth support |
-| **XML Parsing** | `@xmldom/xmldom` | ^0.8.10 | Parse `.csproj` / `.sln` files |
-| **XML Queries** | `xpath` | ^0.0.34 | XPath queries over parsed XML |
+| **HTTP Client** | `axios` | ^1.7.4 | Host-side HTTP (SDK install, local feed helpers) |
+| **XML Parsing** | `@xmldom/xmldom` | ^0.8.15 | Host-side XML (`nuget.config`, local `.nupkg` metadata) |
+| **XML Queries** | `xpath` | ^0.0.35 | XPath queries over host-side parsed XML |
 | **Layout** | `split.js` | ^1.6.5 | Resizable panes in main 3-panel view |
 | **Concurrency** | `async-mutex` | ^0.5.0 | Serialize dotnet task execution |
 | **Telemetry** | `@opentelemetry/*` | various | Opt-in anonymous usage telemetry, OTLP |
@@ -42,10 +52,12 @@
 | Decision | Choice | Reason |
 |----------|--------|--------|
 | IPC | typed RPC over `postMessage` | Only reliable cross-process channel in VS Code |
+| NuGet domain | C# sidecar over stdio JSON-RPC | Reuses the NuGet SDK and MSBuild-aware project evaluation; keeps the Node host to plumbing |
 | UI | Lit (LitElement) | Lightweight, no virtual DOM, native web components |
 | HTTP | axios (not `fetch`) | Proxy/auth support needed for private NuGet feeds |
-| XML | `@xmldom/xmldom` + `xpath` | Robust `.csproj` parsing with namespace-aware XPath |
+| XML | `@xmldom/xmldom` + `xpath` (host-side only) | `nuget.config` and local-feed work; project files are parsed in the core |
 | Dotnet integration | `child_process.spawn` | Real-time stdout streaming for progress bars |
+| Sidecar packaging | Framework-dependent IL, launched as `dotnet <dll>` | One universal VSIX for every OS/arch (the user also runs macOS). Measured 2026-11-01: ReadyToRun is 2.5x the size for 0 ms startup gain; trimming is 6.6x and needs source-generated JSON — both are per-RID. See `.ai/completed/sidecar-packaging-comparison.md`. |
 | Testing | `@vscode/test-cli` + Mocha | Required to test VS Code API interactions |
 
 ## VS Code Extension Manifest
