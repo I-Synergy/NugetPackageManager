@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NugetPackageManager.Core/NugetPackageManager.Core.csproj" />
+    <Project Path="src/NugetPackageManager.Core.NuGet/NugetPackageManager.Core.NuGet.csproj" />
+    <Project Path="src/NugetPackageManager.Core.Workspace/NugetPackageManager.Core.Workspace.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NugetPackageManager.Core.Tests/NugetPackageManager.Core.Tests.csproj" />
+    <Project Path="tests/NugetPackageManager.Core.NuGet.Tests/NugetPackageManager.Core.NuGet.Tests.csproj" />
+    <Project Path="tests/NugetPackageManager.Core.Workspace.Tests/NugetPackageManager.Core.Workspace.Tests.csproj" />
+  </Folder>
+</Solution>

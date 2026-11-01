@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>NugetPackageManager.Core.Workspace</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    The workspace model: project discovery, .csproj/.props reading, CPM resolution and target
+    framework evaluation. Kept separate from Core.NuGet so the package-source adapter and the
+    project model can evolve (and be tested) independently.
+  -->
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="NugetPackageManager.Core.Workspace.Tests" />
+  </ItemGroup>
+
+</Project>

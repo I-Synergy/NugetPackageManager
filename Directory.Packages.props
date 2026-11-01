@@ -1,0 +1,33 @@
+<Project>
+
+  <!--
+    Central package versions for the C# projects in this repository.
+
+    This file is discovered by every project below the root, which is why the
+    `__fixtures__` tree opts out explicitly: those `.csproj` files are test data the extension
+    evaluates at runtime, and they declare their own package versions.
+  -->
+  <PropertyGroup>
+    <IsSidecarProject>true</IsSidecarProject>
+    <IsSidecarProject Condition="$(MSBuildProjectFullPath.Contains('__fixtures__'))">false</IsSidecarProject>
+    <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' == 'true'">true</ManagePackageVersionsCentrally>
+    <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' != 'true'">false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsSidecarProject)' == 'true'">
+    <!-- NuGet client libraries: the reason this project exists. -->
+    <PackageVersion Include="NuGet.Configuration" Version="7.9.0" />
+    <PackageVersion Include="NuGet.Frameworks" Version="7.9.0" />
+    <PackageVersion Include="NuGet.Protocol" Version="7.9.0" />
+    <PackageVersion Include="NuGet.Versioning" Version="7.9.0" />
+
+    <!-- Test stack: MSTest is the project standard (.ai/reference/forbidden-tech.md
+         forbids xUnit and NUnit); Moq for isolation. -->
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="Moq" Version="4.21.0" />
+    <PackageVersion Include="MSTest.TestAdapter" Version="4.5.2" />
+    <PackageVersion Include="MSTest.TestFramework" Version="4.5.2" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,46 @@
+<Project>
+
+  <!--
+    Shared build settings for the C# projects in this repository.
+
+    The file lives at the repository root because the projects are under `src/` and
+    `tests/`. It must not reach the MSBuild fixtures under
+    `**/__fixtures__/**`: those are inputs the extension evaluates at runtime (CPM and
+    target-framework resolution), and they must keep the settings they declare.
+  -->
+  <PropertyGroup>
+    <IsSidecarProject>true</IsSidecarProject>
+    <IsSidecarProject Condition="$(MSBuildProjectFullPath.Contains('__fixtures__'))">false</IsSidecarProject>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsSidecarProject)' == 'true'">
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Rules enforced by the compiler, not by review. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+
+    <!--
+      The sidecar is published framework-dependent so one build serves every OS and
+      architecture. RollForward=LatestMajor lets a net8.0 build run on the .NET
+      9/10/11 runtime the user already has, so the installed (patched) runtime is the
+      one that executes.
+    -->
+    <RollForward>LatestMajor</RollForward>
+
+    <Deterministic>true</Deterministic>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!--
+      GenerateDocumentationFile is required for IDE0005 to run during build.
+      CS1591 (missing XML comment) is disabled: not every public member needs one.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>
