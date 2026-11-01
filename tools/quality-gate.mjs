@@ -176,6 +176,7 @@ if (coverage) {
   rmSync(join(ROOT, "coverage"), { recursive: true, force: true });
 }
 
+/** Labels of the steps that failed, in run order. @type {string[]} */
 const failed = [];
 for (const [label, command, commandArgs, options] of steps) {
   if (!run(label, command, commandArgs, options)) {
