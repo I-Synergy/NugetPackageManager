@@ -1,6 +1,6 @@
 # Plan: move host logic from TypeScript to C#
 
-**Status:** IN PROGRESS
+**Status:** COMPLETE — Waves A–F landed
 **Branch:** `spike/blazor-wasm-webview`
 **Date:** 2026-11-01
 **Predecessor:** `.ai/plans/nuget-core-sidecar-slice.md`
@@ -32,11 +32,11 @@ HTTP, restore-diagnostics parsing, toolchain probing — and a .NET process can 
 | Wave | Modules | Lines | Stays TS because |
 |---|---|---|---|
 | **A — done** | transport (`NdjsonServer`), core client, advisories | — | — |
-| **B — now** | `nuget/api.ts`, `nuget/local-feed.ts`, `nuget/http-cache.ts`, `nuget/source-api.ts` | 568 + 263 + 103 + 56 = **990** | — |
-| **C** | `utilities/project-parser.ts`, `project-framework-resolver.ts`, `cpm-resolver.ts`, `cpm-condition.ts`, `cpm-conditional.ts`, `project-scope.ts` | 109 + 366 + 933 + 470 + 209 + 29 = **2,116** | — |
-| **D** | `utilities/dependency-graph.ts`, `requirement-closure.ts`, `version.ts` | 242 + 220 + 133 = **595** | — |
-| **E** | `utilities/dotnet-failure.ts`, `restore-diagnostics.ts`, `dotnet-context.ts` | 273 + 182 + 184 = **639** | — |
-| **F** | `utilities/toolchain-health.ts`, `sdk-check.ts`, `sdk-locations.ts`, `sdk-install.ts`, `workload-commands.ts`, `global-json.ts` | 482 + 131 + 130 + 179 + 85 + 428 = **1,435** | — |
+| **B — done** | `nuget/api.ts`, `nuget/http-cache.ts`, `nuget/source-api.ts`; `local-feed.ts` remains | 568 + 103 + 56 = **727** | local `.nupkg` reading |
+| **C — done** | `utilities/project-parser.ts`, `project-framework-resolver.ts`, `cpm-resolver.ts`, `cpm-condition.ts` | 109 + 366 + 933 + 470 = **1,878** | — |
+| **D — done** | `utilities/dependency-graph.ts`, `requirement-closure.ts` | 242 + 220 = **462** | `version.ts` (see Wave D) |
+| **E — done** | `utilities/restore-diagnostics.ts`, `dotnet-failure.ts` | 182 + 273 = **455** | `dotnet-context.ts` (see Wave E) |
+| **F — done** | `utilities/global-json.ts`, `toolchain-health.ts`, `sdk-check.ts` (parsing/detection) | 298 + 187 + 96 = **581** | invocation/path plumbing: `sdk-install.ts`, `workload-commands.ts`, `sdk-locations.ts`, `dotnet-context.ts` |
 | — | `extension.ts`, `host-api.ts` (shrinks to delegation), `package-version-decorator.ts`, `password-script-executor.ts`, `scan-cache.ts`, `status-bar-utils.ts`, `operation-jobs.ts`, `task-executor.ts`, `nuget/api-factory.ts` | ~5,600 | `vscode` API, trust boundary, cancellation, progress streaming |
 
 Total that can move: **≈ 5,775 lines**, plus roughly half of `host-api.ts` dissolving into
@@ -125,16 +125,27 @@ The golden files immediately caught one bug the port would otherwise have shippe
 attribute regex captured the quoted value instead of the `Version =` prefix, so the first
 replacement emitted a malformed tag.
 
-**What still remains in TypeScript.** `cpm-resolver.ts` is now read-only in production: its
-`FindCpmFilePathAsync`, `ParseCpmFileAsync` and `ResolveVersions` feed the host's scope decisions,
-and `cpm-condition.ts` supplies `getTfmMajorVersion`. Both are duplicated by the C# side already
-(`CpmPropsReader`, `CpmCondition`), so the finish is a `getCpmMap` handler plus `getTfmMajorVersion`
-inlined — not new logic, just moving the last readers over.
+**C2 part 3 — the CPM read path is ported, so C2 is closed.** `CpmPropsReader` was already
+exposed as `getCpmMap`; `utilities/cpm-reader.ts` is the thin host adapter (mirroring
+`cpm-writer.ts`) that walks to the nearest `Directory.Packages.props`, keeps the
+`ManagePackageVersionsCentrally` opt-out check, and turns the wire shape back into `Map`s.
+`getTfmMajorVersion` is now a three-line helper in `host-api.ts`. All read call sites — batch
+scope, consolidation, project updates, cleanup, conflict preflight/repair, `updateCentralVersions`
+— go through `CpmReader`, and `cpm-resolver.ts` (933 lines), `cpm-condition.ts` (470 lines) and
+their tests are deleted. The only remaining behaviour not delegated to the core is the directory
+walk and the opt-out check, which are workspace file look-ups rather than parsing.
 
-One test seam is worth knowing about: `host-api.test.ts` bridges the core's write methods to the
-TypeScript writer so the orchestration tests (rollback, job state, conflict attribution) can still
-assert what landed on disk. That bridge disappears with `cpm-resolver.ts`; those tests will then
-assert the calls the host makes, with the writing itself pinned by the golden files.
+**Test seam.** `host-api.test.ts` no longer bridges the core's write methods to a TypeScript
+writer. Its core stub records the request (`updateCpmVersions`, `updatePackageVersion`,
+`removePackageVersion`) and the orchestration tests assert on that call — scope, condition,
+target file and ordering — while the writing itself is pinned by the core's golden files. Where a
+test is about rollback, it installs a test-local `stubCoreCall` that simulates the write so the
+restore failure still has something to undo. CPM reads in those tests are answered by an explicit
+fixture map (`FIXTURE_MAPS`) instead of a second parser.
+
+`utilities/cpm-reader.test.ts` covers the new adapter seams (directory walk, opt-out check,
+wire→`Map` conversion, membership helpers); condition evaluation, last-match-wins and per-TFM
+resolution remain pinned by `Core.Workspace.Tests`.
 
 Two porting notes worth keeping. `System.Text.Json` and the compiler are stricter than the
 TypeScript: `switch` expressions over enums need a `_` arm (CS8524) while the style analyzer
@@ -142,21 +153,101 @@ wants every arm spelled out (IDE0072), so exhaustive switches became `if` chains
 repository's `.editorconfig` names private and static-readonly fields in camelCase, which is why
 the ported code differs from the class template in `.ai/reference/templates/`.
 
-### Wave D — dependency semantics
+### Wave D — dependency semantics (DONE)
 
-`NuGet.Versioning` and `NuGet.Frameworks` replace the hand-written comparators and TFM
-matchers. This is the wave with the clearest .NET win and the least code volume.
+`NuGet.Versioning` and `NuGet.Frameworks` now own the version and framework rules for the
+dependency operations. In `Core.Workspace/Dependencies`:
 
-### Wave E — diagnostics
+| Piece | Replaces | Tests |
+|---|---|---|
+| `AssetsGraph.cs` — assets reading, direct references, redundant/pinned analysis | `dependency-graph.ts` (242 lines) | 10 |
+| `RequirementClosure.cs` — closure walk, per-TFM conflicts, apply order | `requirement-closure.ts` (220 lines) | 9 |
+| `VersionSemantics.cs` (internal) — `NuGetVersion` ordering, `VersionRange` bounds/matching | the comparator inside those modules | 4 |
 
-Restore-output parsing and failure classification. Requires the sidecar to receive the raw
-`dotnet` output rather than spawning itself, so the existing job/cancellation plumbing and
-progress streaming stay in TypeScript.
+New handlers (`DependencyHandlers`): `analyzeProjectDependencies`,
+`getRestoredDirectDependencies`, `computeRequirementClosure`, `orderRequirements`. The closure
+handler fetches dependency metadata from the configured sources itself (same source-order and
+exact-version match as before, with the proxy passed in), and TFM group selection uses
+`NuGetFramework` (exact group first, then the same `net` major line). The preflight converts
+`IsConstrained` into per-TFM id sets plus a `constrainAll` flag; `OrderRequirements` stays one
+RPC per preflight, not one per comparison.
 
-### Wave F — toolchain
+**`version.ts` deliberately stays in TypeScript.** Principle 1 of this plan forbids porting
+primitives: `compareVersions`, `isVersionInRange` and `satisfiesVersionRange` are used inside
+host-side loops (the outdated scan, vulnerability matching, dependency constraints) and sort
+comparators, and in `local-feed.ts` (Wave B remainder) and the toolchain modules (Wave F).
+Replacing them would mean moving those whole operations — a much larger change than this wave.
+They move when their last consumer does; no second dependency algorithm remains in C#.
 
-SDK/`global.json`/workload detection. `dotnet` invocation stays in the host for progress;
-the sidecar receives command output and returns structured findings.
+Verification: `dotnet test` 134/134 (89 workspace, 31 core, 14 NuGet) and the remaining
+TypeScript suite passes; `npm run typecheck`, `npm run lint` and `npm run esbuild` clean. The 15
+deleted TypeScript cases are covered by the new C# suites.
+
+### Wave E — diagnostics (DONE)
+
+The sidecar now classifies captured `dotnet` output; the host still spawns the process and
+streams progress. In `Core/Diagnostics`:
+
+| Piece | Replaces | Tests |
+|---|---|---|
+| `RestoreOutput.cs` — NU1107/NU1605/NU1109/NU1608/NU1102 parsing, chains, formatting, summary | `restore-diagnostics.ts` (182 lines) | 10 |
+| `DotnetFailureClassifier.cs` — kind, summary, hint, detail, pinned/missing SDK, audit, source and credential causes | `dotnet-failure.ts` (273 lines) | 6 |
+
+New handler: `classifyDotnetFailure` (output + project path, pinned SDK and `global.json` path
+supplied by the host). `utilities/dotnet-failure.ts` is now a thin adapter
+(`ClassifyDotnetFailureAsync`) and `TaskExecutor` awaits it after the child settles; a core
+failure degrades to `Unknown` rather than replacing the real error. The host maps the wire shape
+directly (`ToFailureInfo` disappeared), and restore attribution reads `Conflicts[].Chains`.
+
+**`dotnet-context.ts` stays in TypeScript.** It resolves the spawn working directory and the
+`dotnet` host synchronously, before every `dotnet` invocation, and it selects the extension's
+private install (`sdk-locations`, Wave F). Moving it would either put an RPC in front of every
+spawn or duplicate the private-install lookup. The classifier receives its two facts
+(`PinnedSdkVersion`, `GlobalJsonPath`) from the host context instead of parsing `global.json`
+again.
+
+Verification: `dotnet test` 150/150 (89 workspace, 47 core, 14 NuGet), `npm test` 395 passing,
+`npm run typecheck`, `npm run lint` and `npm run esbuild` clean.
+
+### Wave F — toolchain (DONE)
+
+The host still spawns every `dotnet` command (progress, cancellation, the private install); the
+core receives the captured output and returns findings, and it owns the `global.json` write. In
+`Core/Toolchain`:
+
+| Piece | Replaces | Tests |
+|---|---|---|
+| `GlobalJson.cs` — comment/BOM-tolerant parse, validation, feature band, coherent surgical edit with canonical fallback | the edit path of `global-json.ts` (428 lines) | 10 |
+| `ToolchainAnalysis.cs` — `--list-sdks` merge, pin satisfaction, MSBuild property, `sdk check` tables, orphaned manifest bands, the whole `ToolchainHealth` decision | parsing in `toolchain-health.ts` (482) + `sdk-check.ts` (131) | 13 |
+
+New handlers: `updateGlobalJsonSdkVersion`, `evaluateToolchain`. `global-json.ts`,
+`toolchain-health.ts` and `sdk-check.ts` are now host adapters: template creation, process
+spawning, the `sdk check` cache and the clipboard diagnostics report. Parsing helpers
+(`SdkSatisfiesPin`, `ParseSdkList`, `MergeInstalledSdks`, `ParseMsBuildProperty`,
+`ParseSdkCheckOutput`, `FindSdkStatus`, `DetectOrphanedManifestBands`) are deleted from
+TypeScript and pinned by the C# suites.
+
+**What stays in TypeScript by design.** `sdk-locations.ts` (which host to spawn, private install
+lookup — synchronous, before every spawn), `sdk-install.ts` (downloads and runs Microsoft's
+install script — the trust boundary), `workload-commands.ts` and `dotnet-context.ts` (spawn
+context). `RedactDiagnostics` stays with the report formatter because it is a presentation
+concern applied to host-side diagnostics text.
+
+Verification: `dotnet test` 172/172 (89 workspace, 69 core, 14 NuGet), TypeScript suite passing,
+`npm run typecheck`, `npm run lint` and `npm run esbuild` clean.
+
+## Final state
+
+All six waves landed. The sidecar owns the NuGet source client, the project/CPM model, the
+dependency operations, `dotnet` failure classification, toolchain detection and the
+`global.json` write. The host keeps what only it can do (activation, `vscode` state, spawning,
+progress, cancellation, trust boundary) plus a small set of deliberate primitives:
+`version.ts`, `dotnet-context.ts`, `sdk-locations.ts`, `sdk-install.ts`,
+`workload-commands.ts`, `local-feed.ts` and the clipboard diagnostics report. The core adapters
+are `cpm-reader.ts`, `cpm-writer.ts`, `dotnet-failure.ts` and `global-json.ts`.
+
+Verification: `npm run quality` PASS (8/8: build, lint, typecheck, tests, C# build, C# tests,
+audit), `dotnet test` 172/172, `npm test` 374 passing.
 
 ## Test data
 

@@ -63,7 +63,7 @@ class NuGetApiFactory {
  * Proxy from VS Code's `http.proxy`, falling back to the environment. Read here rather
  * than in the core: it is a host setting, and the sidecar must not pick its own network path.
  */
-function ReadProxyUrl(): string | undefined {
+export function ReadProxyUrl(): string | undefined {
   const configured = vscode.workspace.getConfiguration().get<string>("http.proxy");
   if (configured !== undefined && configured !== "") {
     return configured;

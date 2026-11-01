@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NugetPackageManager.Core.NuGet\NugetPackageManager.Core.NuGet.csproj" />
+    <ProjectReference Include="..\NugetPackageManager.TestUtilities\NugetPackageManager.TestUtilities.csproj" />
   </ItemGroup>
 
 </Project>

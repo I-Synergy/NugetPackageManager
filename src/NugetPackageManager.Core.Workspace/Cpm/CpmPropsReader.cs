@@ -39,9 +39,9 @@ public sealed record CpmVersionResolution(
 /// <summary>
 /// Reads <c>Directory.Packages.props</c> and resolves package versions per target framework.
 ///
-/// This is the read half of the TypeScript `CpmResolver`: the write half
-/// (<c>UpdateCpmVersionsAsync</c> and its verification pass) is deliberately not ported, because
-/// its atomic single-read/write semantics are the most delicate code in the repository.
+/// This is the read half of the former TypeScript `CpmResolver`; the write half lives in
+/// <c>CpmWriter</c>. The TypeScript twins have been deleted, so this file and <c>CpmWriter</c>
+/// are the only CPM implementations.
 /// </summary>
 public static class CpmPropsReader
 {

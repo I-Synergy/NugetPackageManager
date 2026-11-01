@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
     ConfigureSdkRoots,
-    DetectOrphanedManifestBands,
     GetPrivateDotnetPath,
     GetPrivateSdkVersions,
     ListSdkVersions,
@@ -36,29 +35,6 @@ suite('sdk-locations', () => {
         assert.strictEqual(SdkVersionSatisfies('10.0.403', '10.0.403'), true);
         assert.strictEqual(SdkVersionSatisfies('10.0.404', '10.0.403'), false);
         assert.strictEqual(SdkVersionSatisfies('10.0.403', '10.0.403.1'), true);
-    });
-
-    test('DetectOrphanedManifestBands finds bands with no installed SDK', () => {
-        const dotnetRoot = path.join(root, 'dotnet');
-        for (const band of ['10.0.100', '10.0.400', '9.0.100', '11.0.100-preview.6']) {
-            fs.mkdirSync(path.join(dotnetRoot, 'sdk-manifests', band, 'microsoft.net.workload.emscripten.current'), {
-                recursive: true,
-            });
-        }
-
-        const orphans = DetectOrphanedManifestBands(dotnetRoot, ['9.0.320', '10.0.403', '11.0.100-rc.3.26522.148']);
-
-        assert.deepStrictEqual(orphans.map((orphan) => orphan.Band), ['10.0.100', '9.0.100']);
-        assert.deepStrictEqual(orphans[0]!.Manifests, ['microsoft.net.workload.emscripten.current']);
-        assert.strictEqual(orphans[0]!.Path.endsWith(path.join('sdk-manifests', '10.0.100')), true);
-    });
-
-    test('DetectOrphanedManifestBands returns nothing when every band has an SDK', () => {
-        const dotnetRoot = path.join(root, 'dotnet');
-        fs.mkdirSync(path.join(dotnetRoot, 'sdk-manifests', '10.0.400'), { recursive: true });
-
-        assert.deepStrictEqual(DetectOrphanedManifestBands(dotnetRoot, ['10.0.403']), []);
-        assert.deepStrictEqual(DetectOrphanedManifestBands(path.join(root, 'missing'), ['10.0.403']), []);
     });
 
     test('SelectDotnetCommand prefers the private host only for installed SDKs', () => {

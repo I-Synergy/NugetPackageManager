@@ -20,6 +20,21 @@ VSCode Extension Host (Node.js)            VSCode Webview (Browser)
 
 VS Code extensions run host-side code in Node.js and UI in a sandboxed browser context (webview). They cannot share memory — all communication must be via message passing.
 
+## .NET Sidecar Core
+
+The NuGet domain is implemented in C# and shipped as a sidecar process:
+
+| Project | Owns |
+|---|---|
+| `src/NugetPackageManager.Core` | Sidecar entry point (`Program.cs`), JSON protocol, request handlers, `dotnet` failure classification, toolchain detection, NuGet config resolution |
+| `src/NugetPackageManager.Core.NuGet` | NuGet source client — search, registration, dependency groups, advisories; `nuget.config` discovery, parsing and merging |
+| `src/NugetPackageManager.Core.Workspace` | Project model — csproj reading, CPM resolution per framework, target-framework evaluation, CPM writer, dependency graph |
+
+- Published by `npm run build:core` to `dist/core` (`NugetPackageManager.Core.dll`), framework-dependent `net8.0` with `RollForward=LatestMajor`.
+- Started once per extension host by `src/NugetPackageManager.VSCode.Host/nuget/core-process.ts`; calls go through `CoreClient` (`core-client.ts`) as JSON-RPC over stdio.
+- A missing runtime or binary surfaces as a `CoreError` with code `unavailable`; callers report it instead of crashing.
+- The TypeScript half keeps only host plumbing: VS Code activation, RPC jobs, status bar, local `.nupkg` feed, SDK install/workload commands, and thin core adapters (`cpm-reader.ts`, `cpm-writer.ts`, `dotnet-failure.ts`, `global-json.ts`).
+
 ## Typed RPC Layer
 
 All host ↔ webview communication uses a typed RPC contract:

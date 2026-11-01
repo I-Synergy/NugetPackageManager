@@ -84,7 +84,8 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
             return cached.Package;
         }
 
-        var leaves = await ReadRegistrationLeavesAsync(indexUrl, cancellationToken).ConfigureAwait(false);
+        var leaves = await ReadRegistrationLeavesAsync(indexUrl, cancellationToken, "packageNotFound")
+            .ConfigureAwait(false);
 
         var package = PackageMapping.MapRegistration(leaves, prerelease) ?? throw new NuGetSourceException(
             "packageNotFound",
@@ -180,12 +181,13 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
     /// <summary>Reads the registration leaves, following pages that are not embedded.</summary>
     private async Task<List<JsonElement>> ReadRegistrationLeavesAsync(
         string indexUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string notFoundCode = "sourceUnreachable")
     {
         var leaves = new List<JsonElement>();
 
         using var index = await http
-            .GetJsonAsync(indexUrl, cancellationToken, AuthorizationFor)
+            .GetJsonAsync(indexUrl, cancellationToken, AuthorizationFor, notFoundCode)
             .ConfigureAwait(false);
 
         if (!index.RootElement.TryGetProperty("items", out var pages) || pages.ValueKind != JsonValueKind.Array)

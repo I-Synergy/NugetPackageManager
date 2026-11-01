@@ -61,11 +61,11 @@ Read the matching reference before writing the component — each carries the fu
 
 ### Build a component or page
 
-Read `references/components.md` — the `BudgetCard` component (`[Parameter]`, `EventCallback`, `EditorRequired`) and the `@inherits` code-behind page with loading/error/empty states.
+Read `references/components.md` — the `{Entity}Card` component (`[Parameter]`, `EventCallback`, `EditorRequired`) and the `@inherits` code-behind page with loading/error/empty states.
 
 ### Build a form or call the API
 
-Read `references/forms-and-services.md` — `EditForm` + `DataAnnotationsValidator` + `SupplyParameterFromForm`, and the typed `IBudgetService` HTTP client.
+Read `references/forms-and-services.md` — `EditForm` + `DataAnnotationsValidator` + `SupplyParameterFromForm`, and the typed `I{Entity}Service` HTTP client.
 
 ### Add global state or call JavaScript
 

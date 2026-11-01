@@ -13,8 +13,8 @@ Translates a completed architecture document into a .NET solution scaffold — p
 |-------|--------|------|
 | Architecture document | `docs/architecture/{SolutionName}-architecture.md` | Primary input — all parameters derived from here |
 | Ubiquitous Language | `UBIQUITOUS_LANGUAGE.md` | Domain naming, aggregate identification |
-| Use Cases | `docs/bounded-contexts/{BC}/use-cases.md` | Each use case → CQRS Command or Query stub |
-| User Stories | `docs/bounded-contexts/{BC}/user-stories.md` | Acceptance criteria → test stubs |
+| Use Cases | `docs/bounded-contexts/{Domain}/use-cases.md` | Each use case → CQRS Command or Query stub |
+| User Stories | `docs/bounded-contexts/{Domain}/user-stories.md` | Acceptance criteria → test stubs |
 | Session Decisions | `docs/session-decisions.md` | Technology and pattern choices |
 
 ## Generation Steps
@@ -40,9 +40,9 @@ Translates a completed architecture document into a .NET solution scaffold — p
 
 7. **Generate test stubs** — one test class per handler, every stub traced to the acceptance
    criterion it is evidence for:
-   - a `// Traces: US-{BC}-{NNN} / AC-{BC}-{NNN}.{n}, AC-{BC}-{NNN}.{m}` header line directly
+   - a `// Traces: US-{Domain}-{NNN} / AC-{Domain}-{NNN}.{n}, AC-{Domain}-{NNN}.{m}` header line directly
      below the `// File:` line
-   - exactly one `[TestCategory("AC-{BC}-{NNN}.{n}")]` per test method, with `[TestMethod]`
+   - exactly one `[TestCategory("AC-{Domain}-{NNN}.{n}")]` per test method, with `[TestMethod]`
      written first
    - at least one test method per acceptance criterion the slice's `source` references — from
      `source.acceptance_criteria`, or from the criteria of its `source.user_stories` when that
@@ -58,10 +58,10 @@ Generate this layout for each bounded context, following the reference architect
 
 ```
 src/
-├── {Solution}.Contracts.{BC}/
-├── {Solution}.Entities.{BC}/
-├── {Solution}.Models.{BC}/
-├── {Solution}.Domain.{BC}/
+├── {Solution}.Contracts.{Domain}/
+├── {Solution}.Entities.{Domain}/
+├── {Solution}.Models.{Domain}/
+├── {Solution}.Domain.{Domain}/
 │   ├── Features/
 │   │   └── {Entity}/
 │   │       ├── Commands/
@@ -79,9 +79,9 @@ src/
 │   │   └── {Entity}.cs
 │   └── Extensions/
 │       └── ServiceCollectionExtensions.cs
-└── {Solution}.Services.{BC}/
+└── {Solution}.Services.{Domain}/
 tests/
-└── {Solution}.{BC}.Tests/
+└── {Solution}.{Domain}.Tests/
 ```
 
 ## CQRS Stubs
@@ -96,12 +96,15 @@ Key rules (from AGENTS.md Critical Coding Rules):
 - All mapping is manual — use `/* map entity to {Entity} model */` placeholders
 - Always include `CancellationToken` on all async methods
 - Responses wrap model types — never return domain entities directly
+- Interfaces live in `Abstractions/` folders in the highest shared project — not the implementing project
+- One type per file — model, response and request types are never merged into one file
+- Models are named after the concept — never a `Dto` suffix
 
 ## Service Registration Stub
 
 ```csharp
 // Extensions/ServiceCollectionExtensions.cs
-public static IServiceCollection With{BC}DomainHandlers(
+public static IServiceCollection With{Domain}DomainHandlers(
     this IServiceCollection services)
 {
     var assembly = typeof(ServiceCollectionExtensions).Assembly;

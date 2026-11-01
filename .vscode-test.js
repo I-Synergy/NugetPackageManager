@@ -13,7 +13,7 @@ module.exports = defineConfig([
 		},
 		coverage: {
 			include: ['src/**/*.ts'],
-			exclude: ['src/**/__fixtures__/**'],
+			exclude: ['**/Fixtures/**'],
 			includeAll: true
 		},
 		launchArgs: [

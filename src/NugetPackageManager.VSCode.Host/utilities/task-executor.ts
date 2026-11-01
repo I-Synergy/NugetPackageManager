@@ -1,7 +1,11 @@
 import { Mutex } from "async-mutex";
 import { spawn } from "node:child_process";
 import { Logger } from "@/common/logger";
-import { ClassifyDotnetFailure, type DotnetFailure, type DotnetFailureContext } from "./dotnet-failure";
+import {
+  ClassifyDotnetFailureAsync,
+  type DotnetFailure,
+  type DotnetFailureContext,
+} from "./dotnet-failure";
 import { ResolveDotnetContext } from "./dotnet-context";
 
 export interface OperationProgress {
@@ -50,9 +54,26 @@ export function CreateDotnetOptions(projectPath: string): ExecuteCommandOptions 
   return {
     cwd: context.WorkingDirectory,
     command: context.Command,
-    failureContext: { ProjectPath: projectPath, Context: context },
+    failureContext: {
+      ProjectPath: projectPath,
+      ...(context.GlobalJsonPath !== undefined && { GlobalJsonPath: context.GlobalJsonPath }),
+      ...(context.PinnedSdkVersion !== undefined && {
+        PinnedSdkVersion: context.PinnedSdkVersion,
+      }),
+    },
   };
 }
+
+/** Result of the process phase; classification happens after it settles. */
+type ProcessOutcome =
+  | { type: "success" }
+  | {
+      type: "failure";
+      message: string;
+      output: string;
+      /** Present when the failure came from `spawn` itself. */
+      context?: DotnetFailureContext;
+    };
 
 export class TaskExecutor {
   private readonly globalMutex: Mutex = new Mutex();
@@ -82,105 +103,29 @@ export class TaskExecutor {
         throw new DotnetError("dotnet operation cancelled", "");
       }
 
-      await new Promise<void>((resolve, reject) => {
-        const executable = options?.command ?? command;
-        const spawnOptions = options?.cwd
-          ? { cwd: options.cwd, windowsHide: true }
-          : { windowsHide: true };
-        const child = spawn(executable, args, spawnOptions);
-        let stdoutBuf = "";
-        let stderrBuf = "";
-        const allLines: string[] = [];
-        let settled = false;
-        const state: { timer?: NodeJS.Timeout } = {};
+      const outcome = await this.RunProcessAsync(
+        command,
+        args,
+        operationId,
+        signal,
+        timeoutMs,
+        onProgress,
+        options
+      );
 
-        const cleanup = (): void => {
-          if (state.timer) clearTimeout(state.timer);
-          signal?.removeEventListener("abort", onAbort);
-          this.progress.delete(operationId);
-        };
+      if (outcome.type === "success") {
+        Logger.info("TaskExecutor.ExecuteCommandAsync: Completed successfully");
+        return;
+      }
 
-        const finish = (error?: Error): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          if (error) reject(error);
-          else resolve();
-        };
+      const failure = IsDotnetCommand(command)
+        ? await ClassifyDotnetFailureAsync(
+            outcome.output,
+            outcome.context ?? options?.failureContext ?? {}
+          )
+        : undefined;
 
-        const onAbort = (): void => {
-          child.kill();
-          finish(new DotnetError("dotnet operation cancelled", allLines.join("\n")));
-        };
-
-        const parseLine = (line: string): void => {
-          const l = line.toLowerCase().trim();
-          if (!l) return;
-          allLines.push(line.trim());
-          Logger.debug(`TaskExecutor [${operationId}]: ${line.trim()}`);
-
-          let next: OperationProgress | null = null;
-          if (l.includes("determining projects") || l.includes("restoring packages for")) {
-            next = { stage: "Resolving...", percent: 20 };
-          } else if (l.includes("adding packagereference") || l.includes("removing packagereference") || l.includes("installing ")) {
-            next = { stage: "Updating project...", percent: 50 };
-          } else if (l.includes("writing ") || l.includes("resolving conflicts") || l.includes("assets file")) {
-            next = { stage: "Restoring...", percent: 70 };
-          } else if (l.includes("restored ") || l.includes("restore completed")) {
-            next = { stage: "Finishing...", percent: 95 };
-          }
-          if (next) {
-            this.progress.set(operationId, next);
-            onProgress?.(next);
-          }
-        };
-
-        child.stdout.on("data", (data: Buffer) => {
-          stdoutBuf += data.toString();
-          const lines = stdoutBuf.split("\n");
-          stdoutBuf = lines.pop() ?? "";
-          lines.forEach(parseLine);
-        });
-
-        child.stderr.on("data", (data: Buffer) => {
-          stderrBuf += data.toString();
-          const lines = stderrBuf.split("\n");
-          stderrBuf = lines.pop() ?? "";
-          lines.forEach(parseLine);
-        });
-
-        child.on("exit", (code) => {
-          if (stdoutBuf) parseLine(stdoutBuf);
-          if (stderrBuf) parseLine(stderrBuf);
-          if (code === 0) {
-            Logger.info(`TaskExecutor.ExecuteCommandAsync: Completed successfully`);
-            finish();
-          } else {
-            Logger.error(`TaskExecutor.ExecuteCommandAsync: Exited with code ${code}`);
-            const output = allLines.join("\n");
-            const failure = IsDotnetCommand(command)
-              ? ClassifyDotnetFailure(output, options?.failureContext)
-              : undefined;
-            finish(new DotnetError(`dotnet exited with code ${code}`, output, failure));
-          }
-        });
-
-        child.on("error", (err) => {
-          Logger.error(`TaskExecutor.ExecuteCommandAsync: Process error`, err);
-          const message = err instanceof Error ? err.message : String(err);
-          const failure = IsDotnetCommand(command)
-            ? ClassifyDotnetFailure(message, { ...options?.failureContext, SpawnFailed: true })
-            : undefined;
-          finish(new DotnetError(message, message, failure));
-        });
-
-        state.timer = setTimeout(() => {
-          child.kill();
-          finish(new DotnetError(`dotnet timed out after ${timeoutMs}ms`, allLines.join("\n")));
-        }, timeoutMs);
-
-        signal?.addEventListener("abort", onAbort, { once: true });
-      });
+      throw new DotnetError(outcome.message, outcome.output, failure);
     } finally {
       releaser();
     }
@@ -188,6 +133,125 @@ export class TaskExecutor {
 
   GetProgress(operationId: string): OperationProgress | null {
     return this.progress.get(operationId) ?? null;
+  }
+
+  private RunProcessAsync(
+    command: string,
+    args: string[],
+    operationId: string,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+    onProgress: ((progress: OperationProgress) => void) | undefined,
+    options: ExecuteCommandOptions | undefined
+  ): Promise<ProcessOutcome> {
+    return new Promise<ProcessOutcome>((resolve) => {
+      const executable = options?.command ?? command;
+      const spawnOptions = options?.cwd
+        ? { cwd: options.cwd, windowsHide: true }
+        : { windowsHide: true };
+      const child = spawn(executable, args, spawnOptions);
+      let stdoutBuf = "";
+      let stderrBuf = "";
+      const allLines: string[] = [];
+      let settled = false;
+      const state: { timer?: NodeJS.Timeout } = {};
+
+      const cleanup = (): void => {
+        if (state.timer) clearTimeout(state.timer);
+        signal?.removeEventListener("abort", onAbort);
+        this.progress.delete(operationId);
+      };
+
+      const finish = (outcome: ProcessOutcome): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(outcome);
+      };
+
+      const onAbort = (): void => {
+        child.kill();
+        finish({
+          type: "failure",
+          message: "dotnet operation cancelled",
+          output: allLines.join("\n"),
+        });
+      };
+
+      const parseLine = (line: string): void => {
+        const l = line.toLowerCase().trim();
+        if (!l) return;
+        allLines.push(line.trim());
+        Logger.debug(`TaskExecutor [${operationId}]: ${line.trim()}`);
+
+        let next: OperationProgress | null = null;
+        if (l.includes("determining projects") || l.includes("restoring packages for")) {
+          next = { stage: "Resolving...", percent: 20 };
+        } else if (l.includes("adding packagereference") || l.includes("removing packagereference") || l.includes("installing ")) {
+          next = { stage: "Updating project...", percent: 50 };
+        } else if (l.includes("writing ") || l.includes("resolving conflicts") || l.includes("assets file")) {
+          next = { stage: "Restoring...", percent: 70 };
+        } else if (l.includes("restored ") || l.includes("restore completed")) {
+          next = { stage: "Finishing...", percent: 95 };
+        }
+        if (next) {
+          this.progress.set(operationId, next);
+          onProgress?.(next);
+        }
+      };
+
+      child.stdout.on("data", (data: Buffer) => {
+        stdoutBuf += data.toString();
+        const lines = stdoutBuf.split("\n");
+        stdoutBuf = lines.pop() ?? "";
+        lines.forEach(parseLine);
+      });
+
+      child.stderr.on("data", (data: Buffer) => {
+        stderrBuf += data.toString();
+        const lines = stderrBuf.split("\n");
+        stderrBuf = lines.pop() ?? "";
+        lines.forEach(parseLine);
+      });
+
+      child.on("exit", (code) => {
+        if (stdoutBuf) parseLine(stdoutBuf);
+        if (stderrBuf) parseLine(stderrBuf);
+        if (code === 0) {
+          finish({ type: "success" });
+          return;
+        }
+
+        Logger.error(`TaskExecutor.ExecuteCommandAsync: Exited with code ${code}`);
+        finish({
+          type: "failure",
+          message: `dotnet exited with code ${code}`,
+          output: allLines.join("\n"),
+        });
+      });
+
+      child.on("error", (err) => {
+        Logger.error(`TaskExecutor.ExecuteCommandAsync: Process error`, err);
+        const message = err instanceof Error ? err.message : String(err);
+        finish({
+          type: "failure",
+          message,
+          output: message,
+          context: { ...options?.failureContext, SpawnFailed: true },
+        });
+      });
+
+      state.timer = setTimeout(() => {
+        child.kill();
+        finish({
+          type: "failure",
+          message: `dotnet timed out after ${timeoutMs}ms`,
+          output: allLines.join("\n"),
+        });
+      }, timeoutMs);
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
 }
 

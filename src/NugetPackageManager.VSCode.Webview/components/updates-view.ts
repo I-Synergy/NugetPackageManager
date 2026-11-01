@@ -742,7 +742,7 @@ export class UpdatesView extends LitElement {
         this.setSingleFailureStatus(pkg, result);
         return false;
       }
-      await this.handleSingleSuccessAsync(pkg);
+      await this.handleSingleSuccessAsync(pkg, version);
       return true;
     } finally {
       pkg.IsUpdating = false;
@@ -764,7 +764,7 @@ export class UpdatesView extends LitElement {
     };
   }
 
-  private async handleSingleSuccessAsync(pkg: OutdatedPackageViewModel): Promise<void> {
+  private async handleSingleSuccessAsync(pkg: OutdatedPackageViewModel, version: string): Promise<void> {
     // Condition + TFM identify a framework-scoped row, so updating the net10.0
     // line does not also remove the net11.0 entry.
     this.packages = this.packages.filter(
@@ -775,10 +775,8 @@ export class UpdatesView extends LitElement {
       bubbles: true,
       composed: true,
     }));
-    const updateWord = this.packages.length === 1 ? "update" : "updates";
-    this.statusText = this.packages.length > 0
-      ? `${this.packages.length} ${updateWord} available`
-      : "All packages are up to date";
+    // The header already renders "<n> updates available"; the suffix says what changed.
+    this.statusText = `Updated ${pkg.Id} to ${version}`;
     await hostApi.updateBadgeAsync({
       Count: this.packages.length,
       BlockedCount: this.blockedPackages.length,

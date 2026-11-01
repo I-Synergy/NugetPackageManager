@@ -2,9 +2,10 @@
 // Traces: none — legacy mode, this slice declares no acceptance criteria.
 //
 // Mirrors the read half of `cpm-resolver.test.ts`, and runs the repository's own
-// `__fixtures__/cpm` props files through the ported reader.
+// `Fixtures/cpm` props files through the ported reader.
 
 using NugetPackageManager.Core.Workspace.Cpm;
+using NugetPackageManager.TestUtilities;
 
 namespace NugetPackageManager.Core.Workspace.Tests.Cpm;
 
@@ -240,26 +241,18 @@ public class CpmPropsReaderTests
     public void GetPackageVersions_ProjectUnderPropsFile_ReturnsTheFlatMap()
     {
         // Arrange
-        var directory = Path.Combine(Path.GetTempPath(), "cpm-resolve", Guid.NewGuid().ToString("N"));
-        var nested = Path.Combine(directory, "src", "App");
-        Directory.CreateDirectory(nested);
-        File.WriteAllText(Path.Combine(directory, "Directory.Packages.props"), SingleGroup);
-        var projectPath = Path.Combine(nested, "App.csproj");
-        File.WriteAllText(projectPath, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        using var workspace = new TemporaryDirectory("cpm-resolve");
+        workspace.WriteFile("Directory.Packages.props", SingleGroup);
+        var projectPath = workspace.WriteFile(
+            Path.Combine("src", "App", "App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />");
 
-        try
-        {
-            // Act
-            var versions = CpmPropsReader.GetPackageVersions(projectPath);
+        // Act
+        var versions = CpmPropsReader.GetPackageVersions(projectPath);
 
-            // Assert
-            Assert.IsNotNull(versions);
-            Assert.AreEqual("13.0.3", versions["Newtonsoft.Json"]);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        // Assert
+        Assert.IsNotNull(versions);
+        Assert.AreEqual("13.0.3", versions["Newtonsoft.Json"]);
     }
 
     [TestMethod]
@@ -268,14 +261,7 @@ public class CpmPropsReaderTests
     {
         // The checked-in fixtures declare CPM inline and have no Directory.Packages.props above
         // them, so there is nothing to resolve — null is the correct answer, not an empty map.
-        var repositoryRoot = FindRepositoryRoot();
-        var project = Path.Combine(
-            repositoryRoot,
-            "tests",
-            "__fixtures__",
-            "projects",
-            "net10",
-            "net10.csproj");
+        var project = TestPaths.Fixture("projects", "net10", "net10.csproj");
 
         Assert.IsNull(CpmPropsReader.GetPackageVersions(project));
     }
@@ -285,26 +271,17 @@ public class CpmPropsReaderTests
     public void FindCpmFile_WalksUpToTheNearestPropsFile()
     {
         // Arrange
-        var directory = Path.Combine(Path.GetTempPath(), "cpm-walk", Guid.NewGuid().ToString("N"));
-        var nested = Path.Combine(directory, "src", "App");
-        Directory.CreateDirectory(nested);
-        var propsPath = Path.Combine(directory, "Directory.Packages.props");
-        File.WriteAllText(propsPath, SingleGroup);
-        var projectPath = Path.Combine(nested, "App.csproj");
-        File.WriteAllText(projectPath, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        using var workspace = new TemporaryDirectory("cpm-walk");
+        var propsPath = workspace.WriteFile("Directory.Packages.props", SingleGroup);
+        var projectPath = workspace.WriteFile(
+            Path.Combine("src", "App", "App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />");
 
-        try
-        {
-            // Act
-            var found = CpmPropsReader.FindCpmFile(projectPath);
+        // Act
+        var found = CpmPropsReader.FindCpmFile(projectPath);
 
-            // Assert
-            Assert.AreEqual(propsPath, found);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        // Assert
+        Assert.AreEqual(propsPath, found);
     }
 
     [TestMethod]
@@ -312,12 +289,9 @@ public class CpmPropsReaderTests
     public void IsEnabled_ProjectOptOut_DisablesCpm()
     {
         // Arrange
-        var directory = Path.Combine(Path.GetTempPath(), "cpm-optout", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-        var propsPath = Path.Combine(directory, "Directory.Packages.props");
-        File.WriteAllText(propsPath, SingleGroup);
-        var projectPath = Path.Combine(directory, "App.csproj");
-        File.WriteAllText(projectPath, """
+        using var workspace = new TemporaryDirectory("cpm-optout");
+        var propsPath = workspace.WriteFile("Directory.Packages.props", SingleGroup);
+        var projectPath = workspace.WriteFile("App.csproj", """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
                 <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
@@ -325,31 +299,7 @@ public class CpmPropsReaderTests
             </Project>
             """);
 
-        try
-        {
-            // Act + Assert
-            Assert.IsFalse(CpmPropsReader.IsEnabled(projectPath, propsPath));
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = AppContext.BaseDirectory;
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory, "package.json")))
-            {
-                return directory;
-            }
-
-            directory = Path.GetDirectoryName(directory);
-        }
-
-        throw new InvalidOperationException("repository root not found");
+        // Act + Assert
+        Assert.IsFalse(CpmPropsReader.IsEnabled(projectPath, propsPath));
     }
 }

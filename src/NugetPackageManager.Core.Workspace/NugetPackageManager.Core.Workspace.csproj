@@ -12,6 +12,13 @@
   -->
 
   <ItemGroup>
+    <!-- Dependency semantics: NuGet's own version and framework rules instead of a second
+         hand-written implementation. Versions come from Directory.Packages.props. -->
+    <PackageReference Include="NuGet.Frameworks" />
+    <PackageReference Include="NuGet.Versioning" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="NugetPackageManager.Core.Workspace.Tests" />
   </ItemGroup>
 

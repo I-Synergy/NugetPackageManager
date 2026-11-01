@@ -5,12 +5,13 @@
 
     The file lives at the repository root because the projects are under `src/` and
     `tests/`. It must not reach the MSBuild fixtures under
-    `**/__fixtures__/**`: those are inputs the extension evaluates at runtime (CPM and
-    target-framework resolution), and they must keep the settings they declare.
+    `tests/NugetPackageManager.TestUtilities/Fixtures/`: those are inputs the extension evaluates
+    at runtime (CPM and target-framework resolution), and they must keep the settings they declare.
   -->
   <PropertyGroup>
     <IsSidecarProject>true</IsSidecarProject>
-    <IsSidecarProject Condition="$(MSBuildProjectFullPath.Contains('__fixtures__'))">false</IsSidecarProject>
+    <!-- Segment match on both separators, so `Fixtures` is recognised on Windows and Unix. -->
+    <IsSidecarProject Condition="$([System.String]::Copy('$(MSBuildProjectFullPath)').Replace('\','/').Contains('/Fixtures/'))">false</IsSidecarProject>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsSidecarProject)' == 'true'">

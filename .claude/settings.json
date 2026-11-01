@@ -28,8 +28,8 @@
           {
             "type": "command",
             "if": "Write(.ai/skills/**/*)|Edit(.ai/skills/**/*)",
-            "command": "python .ai/scripts/sync-skills.py",
-            "statusMessage": "Syncing skills to Claude Code and GitHub Copilot..."
+            "command": "python .ai/scripts/sync-platforms.py",
+            "statusMessage": "Syncing skills to every selected client..."
           }
         ]
       },
@@ -39,8 +39,8 @@
           {
             "type": "command",
             "if": "Write(.ai/agents/**/*)|Edit(.ai/agents/**/*)",
-            "command": "python .ai/scripts/sync-agents.py",
-            "statusMessage": "Syncing agents to Claude Code and GitHub Copilot..."
+            "command": "python .ai/scripts/sync-platforms.py",
+            "statusMessage": "Syncing agents to every selected client..."
           }
         ]
       }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python .ai/scripts/sync-skills.py",
+            "command": "python .ai/scripts/sync-platforms.py",
             "statusMessage": "Ensuring skill/agent junctions exist..."
           }
         ]

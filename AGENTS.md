@@ -4,7 +4,20 @@
 
 This repository is **NuGet Package Manager**, a VS Code extension for browsing, installing,
 updating, consolidating and auditing NuGet packages across .NET projects. It is a
-**TypeScript / Node.js project**, not a .NET/C# project.
+**dual-language codebase**:
+
+- **.NET / C# core** — `src/NugetPackageManager.Core`, `src/NugetPackageManager.Core.NuGet`
+  and `src/NugetPackageManager.Core.Workspace` (in `NugetPackageManager.slnx`). It owns the
+  NuGet source client, `nuget.config` resolution, the project model, per-framework CPM
+  resolution, the dependency operations and toolchain detection, and runs as a sidecar
+  process from `dist/core`.
+- **TypeScript / Node.js extension** — `src/NugetPackageManager.VSCode.Common`,
+  `.VSCode.Host` and `.VSCode.Webview`. It owns VS Code activation, the typed RPC layer,
+  the Lit webview, and the remaining host plumbing (local feed, SDK install, workload
+  commands, core adapters).
+
+Neither half is legacy and neither can be changed in isolation: a change to the core
+contract crosses the sidecar protocol, `HostAPI` and the webview call site.
 
 You are the development agent for this repository. You have file I/O, shell, and search
 tools. Your role is to plan, delegate, review, and orchestrate — not to write code directly
@@ -30,10 +43,11 @@ populated with real session state.
 
 ## Task Execution Protocol
 
-For any non-trivial task (3+ steps or multi-file):
+For any non-trivial task (3+ steps or multi-file), a plan **and** a progress file are
+**MANDATORY**. The progress file is the only task tracker this repository uses.
 
 1. **Plan** — write `.ai/plans/{task-slug}.md` and wait for approval before writing code.
-2. **Track** — create `.ai/progress/{task-slug}.md`:
+2. **Track (mandatory)** — create `.ai/progress/{task-slug}.md`:
 
    ```markdown
    # {Task Name}
@@ -73,17 +87,23 @@ After every file edit, observe the result (command output, tests). If it fails, 
 the root cause and try a different approach. After three failed retries on the same error,
 escalate to the user with a summary of what was tried.
 
-## Subagent Delegation
+## Subagent Delegation (HARD RULE)
 
-The main conversation is orchestration only. Substantive work goes to a subagent:
+**HARD RULE:** the main conversation is orchestration only. It may read, search, plan,
+review and talk to the user; it may not implement. All source edits — TypeScript **and**
+C# — go to a subagent. Documentation, plans, progress files and session context are the only
+files the main conversation may write itself.
+
+Substantive work goes to a subagent:
 
 | Agent | Use for |
 |---|---|
 | `architect` | Feature design, pattern selection, component boundaries, architecture analysis |
-| `reviewer` | Code quality, TypeScript/Lit review, security review, architecture audit |
+| `designer` | Visual design — colour, typography, spacing, branding, design tokens, contrast |
+| `reviewer` | Code quality, TypeScript/Lit and C# review, security review, architecture audit |
 | `security` | Blast-radius and exposure analysis, threat modelling, OWASP review, dependency and secret audits |
-| `tester` | Mocha/Sinon/VS Code Test CLI test design and integration strategy |
-| `developer` | TypeScript/Node code — host, RPC, NuGet API, utilities, refactoring, builds |
+| `tester` | Mocha/Sinon and MSTest test design, integration strategy |
+| `developer` | TypeScript and C# implementation — host, RPC, core handlers, adapters, refactoring, builds |
 | `ui-developer` | Lit components, layouts, CSS, UX patterns |
 | `ui-tester` | Playwright E2E tests, accessibility checks, visual regression |
 | `writer` | READMEs, CHANGELOG, ADRs, technical prose |
@@ -103,21 +123,30 @@ Do NOT use Write on the progress file — only Edit individual lines.
 
 These are non-negotiable for this repository.
 
-### 1. Dual-process architecture and typed RPC
+### 1. Two-process extension, sidecar core, typed RPC
 
-The extension has two runtime contexts connected by `postMessage`:
+The extension has two runtime contexts connected by `postMessage`, plus a .NET sidecar:
 
 ```text
 VS Code Extension Host (Node.js)          Webview (browser, Lit)
-  src/NugetPackageManager.VSCode.Host/extension.ts                     src/NugetPackageManager.VSCode.Webview/main.ts
+  src/NugetPackageManager.VSCode.Host/extension.ts      src/NugetPackageManager.VSCode.Webview/main.ts
   RpcHost <──────── typed RPC ────────────> RpcClient
-  host-api.ts / TaskExecutor / NuGet API    components/*
+  host-api.ts / TaskExecutor                 components/*
+        │
+        │ sidecar JSON-RPC over stdio
+        ▼
+.NET core (dist/core, started by nuget/core-process.ts)
+  src/NugetPackageManager.Core            protocol + handlers
+  src/NugetPackageManager.Core.NuGet      source client, config, advisories
+  src/NugetPackageManager.Core.Workspace  csproj model, CPM, TFMs, dependency graph
 ```
 
 Every host method implements `HostAPI` in `src/NugetPackageManager.VSCode.Common/rpc/types.ts` and returns
 `Result<T>` (`{ ok: true; value: T } | { ok: false; error: string }`) using `ok()` / `fail()`.
 Never throw across the RPC boundary. Add a method by updating `types.ts` → `host-api.ts` →
-the webview call site.
+the webview call site. Core capabilities are reached through `nuget/core-client.ts`
+(`CoreProcess.CallAsync<T>`), and a core failure surfaces as `CoreError` with a code — never
+as a crashed host.
 
 ### 2. Async all the way, and name it `Async`
 
@@ -133,7 +162,8 @@ the webview call site.
 
 - `strict: true`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
 - Avoid `any`; prefix unused variables with `_`.
-- `@/*` resolves to `src/*` (configured in `tsconfig.json`, resolved by esbuild).
+- `@/common/*`, `@/host/*` and `@/web/*` resolve to the three `src/NugetPackageManager.VSCode.*`
+  projects (configured in `tsconfig.base.json`, resolved by esbuild).
 - Files in `src/NugetPackageManager.VSCode.Common/` are bundled into both host and web bundles: **no Node.js-only
   imports** there. Use `globalThis.crypto`, not `node:crypto`.
 
@@ -159,12 +189,13 @@ the webview call site.
 
 ### 6. Central Package Management and multi-framework versions
 
-- CPM lives in `Directory.Packages.props`; the resolver is
-  `src/NugetPackageManager.VSCode.Host/utilities/cpm-resolver.ts` and condition parsing is
-  `src/NugetPackageManager.VSCode.Host/utilities/cpm-condition.ts`.
+- CPM lives in `Directory.Packages.props`. The resolver is the C# core —
+  `src/NugetPackageManager.Core.Workspace/Cpm/CpmCondition.cs`, `CpmPropsReader.cs` and
+  `CpmWriter.cs`; the host adapters are `utilities/cpm-reader.ts`, `utilities/cpm-writer.ts`
+  and `utilities/cpm-conditional.ts`. Reference: `.ai/reference/work-type-mapping.md`.
 - Conditional `<ItemGroup Condition="...">` groups are evaluated **per project target
-  framework** (`dotnet msbuild -getProperty`), never by first-match and never by ignoring
-  negation.
+  framework** by `TargetFrameworkResolver` (`dotnet msbuild -getProperty`), never by
+  first-match and never by ignoring negation.
 - One package may have one version per framework line. Installed, Updates, Consolidate and
   Vulnerabilities must all use the same per-TFM resolution.
 - Updates are written **inside the `ItemGroup` that produced the row** (group scope), and all
@@ -181,7 +212,8 @@ A CPM package with framework-scoped versions intentionally has no single
 package versions or framework filters:
 
 - Search for empty-version guards and review every match:
-  `grep -rn "CpmResolutions\|!pkg\.Version\|pkg\.Version" src/NugetPackageManager.VSCode.Host src/NugetPackageManager.VSCode.Webview`
+  `grep -rn "CpmResolutions\|!pkg\.Version\|pkg\.Version" src/NugetPackageManager.VSCode.Host src/NugetPackageManager.VSCode.Webview src/NugetPackageManager.Core.Workspace`
+  — consumer contract: `.ai/reference/critical-rules.md`.
 - Never `continue`/skip a package merely because `pkg.Version` is empty. If
   `pkg.CpmResolutions` exists, process every resolution (`Tfm`, `Condition`, `Version`)
   independently.
@@ -195,12 +227,18 @@ package versions or framework filters:
 
 ### 7. Tests
 
-- Tests use the VS Code Test CLI + Mocha (TDD `suite`/`test`) + Sinon + Node `assert`.
-- Test files: `src/**/*.test.ts`. Mock `vscode`, axios, and the file system with Sinon.
+- TypeScript tests use the VS Code Test CLI + Mocha (TDD `suite`/`test`) + Sinon + Node `assert`;
+  C# tests use MSTest. Mock `vscode`, axios and the file system with Sinon.
+- TypeScript test files live in `tests/NugetPackageManager.VSCode.Tests/**/*.test.ts` and mirror
+  the `src/NugetPackageManager.VSCode.*` layout. C# test projects are
+  `tests/NugetPackageManager.Core.Tests`, `.Core.NuGet.Tests` and `.Core.Workspace.Tests`.
 - Web tests mock `hostApi` via `Object.defineProperty(registrations, "hostApi", ...)`.
-- CPM fixtures live in `tests/__fixtures__/cpm` and
-  `tests/__fixtures__/projects`; keep them representative of real grouped
+- CPM fixtures live in `tests/NugetPackageManager.TestUtilities/Fixtures/cpm` and the
+  MSBuild projects in `.../Fixtures/projects`; reach them through `TestPaths.Fixture(...)`
+  from `tests/NugetPackageManager.TestUtilities`, and keep them representative of real grouped
   `Directory.Packages.props` layouts.
+- A change that crosses the sidecar contract needs a core test **and** a host test.
+- Test design detail: `.ai/patterns/testing-patterns.md`.
 
 ### 8. Commits and documentation
 
@@ -213,17 +251,27 @@ package versions or framework filters:
 
 ```bash
 npm run esbuild          # host + web bundles
+npm run build:core       # dotnet publish the C# sidecar to dist/core
+npm run typecheck        # tsc over src and the TS test project
 npm run lint             # ESLint 9 flat config
 npm run lint:fix         # auto-fix
-npm test                 # VS Code Test CLI + Mocha
+npm test                 # VS Code Test CLI + Mocha (TypeScript)
 npm run test-compile     # compile tests only (tsconfig.test.json)
-npm run quality          # local quality gate: build + lint (ESLint + SonarJS) + type check + tests + audit
+dotnet build NugetPackageManager.slnx -c Release   # C# core
+dotnet test  NugetPackageManager.slnx -c Release   # MSTest
+npm run quality          # quality gate: bundles + lint + typecheck + C# build + C# tests + TS tests + audit
 npm run quality:coverage # same, and writes coverage/lcov.info for the SonarCloud scan
 npm run package          # produce .vsix in releases/
 ```
 
-Requirements: Node.js 19+ (for `globalThis.crypto.randomUUID()`), and `dotnet` on PATH for
-install/update/restore, vulnerability and target-framework evaluation.
+Requirements: Node.js 19+ (for `globalThis.crypto.randomUUID()`), .NET SDK 8+ (the sidecar
+targets `net8.0` with `RollForward=LatestMajor`), and the `dotnet` CLI on PATH — the extension
+also shells out to it for restore, install/update, vulnerability and target-framework work.
+
+`NugetPackageManager.slnx` also lists the TypeScript entry points and configs under
+`/TypeScript*/` solution folders, so Visual Studio shows both halves of the repository. Those are
+solution items, not MSBuild projects: `dotnet build` ignores them and the TypeScript still builds
+through `npm run esbuild` / `npm run quality`.
 
 ### Release versioning
 
@@ -235,8 +283,8 @@ release-notes file is committed and `main` is not modified.
 
 After every code change:
 
-1. run `npm run quality` (or at minimum `npm run esbuild` and `npm run lint`);
-2. run the most relevant tests (`npm test`, or a focused test file);
+1. run `npm run quality` (the gate includes the C# build and both test suites);
+2. run the most relevant tests (`npm test`, `dotnet test` for core changes, or a focused test file);
 3. fix failures before continuing;
 4. for multi-file changes, run the full suite.
 
@@ -246,7 +294,8 @@ After every code change:
   context.
 - Platform folders (`.claude/skills`, `.claude/agents`, `.github/skills`, `.github/agents`,
   `.reasonix/skills`, `.reasonix/agents`) are junctions created by
-  `.ai/scripts/sync-skills.py` and are gitignored. Never edit them directly; edit `.ai/`.
+  `.ai/scripts/sync-platforms.py` from the clients selected in `.ai/ai.json`, and are
+  gitignored. Never edit them directly; edit `.ai/`.
 - Scratch files go in `.ai/tmp/` (gitignored), never in the repository root or `/tmp`.
 - Upgrade from the template with:
   `python .ai/scripts/upgrade-template.py --source <template-repo> --target .`

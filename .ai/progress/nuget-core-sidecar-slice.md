@@ -24,12 +24,12 @@ Repository layout now follows `.ai/skills/solution-generator/SKILL.md`:
   the `@/` aliases; `test-paths.ts` resolves the repository root by walking up (never `process.cwd()`,
   which is the VS Code install directory inside the extension host).
 - Central package management **is** used: `Directory.Packages.props` at the root drives every C#
-  project. It is discovered by every project below the root, so the `__fixtures__` trees opt out
+  project. It is discovered by every project below the root, so the `Fixtures` trees opt out
   twice — `Directory.Build.props` and `Directory.Packages.props` both skip paths containing
-  `__fixtures__`, and `tests/__fixtures__/Directory.Packages.props` sets
+  `/Fixtures/`, and `tests/NugetPackageManager.TestUtilities/Fixtures/Directory.Packages.props` sets
   `ManagePackageVersionsCentrally=false` so test data never inherits the repository's versions.
-- The MSBuild fixtures live under `tests/__fixtures__/` (they are test data used by both suites,
-  not source), and `tests/__fixtures__/Directory.Packages.props` isolates them.
+- The MSBuild fixtures live under `tests/NugetPackageManager.TestUtilities/Fixtures/` (they are
+  test data used by both suites, not source), and its own `Directory.Packages.props` isolates them.
 
 ## Steps
 

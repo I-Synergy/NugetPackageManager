@@ -1,36 +1,39 @@
 // File: tests/NugetPackageManager.Core.Workspace.Tests/Cpm/CpmWriterTests.cs
 // Traces: none — legacy mode, this slice declares no acceptance criteria.
 //
-// Every expected file in tests/__fixtures__/cpm/expected was produced by the TypeScript
+// Every expected file in tests/NugetPackageManager.TestUtilities/Fixtures/cpm/expected was produced by the TypeScript
 // `UpdateCpmVersionsAsync` / `RemovePackageVersionAsync` before the port. The comparison is
 // byte for byte on purpose: the writer edits text surgically so the user's formatting survives,
 // and a reformat would be a visible regression.
 
 using NugetPackageManager.Core.Workspace.Cpm;
+using System.Diagnostics.CodeAnalysis;
+using NugetPackageManager.TestUtilities;
 
 namespace NugetPackageManager.Core.Workspace.Tests.Cpm;
 
 [TestClass]
+[SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "MSTest creates one instance per test and TestCleanup disposes the workspace.")]
 public class CpmWriterTests
 {
-    private string directory = string.Empty;
+    private TemporaryDirectory? workspace;
     private string propsPath = string.Empty;
 
     [TestInitialize]
     public void Setup()
     {
-        directory = Path.Combine(Path.GetTempPath(), "cpm-writer", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-        propsPath = Path.Combine(directory, "Directory.Packages.props");
+        workspace = new TemporaryDirectory("cpm-writer");
+        propsPath = workspace.Combine("Directory.Packages.props");
     }
 
     [TestCleanup]
     public void Cleanup()
     {
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        workspace?.Dispose();
+        workspace = null;
     }
 
     [TestMethod]
@@ -166,31 +169,10 @@ public class CpmWriterTests
 
     private string CopyFixture(string fixture)
     {
-        var source = Path.Combine(FixtureRoot(), fixture);
-        var content = File.ReadAllText(source);
+        var content = TestPaths.ReadFixture("cpm", fixture);
         File.WriteAllText(propsPath, content);
         return content;
     }
 
-    private static string GoldenPath(string name) => Path.Combine(FixtureRoot(), "expected", name);
-
-    private static string FixtureRoot() =>
-        Path.Combine(FindRepositoryRoot(), "tests", "__fixtures__", "cpm");
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = AppContext.BaseDirectory;
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory, "package.json")))
-            {
-                return directory;
-            }
-
-            directory = Path.GetDirectoryName(directory);
-        }
-
-        throw new InvalidOperationException("repository root not found");
-    }
+    private static string GoldenPath(string name) => TestPaths.Fixture("cpm", "expected", name);
 }

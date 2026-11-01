@@ -330,7 +330,7 @@ All code writing, editing, and modification MUST be delegated to a specialized s
 
 | Task | Subagent |
 |------|----------|
-| Planning, architecture, design decisions | `architect` subagent (Sonnet) or main conversation (Pro) |
+| Planning, architecture, design decisions | `architect` subagent or the main conversation |
 | Code exploration and search | `Explore` subagent |
 | .NET implementation (CQRS, API, Blazor, data access, builds) | `developer` subagent |
 | Unit/integration tests (MSTest, Moq, Reqnroll) | `tester` subagent |

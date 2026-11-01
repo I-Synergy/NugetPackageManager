@@ -5,30 +5,33 @@
 // wins, CPM beats the project value, and `[1.0]` is pinned.
 
 using NugetPackageManager.Core.Workspace.Projects;
+using System.Diagnostics.CodeAnalysis;
+using NugetPackageManager.TestUtilities;
 
 namespace NugetPackageManager.Core.Workspace.Tests.Projects;
 
 [TestClass]
+[SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "MSTest creates one instance per test and TestCleanup disposes the workspace.")]
 public class ProjectFileReaderTests
 {
     private static readonly string[] expectedPackages = ["Microsoft.Extensions.Logging", "Shared.Library"];
 
-    private string directory = string.Empty;
+    private TemporaryDirectory? workspace;
 
     [TestInitialize]
     public void Setup()
     {
-        directory = Path.Combine(Path.GetTempPath(), "nugget-core-tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
+        workspace = new TemporaryDirectory("nugget-core-tests");
     }
 
     [TestCleanup]
     public void Cleanup()
     {
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        workspace?.Dispose();
+        workspace = null;
     }
 
     [TestMethod]
@@ -205,13 +208,7 @@ public class ProjectFileReaderTests
     public void Read_RepositoryFixture_MatchesTheCheckedInProject()
     {
         // The MSBuild fixtures, parsed by the ported reader.
-        var fixture = Path.Combine(
-            FindRepositoryRoot(),
-            "tests",
-            "__fixtures__",
-            "projects",
-            "net10",
-            "net10.csproj");
+        var fixture = TestPaths.Fixture("projects", "net10", "net10.csproj");
 
         Assert.IsTrue(File.Exists(fixture), $"fixture not found: {fixture}");
 
@@ -226,27 +223,5 @@ public class ProjectFileReaderTests
             model.Packages.Select(package => package.Id).ToArray());
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = AppContext.BaseDirectory;
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory, "package.json")))
-            {
-                return directory;
-            }
-
-            directory = Path.GetDirectoryName(directory);
-        }
-
-        throw new InvalidOperationException("repository root not found");
-    }
-
-    private string WriteProject(string content)
-    {
-        var path = Path.Combine(directory, "Sample.csproj");
-        File.WriteAllText(path, content);
-        return path;
-    }
+    private string WriteProject(string content) => workspace!.WriteFile("Sample.csproj", content);
 }

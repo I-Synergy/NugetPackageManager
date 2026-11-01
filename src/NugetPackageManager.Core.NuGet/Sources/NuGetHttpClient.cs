@@ -25,7 +25,8 @@ public sealed class NuGetHttpClient : IDisposable
     public async Task<JsonDocument> GetJsonAsync(
         string url,
         CancellationToken cancellationToken,
-        Func<Uri, AuthenticationHeaderValue?>? authorizationFor = null)
+        Func<Uri, AuthenticationHeaderValue?>? authorizationFor = null,
+        string notFoundCode = "sourceUnreachable")
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
@@ -47,6 +48,15 @@ public sealed class NuGetHttpClient : IDisposable
             throw new NuGetSourceException(
                 "unauthorized",
                 $"'{uri.Host}' rejected the credentials ({(int)response.StatusCode}).");
+        }
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Callers that look up a package pass "packageNotFound": a 404 there means the id
+            // does not exist, not that the feed is down.
+            throw new NuGetSourceException(
+                notFoundCode,
+                $"'{uri}' returned 404 Not Found.");
         }
 
         if (!response.IsSuccessStatusCode)

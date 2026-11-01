@@ -9,7 +9,7 @@ import { createHostAPI } from '@/host/host-api';
 import nugetApiFactory from '@/host/nuget/api-factory';
 import coreProcess from '@/host/nuget/core-process';
 import NuGetConfigResolver from '@/host/utilities/nuget-config-resolver';
-import CpmResolver from '@/host/utilities/cpm-resolver';
+import CpmReader, { type CpmPackageMap } from '@/host/utilities/cpm-reader';
 import TaskExecutorDefault, { DotnetError } from '@/host/utilities/task-executor';
 import { OperationJobs } from '@/host/utilities/operation-jobs';
 import type { Result } from '@/common/rpc/result';
@@ -17,31 +17,137 @@ import type { GetJobResponse } from '@/common/rpc/types';
 import { Logger } from '@/common/logger';
 
 function fixturesRoot(): string {
-    return repositoryPath('tests', '__fixtures__');
+    return repositoryPath('tests', 'NugetPackageManager.TestUtilities', 'Fixtures');
+}
+
+type CpmMapSpec = {
+    unconditional?: Record<string, string>;
+    conditional?: Array<{
+        condition: string;
+        framework: string;
+        versions: Record<string, string>;
+        order: number;
+    }>;
+};
+
+function cpmMap(spec: CpmMapSpec = {}): CpmPackageMap {
+    const conditional = (spec.conditional ?? []).map((entry) => ({
+        ...entry,
+        versions: new Map(Object.entries(entry.versions)),
+    }));
+    return {
+        unconditional: new Map(Object.entries(spec.unconditional ?? {})),
+        conditional,
+        hasConditionalGroups: conditional.length > 0,
+    };
 }
 
 /**
- * Routes the core's `getProjects` call. The host sends every path in one request and the core
- * skips projects it cannot read, so `resolve` returns null for an unreadable project.
+ * The maps the core would return for the fixtures these orchestration tests use. Parsing is pinned
+ * by the core's CpmPropsReader tests, so here the map is plain test data.
  */
+const FIXTURE_MAPS: Record<string, CpmPackageMap> = {
+    'single-group.props': cpmMap({
+        unconditional: { 'Newtonsoft.Json': '13.0.3', Serilog: '2.11.0' },
+    }),
+    'unconditional-plus-conditional.props': cpmMap({
+        unconditional: { 'Pkg.Shared': '1.0.0', 'Pkg.UnconditionalOnly': '5.0.0' },
+        conditional: [{
+            condition: "$(TargetFramework.StartsWith('net10.0'))",
+            framework: 'net10.0',
+            versions: { 'Pkg.Shared': '2.0.0' },
+            order: 3,
+        }],
+    }),
+    'negated-positive.props': cpmMap({
+        unconditional: {
+            'Shared.Library': '1.0.0',
+            'Aspire.Hosting.AppHost': '17.0.0-preview.1.26522.1',
+        },
+        conditional: [
+            {
+                condition: "!$(TargetFramework.StartsWith('net11.0'))",
+                framework: 'not net11.0',
+                versions: {
+                    'Microsoft.Extensions.Logging': '10.0.13',
+                    'Microsoft.Extensions.Hosting': '10.0.13',
+                    'Microsoft.EntityFrameworkCore.Relational': '10.0.13',
+                    'Npgsql.EntityFrameworkCore.PostgreSQL': '10.0.3',
+                },
+                order: 3,
+            },
+            {
+                condition: "$(TargetFramework.StartsWith('net11.0'))",
+                framework: 'net11.0',
+                versions: {
+                    'Microsoft.Extensions.Logging': '11.0.0-rc.2.26504.105',
+                    'Microsoft.Extensions.Hosting': '11.0.0-rc.2.26504.105',
+                    'Microsoft.EntityFrameworkCore.Relational': '11.0.0-rc.2.26504.105',
+                    'Npgsql.EntityFrameworkCore.PostgreSQL': '11.0.0-rc.2',
+                },
+                order: 7,
+            },
+        ],
+    }),
+    'shared-id-positive-groups.props': cpmMap({
+        conditional: [
+            {
+                condition: "$(TargetFramework.StartsWith('net8.0'))",
+                framework: 'net8.0',
+                versions: { 'Microsoft.Extensions.Http': '8.0.0', 'Microsoft.Extensions.Logging': '8.0.1' },
+                order: 1,
+            },
+            {
+                condition: "$(TargetFramework.StartsWith('net9.0'))",
+                framework: 'net9.0',
+                versions: { 'Microsoft.Extensions.Http': '9.0.0', 'Microsoft.Extensions.Logging': '9.0.1' },
+                order: 3,
+            },
+        ],
+    }),
+};
+
+/** Answers the host's CPM reads for the fixture instead of asking the (stubbed) core to parse. */
+function stubCpmReader(
+    sandbox: sinon.SinonSandbox,
+    map: CpmPackageMap,
+    propsPath: string
+): void {
+    sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsPath);
+    sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(map);
+    sandbox.stub(CpmReader, 'GetFrameworkPackageMapAsync').resolves(map);
+}
+
 /**
  * Routes the core's calls for the host tests.
  *
- * `getProjects` is answered by whichever resolver the test installs with `useProjects`.
- * The write methods are bridged to the TypeScript writer here only so the orchestration tests
- * (rollback, job state, conflict attribution) can assert what landed on disk; in production the
- * core does the writing, and its behaviour is pinned by the golden files in
- * `tests/__fixtures__/cpm/expected`.
+ * `getProjects` is answered by whichever resolver the test installs with `stubProjectParsing`.
+ * The CPM methods record the request the host made so the orchestration tests can assert on the
+ * call; what the core does with it is pinned by the core's MSTest suite (including the golden
+ * files in `tests/NugetPackageManager.TestUtilities/Fixtures/cpm/expected`).
  */
 let projectResolver: ((projectPath: string) => Project | null) | null = null;
 
+type CoreCall = { method: string; params: Record<string, unknown> };
+
+let coreCalls: CoreCall[] = [];
+let coreOverrides = new Map<string, (params: Record<string, unknown>) => unknown | Promise<unknown>>();
+
 function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
     projectResolver = null;
+    coreCalls = [];
+    coreOverrides = new Map();
 
     return sandbox.stub(coreProcess, 'CallAsync').callsFake((async (
         method: string,
-        params: Record<string, never>
+        params: Record<string, unknown>
     ) => {
+        coreCalls.push({ method, params });
+        const override = coreOverrides.get(method);
+        if (override) {
+            return override(params);
+        }
+
         switch (method) {
             case 'getProjects': {
                 const projects: Project[] = [];
@@ -53,42 +159,49 @@ function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
                 return projects;
             }
 
-            case 'updateCpmVersions': {
-                const request = params as unknown as {
-                    propsFilePath: string;
-                    changes: Array<{ packageId: string; version: string; condition?: string; scope?: 'group' | 'unconditional' | 'all' | 'first' }>;
-                };
-                await CpmResolver.UpdateCpmVersionsAsync(request.propsFilePath, request.changes);
-                return { applied: request.changes.length };
-            }
+            case 'updateCpmVersions':
+                return { applied: (params as unknown as { changes: unknown[] }).changes.length };
 
-            case 'removePackageVersion': {
-                const request = params as unknown as { propsFilePath: string; packageId: string };
-                return { removed: await CpmResolver.RemovePackageVersionAsync(request.propsFilePath, request.packageId) };
-            }
+            case 'removePackageVersion':
+                return { removed: true };
 
-            case 'updatePackageVersion': {
-                const request = params as unknown as {
-                    projectPath: string;
-                    packageId: string;
-                    version: string;
-                    condition?: string;
-                    scope?: 'group' | 'unconditional' | 'all' | 'first';
-                };
-                await CpmResolver.UpdatePackageVersionAsync(
-                    request.projectPath,
-                    request.packageId,
-                    request.version,
-                    request.condition,
-                    request.scope
-                );
+            case 'updatePackageVersion':
                 return { updated: true };
+
+            case 'getRestoredDirectDependencies':
+                return { DirectByTfm: {}, HasDirectSection: false };
+
+            case 'computeRequirementClosure':
+                return { Conflicts: [], Planned: {} };
+
+            case 'orderRequirements':
+                return { orders: {} };
+
+            case 'analyzeProjectDependencies':
+                return { Issues: [], Skipped: true, Reason: 'project has not been restored' };
+
+            case 'classifyDotnetFailure': {
+                const output = (params as unknown as { output?: string }).output ?? '';
+                return { Kind: 'Unknown', Summary: output, Hint: '', Detail: output };
             }
 
             default:
                 throw new Error(`unexpected core method: ${method}`);
         }
     }) as never);
+}
+
+/** Replaces one core method for the current test, e.g. to simulate the write a restore then fails on. */
+function stubCoreCall(
+    method: string,
+    handler: (params: Record<string, unknown>) => unknown | Promise<unknown>
+): void {
+    coreOverrides.set(method, handler);
+}
+
+/** The params of every recorded call to one core method, in order. */
+function coreCallsTo(method: string): Array<Record<string, unknown>> {
+    return coreCalls.filter((call) => call.method === method).map((call) => call.params);
 }
 
 let coreStub: sinon.SinonStub | undefined;
@@ -392,8 +505,6 @@ suite('HostAPI Tests', () => {
             sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
                 { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
             ]);
-            // No CPM for these tests
-            sandbox.stub(CpmResolver, 'GetPackageVersionsAsync').resolves(null);
         });
 
         test('reports package as outdated when one project is behind latest (min-version aggregation)', async () => {
@@ -593,7 +704,6 @@ suite('HostAPI Tests', () => {
             const uris = projects.map((p) => ({ fsPath: `/ws/${p.name}.csproj` }) as vscode.Uri);
 
             sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
-            sandbox.stub(CpmResolver, 'FindCpmFilePathAsync').resolves(null);
             stubProjectParsing((projectPath) => {
                 const name = path.basename(projectPath, '.csproj');
                 const fixture = projects.find((p) => p.name === name);
@@ -728,8 +838,9 @@ suite('HostAPI Tests', () => {
 
         function setupWorkspace(fixture: string): void {
             workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-cpm-write-'));
+            const propsPath = path.join(workspaceDir, 'Directory.Packages.props');
             fs.writeFileSync(
-                path.join(workspaceDir, 'Directory.Packages.props'),
+                propsPath,
                 fs.readFileSync(path.join(fixturesRoot(), 'cpm', fixture), 'utf8')
             );
             projectPath = path.join(workspaceDir, 'App.csproj');
@@ -739,6 +850,11 @@ suite('HostAPI Tests', () => {
             );
 
             sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+            const map = FIXTURE_MAPS[fixture];
+            if (!map) {
+                throw new Error(`No CPM map fixture for ${fixture}`);
+            }
+            stubCpmReader(sandbox, map, propsPath);
         }
 
         teardown(() => {
@@ -763,12 +879,10 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Results[0]!.Success, true);
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            assert.strictEqual(map.unconditional.get('Pkg.Shared'), '1.5.0');
-            assert.strictEqual(
-                map.conditional.find((entry) => entry.framework === 'net10.0')!.versions.get('Pkg.Shared'),
-                '2.0.0'
-            );
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
+                propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
+                changes: [{ packageId: 'Pkg.Shared', version: '1.5.0', scope: 'unconditional' }],
+            }]);
         });
 
         test('consolidates only the requested framework line', async () => {
@@ -791,11 +905,15 @@ suite('HostAPI Tests', () => {
 
             assert.ok(result.ok, result.ok ? '' : result.error);
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            const net10 = map.conditional.find((entry) => entry.condition.startsWith('!'))!;
-            const net11 = map.conditional.find((entry) => !entry.condition.startsWith('!'))!;
-            assert.strictEqual(net10.versions.get('Microsoft.Extensions.Logging'), '10.0.14');
-            assert.strictEqual(net11.versions.get('Microsoft.Extensions.Logging'), '11.0.0-rc.2.26504.105');
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
+                propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
+                changes: [{
+                    packageId: 'Microsoft.Extensions.Logging',
+                    version: '10.0.14',
+                    condition: "!$(TargetFramework.StartsWith('net11.0'))",
+                    scope: 'group',
+                }],
+            }]);
         });
 
         test('refuses a blanket consolidation of a framework-scoped package', async () => {
@@ -820,11 +938,7 @@ suite('HostAPI Tests', () => {
                 assert.match(result.error, /framework-scoped versions/);
             }
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            const net10 = map.conditional.find((entry) => entry.condition.startsWith('!'))!;
-            const net11 = map.conditional.find((entry) => !entry.condition.startsWith('!'))!;
-            assert.strictEqual(net10.versions.get('Microsoft.Extensions.Logging'), '10.0.13');
-            assert.strictEqual(net11.versions.get('Microsoft.Extensions.Logging'), '11.0.0-rc.2.26504.105');
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [], 'nothing may be written');
         });
 
         test('refuses an ambiguous multi-framework update without a condition', async () => {
@@ -842,6 +956,7 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Results[0]!.Success, false);
             assert.match(result.value.Results[0]!.Error ?? '', /multiple framework-scoped versions/);
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [], 'nothing may be written');
         });
 
         test('updates restore but never build', async () => {
@@ -867,6 +982,7 @@ suite('HostAPI Tests', () => {
             });
 
             assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(coreCallsTo('updateCpmVersions').length, 1);
             assert.ok(commands.length > 0, 'the update must at least restore');
             assert.ok(
                 commands.some(([, subcommand]) => subcommand === 'restore'),
@@ -1038,18 +1154,16 @@ suite('HostAPI Tests', () => {
             fs.writeFileSync(projectPath, projectContent);
             fs.writeFileSync(propsPath, propsContent);
 
-            sandbox.stub(CpmResolver, 'FindCpmFilePathAsync').resolves(propsPath);
-            sandbox.stub(CpmResolver, 'GetFrameworkPackageMapAsync').resolves({
-                unconditional: new Map([['Microsoft.EntityFrameworkCore.Relational', '11.0.0-rc.2.26504.105']]),
-                conditional: [],
-                hasConditionalGroups: false,
-            } as unknown as Awaited<ReturnType<typeof CpmResolver.GetFrameworkPackageMapAsync>>);
-            sandbox.stub(CpmResolver, 'HasPackage').returns(true);
-            sandbox.stub(CpmResolver, 'UpdatePackageVersionAsync').callsFake(async () => {
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsPath);
+            sandbox.stub(CpmReader, 'GetFrameworkPackageMapAsync').resolves(cpmMap({
+                unconditional: { 'Microsoft.EntityFrameworkCore.Relational': '11.0.0-rc.2.26504.105' },
+            }));
+            stubCoreCall('updatePackageVersion', () => {
                 fs.writeFileSync(
                     propsPath,
                     propsContent.replace('11.0.0-rc.2.26504.105', '11.0.0-rc.3.26522.148')
                 );
+                return { updated: true };
             });
             sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').callsFake(async (_command, _args, operationId) => {
                 if (String(operationId).startsWith('rollback-restore-')) return;
@@ -1071,6 +1185,12 @@ suite('HostAPI Tests', () => {
             }
             assert.strictEqual(fs.readFileSync(propsPath, 'utf8'), propsContent);
             assert.strictEqual(fs.readFileSync(projectPath, 'utf8'), projectContent);
+            assert.deepStrictEqual(coreCallsTo('updatePackageVersion'), [{
+                projectPath,
+                packageId: 'Microsoft.EntityFrameworkCore.Relational',
+                version: '11.0.0-rc.3.26522.148',
+                scope: 'unconditional',
+            }]);
         });
     });
 
@@ -1081,10 +1201,11 @@ suite('HostAPI Tests', () => {
         let workspaceDir: string;
         let projectPath: string;
 
-        function setupWorkspace(fixture: string): void {
+        function setupWorkspace(fixture: string, mapOverride?: CpmPackageMap): void {
             workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-batch-job-'));
+            const propsPath = path.join(workspaceDir, 'Directory.Packages.props');
             fs.writeFileSync(
-                path.join(workspaceDir, 'Directory.Packages.props'),
+                propsPath,
                 fs.readFileSync(path.join(fixturesRoot(), 'cpm', fixture), 'utf8')
             );
             projectPath = path.join(workspaceDir, 'App.csproj');
@@ -1093,6 +1214,11 @@ suite('HostAPI Tests', () => {
                 '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup><ItemGroup><PackageReference Include="Pkg.Shared" /></ItemGroup></Project>'
             );
             sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+            const map = mapOverride ?? FIXTURE_MAPS[fixture];
+            if (!map) {
+                throw new Error(`No CPM map fixture for ${fixture}`);
+            }
+            stubCpmReader(sandbox, map, propsPath);
         }
 
         function gate(): { wait: Promise<void>; open: () => void } {
@@ -1161,8 +1287,10 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(batchJob(status).Response?.Results[0]?.Success, true);
             assert.strictEqual(batchJob(status).Response?.RolledBack, undefined);
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            assert.strictEqual(map.unconditional.get('Pkg.Shared'), '1.5.0');
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
+                propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
+                changes: [{ packageId: 'Pkg.Shared', version: '1.5.0', scope: 'unconditional' }],
+            }]);
         });
 
         test('rolls back inside the job when the restore fails', async () => {
@@ -1172,6 +1300,14 @@ suite('HostAPI Tests', () => {
             sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').rejects(
                 new DotnetError('dotnet exited with code 1', '')
             );
+            // The core writes before the restore fails, so the rollback has something to undo.
+            stubCoreCall('updateCpmVersions', () => {
+                fs.writeFileSync(
+                    propsPath,
+                    fs.readFileSync(propsPath, 'utf8').replace('Version="1.0.0"', 'Version="1.5.0"')
+                );
+                return { applied: 1 };
+            });
 
             const api = createHostAPI();
             const started = await api.startBatchUpdateAsync({
@@ -1191,6 +1327,7 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(batchJob(status).State, 'completed');
             assert.strictEqual(batchJob(status).Response?.RolledBack, true);
             assert.ok(batchJob(status).Response?.RestoreError);
+            assert.strictEqual(coreCallsTo('updateCpmVersions').length, 1);
             assert.strictEqual(fs.readFileSync(propsPath, 'utf8'), propsBefore);
         });
 
@@ -1199,8 +1336,9 @@ suite('HostAPI Tests', () => {
             skipRestoreConfig();
 
             const blocker = gate();
-            sandbox.stub(CpmResolver, 'UpdateCpmVersionsAsync').callsFake(async () => {
+            stubCoreCall('updateCpmVersions', async () => {
                 await blocker.wait;
+                return { applied: 1 };
             });
 
             const api = createHostAPI();
@@ -1237,7 +1375,8 @@ suite('HostAPI Tests', () => {
             let writeStarted!: () => void;
             const reachedWrite = new Promise<void>((resolve) => { writeStarted = resolve; });
             const blocker = gate();
-            sandbox.stub(CpmResolver, 'UpdateCpmVersionsAsync').callsFake(async (propsFilePath) => {
+            stubCoreCall('updateCpmVersions', async (params) => {
+                const propsFilePath = (params as unknown as { propsFilePath: string }).propsFilePath;
                 writeStarted();
                 await blocker.wait;
                 fs.writeFileSync(
@@ -1245,6 +1384,7 @@ suite('HostAPI Tests', () => {
                     fs.readFileSync(propsFilePath, 'utf8').replace('Version="1.0.0"', 'Version="1.5.0"')
                 );
                 written = true;
+                return { applied: 1 };
             });
 
             const api = createHostAPI();
@@ -1276,6 +1416,7 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(batchJob(status).Response?.Cancelled, true);
             assert.strictEqual(written, true, 'the cancelled job must have written before rolling back');
             assert.strictEqual(fs.readFileSync(propsPath, 'utf8'), propsBefore);
+            assert.strictEqual(coreCallsTo('updateCpmVersions').length, 1);
         });
 
         test('runs a package update as a job', async () => {
@@ -1303,10 +1444,13 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(status.value.Kind, 'projectUpdate');
             assert.strictEqual(status.value.State, 'completed');
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            const net10 = map.conditional.find((entry) => entry.framework === 'net10.0');
-            assert.strictEqual(net10?.versions.get('Pkg.Shared'), '1.5.0');
-            assert.strictEqual(map.unconditional.get('Pkg.Shared'), '1.0.0', 'the other line is untouched');
+            assert.deepStrictEqual(coreCallsTo('updatePackageVersion'), [{
+                projectPath,
+                packageId: 'Pkg.Shared',
+                version: '1.5.0',
+                condition: "$(TargetFramework.StartsWith('net10.0'))",
+                scope: 'group',
+            }]);
         });
 
         test('runs a consolidation as a job', async () => {
@@ -1327,8 +1471,10 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(status.value.Kind, 'consolidate');
             assert.strictEqual(status.value.State, 'completed');
 
-            const map = await CpmResolver.ParseCpmFileAsync(path.join(workspaceDir, 'Directory.Packages.props'));
-            assert.strictEqual(map.unconditional.get('Pkg.Shared'), '3.0.0');
+            assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
+                propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
+                changes: [{ packageId: 'Pkg.Shared', version: '3.0.0', scope: 'unconditional' }],
+            }]);
         });
 
         test('runs a cleanup as a job', async () => {
@@ -1426,9 +1572,21 @@ suite('HostAPI Tests', () => {
         test('preflight reports a selected version that violates the graph', async () => {
             setupWorkspace('unconditional-plus-conditional.props');
             // The installed graph resolves Pkg.Leaf 2.0.0, but the new
-            // Pkg.Shared 1.5.0 requires it at exactly 1.0.0.
+            // Pkg.Shared 1.5.0 requires it at exactly 1.0.0. The core computes the
+            // closure; here its answer is canned and the host only maps it.
             writeAssets({ 'Pkg.Shared': '1.0.0', 'Pkg.Leaf': '2.0.0' });
             stubPackageMetadata('1.5.0', [{ package: 'Pkg.Leaf', versionRange: '[1.0.0]' }]);
+            stubCoreCall('computeRequirementClosure', () => ({
+                Conflicts: [{
+                    PackageId: 'Pkg.Leaf',
+                    RequiredBy: 'Pkg.Shared',
+                    RequiredByVersion: '1.5.0',
+                    Range: '[1.0.0]',
+                    RequiredVersion: '1.0.0',
+                    Tfm: 'net10.0',
+                }],
+                Planned: { 'pkg.leaf': '1.0.0' },
+            }));
 
             const api = createHostAPI();
             const result = await api.checkBatchUpdateAsync({
@@ -1449,6 +1607,16 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(conflict.RequiredRange, '[1.0.0]');
             assert.strictEqual(conflict.EffectiveVersion, '2.0.0');
             assert.match(conflict.Reason, /requires Pkg\.Leaf \[1\.0\.0\]/);
+
+            assert.deepStrictEqual(coreCallsTo('computeRequirementClosure'), [{
+                selected: [{ id: 'Pkg.Shared', version: '1.5.0' }],
+                tfms: ['net10.0'],
+                effective: { 'pkg.shared': '1.5.0', 'pkg.leaf': '2.0.0' },
+                constrained: { 'net10.0': ['pkg.shared'] },
+                constrainAll: true,
+                maxInspected: 250,
+                sources: [{ url: 'https://api.nuget.org/v3/index.json' }],
+            }]);
         });
 
         test('preflight accepts a compatible selection', async () => {
@@ -1469,6 +1637,7 @@ suite('HostAPI Tests', () => {
 
             assert.ok(result.ok, result.ok ? '' : result.error);
             assert.deepStrictEqual(result.value.Conflicts, []);
+            assert.strictEqual(coreCallsTo('computeRequirementClosure').length, 1);
         });
 
         test('preflight reports installed ranges that the selection would break', async () => {
@@ -1530,7 +1699,11 @@ suite('HostAPI Tests', () => {
         });
 
         test('names the batch rows a failed restore points at', async () => {
-            setupWorkspace('unconditional-plus-conditional.props');
+            setupWorkspace('unconditional-plus-conditional.props', cpmMap({
+                unconditional: {
+                    'Microsoft.EntityFrameworkCore.Relational': '11.0.0-rc.2.26504.105',
+                },
+            }));
             fs.writeFileSync(
                 path.join(workspaceDir, 'Directory.Packages.props'),
                 [
@@ -1552,6 +1725,21 @@ suite('HostAPI Tests', () => {
             sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').rejects(
                 new DotnetError('dotnet exited with code 1', output)
             );
+            stubCoreCall('classifyDotnetFailure', () => ({
+                Kind: 'RestoreConflict',
+                Summary: 'NU1107 Microsoft.EntityFrameworkCore.Relational',
+                Hint: '',
+                Detail: output,
+                Conflicts: [{
+                    Code: 'NU1107',
+                    PackageId: 'Microsoft.EntityFrameworkCore.Relational',
+                    SuggestedVersion: '11.0.0-rc.3.26522.148',
+                    Message: 'Version conflict detected for Microsoft.EntityFrameworkCore.Relational.',
+                    Chains: [
+                        'Sample.Api -> Npgsql.EntityFrameworkCore.PostgreSQL 11.0.0-rc.2 -> Microsoft.EntityFrameworkCore.Relational (= 11.0.0-rc.2.26504.105).',
+                    ],
+                }],
+            }));
 
             const api = createHostAPI();
             const result = await api.batchUpdatePackagesAsync({
@@ -1663,7 +1851,7 @@ suite('HostAPI Tests', () => {
             sandbox.stub(vscode.workspace, 'getConfiguration').returns({
                 get: () => undefined,
             } as unknown as vscode.WorkspaceConfiguration);
-            sandbox.stub(CpmResolver, 'FindCpmFilePathAsync').resolves(null);
+            sandbox.stub(CpmReader, 'GetFrameworkPackageMapAsync').resolves(null);
             sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
                 { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
             ]);

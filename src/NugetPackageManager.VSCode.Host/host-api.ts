@@ -60,28 +60,22 @@ import type {
   UpdateCentralVersionsRequest,
   UpdateCentralVersionsResponse,
   DependencyIssue,
+  RestoreConflictInfo,
   ToolchainHealth,
 } from "@/common/rpc/types";
 import type { Result } from "@/common/rpc/result";
 import { ok, fail } from "@/common/rpc/result";
-import CpmResolver, { type CpmFrameworkEntry, type CpmPackageMap, type CpmVersionChange } from "./utilities/cpm-resolver";
-import CpmWriter from "./utilities/cpm-writer";
-import { getTfmMajorVersion } from "./utilities/cpm-condition";
+import CpmReader, { type CpmFrameworkEntry, type CpmPackageMap } from "./utilities/cpm-reader";
+import CpmWriter, { type CpmVersionChange } from "./utilities/cpm-writer";
 import { findPathOutsideWorkspaceAsync } from "./utilities/workspace-path";
 import { compareVersions, isVersionInRange, satisfiesVersionRange } from "./utilities/version";
 import { isValidNuGetVersion, isValidPackageId } from "./utilities/nuget-identifier";
-import {
-  FormatRestoreConflicts,
-  ParseRestoreConflicts,
-  SummarizeRestoreFailure,
-  type RestoreConflict,
-} from "./utilities/restore-diagnostics";
-import nugetApiFactory from "./nuget/api-factory";
+import nugetApiFactory, { ReadProxyUrl } from "./nuget/api-factory";
 import coreProcess from "./nuget/core-process";
 import { SetUpdateBadge } from "./view-badge";
 import NuGetConfigResolver from "./utilities/nuget-config-resolver";
 import TaskExecutor, { CreateDotnetOptions, DotnetError } from "./utilities/task-executor";
-import { ToFailureInfo, type DotnetFailure } from "./utilities/dotnet-failure";
+import { ClassifyDotnetFailureAsync, type DotnetFailure } from "./utilities/dotnet-failure";
 import { BuildToolchainDiagnosticsAsync, ProbeToolchainAsync } from "./utilities/toolchain-health";
 import { GetSdkInstallRoot } from "./utilities/sdk-locations";
 import {
@@ -92,9 +86,7 @@ import {
 import { InstallSdkAsync, IsValidSdkVersion, SdkInstallError } from "./utilities/sdk-install";
 import { ResolveDotnetCommand, ResolveDotnetContext, ResolveWorkingDirectory } from "./utilities/dotnet-context";
 import { RunWorkloadCommandAsync } from "./utilities/workload-commands";
-import { AnalyzeProjectAsync, ReadAssetsAsync, ReadDirectDependencies } from "./utilities/dependency-graph";
 import { ScopeProjectFiles } from "./utilities/project-scope";
-import { ComputeRequirementClosureAsync, OrderRequirements } from "./utilities/requirement-closure";
 import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "@/common/logger";
@@ -119,7 +111,7 @@ interface CentralUpdatePlan {
 /** Splits the requested raises into unconditional, conditional and ignored ones. */
 function PlanCentralUpdates(
   updates: UpdateCentralVersionsRequest["Updates"],
-  defined: Map<string, string>
+  defined: Set<string>
 ): CentralUpdatePlan {
   const plan: CentralUpdatePlan = { Applied: [], Skipped: [], Changes: [], Conditional: [] };
   for (const update of updates) {
@@ -138,7 +130,7 @@ function PlanCentralUpdates(
       plan.Applied.push(update.PackageId);
       continue;
     }
-    const definedId = [...defined.keys()].find((id) => id.toLowerCase() === update.PackageId.toLowerCase());
+    const definedId = [...defined].find((id) => id.toLowerCase() === update.PackageId.toLowerCase());
     if (!definedId) {
       // Transitive requirement without a PackageVersion entry: NuGet resolves
       // it on its own, nothing to raise.
@@ -476,7 +468,7 @@ async function collectBatchFilesAsync(
   const affectedFiles = new Set<string>(allProjectPaths);
   for (const update of updates) {
     for (const projectPath of update.ProjectPaths) {
-      const cpmFilePath = await CpmResolver.FindCpmFilePathAsync(projectPath);
+      const cpmFilePath = await CpmReader.FindCpmFilePathAsync(projectPath);
       if (cpmFilePath) affectedFiles.add(cpmFilePath);
     }
   }
@@ -529,10 +521,10 @@ async function resolveCpmChangesForUpdateAsync(
   const nonCpmProjects: string[] = [];
 
   for (const projectPath of update.ProjectPaths) {
-    const cpmFilePath = await CpmResolver.FindCpmFilePathAsync(projectPath);
+    const cpmFilePath = await CpmReader.FindCpmFilePathAsync(projectPath);
     const cpmMap = cpmFilePath ? await loadBatchCpmMapAsync(cpmFilePath, cpmMapCache) : null;
 
-    if (!cpmMap || !CpmResolver.HasPackage(cpmMap, update.PackageId)) {
+    if (!cpmMap || !CpmReader.HasPackage(cpmMap, update.PackageId)) {
       nonCpmProjects.push(projectPath);
       continue;
     }
@@ -558,7 +550,7 @@ async function loadBatchCpmMapAsync(
   cpmMapCache: Map<string, Promise<CpmPackageMap>>
 ): Promise<CpmPackageMap> {
   if (!cpmMapCache.has(cpmFilePath)) {
-    cpmMapCache.set(cpmFilePath, CpmResolver.ParseCpmFileAsync(cpmFilePath));
+    cpmMapCache.set(cpmFilePath, CpmReader.ParseCpmFileAsync(cpmFilePath));
   }
   return cpmMapCache.get(cpmFilePath)!;
 }
@@ -663,7 +655,7 @@ async function finalizeTransactionalBatchAsync(params: {
 
   const response: BatchUpdateResponse = { Results: results, RolledBack: true };
   if (failedRestore) response.RestoreError = failedRestore;
-  if (restoreFailure?.failure) response.Failure = ToFailureInfo(restoreFailure.failure);
+  if (restoreFailure?.failure) response.Failure = restoreFailure.failure;
   const rollbackMessage = rollbackError ?? rollbackRestoreError;
   if (rollbackMessage) response.RollbackError = rollbackMessage;
   if (conflictingPackages.length > 0) response.ConflictingPackages = conflictingPackages;
@@ -749,12 +741,12 @@ function isHttpUrl(value: string): boolean {
 }
 
 async function loadProjectCpmStateAsync(request: UpdateProjectRequest): Promise<ProjectCpmState> {
-  const cpmMap = await CpmResolver.GetFrameworkPackageMapAsync(request.ProjectPath);
+  const cpmMap = await CpmReader.GetFrameworkPackageMapAsync(request.ProjectPath);
   const isCpmEnabled = cpmMap !== null;
   return {
     cpmMap,
     isCpmEnabled,
-    isCpmPackage: isCpmEnabled && CpmResolver.HasPackage(cpmMap, request.PackageId),
+    isCpmPackage: isCpmEnabled && CpmReader.HasPackage(cpmMap, request.PackageId),
   };
 }
 
@@ -793,7 +785,7 @@ async function snapshotProjectUpdateAsync(
   isCpmEnabled: boolean
 ): Promise<Map<string, FileSnapshot>> {
   const snapshotPaths = new Set<string>([request.ProjectPath]);
-  const cpmFilePath = await CpmResolver.FindCpmFilePathAsync(request.ProjectPath);
+  const cpmFilePath = await CpmReader.FindCpmFilePathAsync(request.ProjectPath);
   if (cpmFilePath) snapshotPaths.add(cpmFilePath);
   if (request.Type === "UNINSTALL" && isCpmEnabled) {
     const propsFiles = await vscode.workspace.findFiles(
@@ -866,10 +858,10 @@ async function buildProjectUpdateFailureAsync(
   report: JobReporter
 ): Promise<string> {
   const message = err instanceof Error ? err.message : String(err);
-  const classified = err instanceof DotnetError ? err.failure : undefined;
-  let detail: string | null = null;
-  if (classified) detail = `${classified.Summary} ${classified.Hint}`;
-  else if (err instanceof DotnetError) detail = SummarizeRestoreFailure(err.output);
+  const classified = err instanceof DotnetError
+    ? err.failure ?? await ClassifyDotnetFailureAsync(err.output, { ProjectPath: request.ProjectPath })
+    : undefined;
+  const detail = classified ? `${classified.Summary} ${classified.Hint}` : null;
 
   report("Rolling back…", 90);
   let rollbackError = await rollbackFilesAsync(snapshots);
@@ -1024,9 +1016,9 @@ async function collectConsolidationChangesAsync(
       `Consolidating ${request.PackageId} (${i + 1}/${request.ProjectPaths.length})...`
     );
 
-    const cpmFilePath = await CpmResolver.FindCpmFilePathAsync(projectPath);
+    const cpmFilePath = await CpmReader.FindCpmFilePathAsync(projectPath);
     const cpmMap = cpmFilePath ? await loadBatchCpmMapAsync(cpmFilePath, cpmMapCache) : null;
-    if (!cpmMap || !CpmResolver.HasPackage(cpmMap, request.PackageId)) {
+    if (!cpmMap || !CpmReader.HasPackage(cpmMap, request.PackageId)) {
       nonCpmProjects.push(projectPath);
       continue;
     }
@@ -1168,10 +1160,10 @@ function attributeRestoreConflicts(
 function collectNamedPackages(failure: RestoreFailure): Set<string> {
   const named = new Set<string>();
   for (const conflict of failure.conflicts) {
-    if (conflict.packageId) named.add(conflict.packageId.toLowerCase());
-    for (const constraint of conflict.constraints) {
+    if (conflict.PackageId) named.add(conflict.PackageId.toLowerCase());
+    for (const chain of conflict.Chains) {
       // Chains look like "Project -> Package 1.2.3 -> Other (>= 1.0)".
-      for (const match of constraint.chain.matchAll(/([A-Za-z][\w.-]{0,99})\s+v?\d+\.\d+/g)) {
+      for (const match of chain.matchAll(/([A-Za-z][\w.-]{0,99})\s+v?\d+\.\d+/g)) {
         const candidate = match[1] ?? "";
         if (candidate) named.add(candidate.toLowerCase());
       }
@@ -1219,14 +1211,14 @@ async function findBatchUpdateConflictsAsync(
     await checkProjectConflictsAsync({ projectPath, selected, sources, detailsCache, signal, addConflict });
   }
 
-  ApplyRequirementOrder(conflicts);
+  await ApplyRequirementOrderAsync(conflicts);
   return conflicts;
 }
 
 interface ProjectConflictInput {
   projectPath: string;
   selected: Map<string, { id: string; version: string }>;
-  sources: Array<{ Url: string }>;
+  sources: Array<{ Url: string; Username?: string; Password?: string }>;
   detailsCache: Map<string, Promise<Record<string, PackageDependency[]> | null>>;
   signal: AbortSignal | undefined;
   addConflict: (conflict: BatchUpdateConflict) => void;
@@ -1242,14 +1234,19 @@ async function checkProjectConflictsAsync(input: ProjectConflictInput): Promise<
   const effective = new Map(graph?.packageVersions ?? []);
   for (const [id, entry] of selected) effective.set(id, entry.version);
 
-  const assets = await ReadAssetsAsync(projectPath);
+  const restored = await coreProcess.CallAsync<RestoredDirectDependenciesWire>(
+    "getRestoredDirectDependencies",
+    { projectPath },
+    input.signal
+  );
   const tfms = [...(graph?.tfms ?? [])];
-  const centralVersions = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
+  const cpmMap = await CpmReader.GetFrameworkPackageMapAsync(projectPath);
+  const centralIds = cpmMap ? CpmReader.PackageIds(cpmMap) : new Set<string>();
   const shared = {
     projectPath,
     selected,
     effective,
-    ...BuildConflictConstraints(tfms, assets, centralVersions, projectPath),
+    ...BuildConflictConstraints(tfms, restored, centralIds, projectPath),
     sources: input.sources,
     detailsCache: input.detailsCache,
     signal: input.signal,
@@ -1262,35 +1259,38 @@ async function checkProjectConflictsAsync(input: ProjectConflictInput): Promise<
 
 function BuildConflictConstraints(
   tfms: string[],
-  assets: Awaited<ReturnType<typeof ReadAssetsAsync>>,
-  centralVersions: Map<string, string>,
+  restored: RestoredDirectDependenciesWire,
+  centralIds: Set<string>,
   projectPath: string
 ): Omit<ConflictCheckContext, "projectPath" | "selected" | "effective" | "sources" | "detailsCache" | "signal" | "addConflict"> {
   return {
     directPackages: new Map(
-      tfms.map((tfm) => [tfm, assets ? ReadDirectDependencies(assets, tfm) : new Set<string>()])
+      tfms.map((tfm) => [tfm, new Set(restored.DirectByTfm[tfm] ?? [])])
     ),
-    centralIds: new Set([...centralVersions.keys()].map((id) => id.toLowerCase())),
+    centralIds: new Set([...centralIds].map((id) => id.toLowerCase())),
     centralTransitivePinning: isCentralTransitivePinningEnabled(projectPath),
-    directKnown: Boolean(assets?.project?.frameworks && Object.keys(assets.project.frameworks).length > 0),
+    directKnown: restored.HasDirectSection,
   };
 }
 
 /** Adds the dependency step to each conflict so the plan can be applied in order. */
-function ApplyRequirementOrder(conflicts: BatchUpdateConflict[]): void {
+async function ApplyRequirementOrderAsync(conflicts: BatchUpdateConflict[]): Promise<void> {
   if (conflicts.length === 0) return;
-  const order = OrderRequirements(
-    conflicts.map((conflict) => ({
-      PackageId: conflict.BlockedByPackageId,
-      RequiredBy: conflict.PackageId,
-      RequiredByVersion: conflict.RequestedVersion,
-      Range: conflict.RequiredRange,
-      RequiredVersion: conflict.RequiredVersion ?? conflict.RequiredRange,
-      Tfm: conflict.Tfm ?? "",
-    }))
+  const order = await coreProcess.CallAsync<{ orders: Record<string, { Order: number }> }>(
+    "orderRequirements",
+    {
+      conflicts: conflicts.map((conflict) => ({
+        packageId: conflict.BlockedByPackageId,
+        requiredBy: conflict.PackageId,
+        requiredByVersion: conflict.RequestedVersion,
+        range: conflict.RequiredRange,
+        requiredVersion: conflict.RequiredVersion ?? conflict.RequiredRange,
+        tfm: conflict.Tfm ?? "",
+      })),
+    }
   );
   for (const conflict of conflicts) {
-    const entry = order.get(conflict.BlockedByPackageId.toLowerCase());
+    const entry = order.orders[conflict.BlockedByPackageId.toLowerCase()];
     if (entry) conflict.Order = entry.Order;
   }
 }
@@ -1324,10 +1324,29 @@ type ConflictCheckContext = {
   directKnown: boolean;
   selected: Map<string, { id: string; version: string }>;
   effective: Map<string, string>;
-  sources: Array<{ Url: string }>;
+  sources: Array<{ Url: string; Username?: string; Password?: string }>;
   detailsCache: Map<string, Promise<Record<string, PackageDependency[]> | null>>;
   signal: AbortSignal | undefined;
   addConflict: (conflict: BatchUpdateConflict) => void;
+};
+
+type RestoredDirectDependenciesWire = {
+  DirectByTfm: Record<string, string[]>;
+  HasDirectSection: boolean;
+};
+
+type ClosureConflictWire = {
+  PackageId: string;
+  RequiredByVersion: string;
+  RequiredBy: string;
+  Range: string;
+  RequiredVersion: string;
+  Tfm: string;
+};
+
+type ClosureResultWire = {
+  Conflicts: ClosureConflictWire[];
+  Planned: Record<string, string>;
 };
 
 async function checkSelectedPackageRangesAsync(
@@ -1335,33 +1354,42 @@ async function checkSelectedPackageRangesAsync(
 ): Promise<void> {
   // (1) Ranges declared by the selected versions *and* by everything those
   // requirements pull in — a one-level check reports an incomplete plan.
-  const closure = await ComputeRequirementClosureAsync({
-    Selected: [...context.selected.values()].map((entry) => ({ Id: entry.id, Version: entry.version })),
-    Tfms: context.tfms,
-    Effective: context.effective,
-    MaxInspected: 250,
+  const constrained: Record<string, string[]> = {};
+  for (const tfm of context.tfms) {
     // Only a direct reference or a transitive pin can hold a package back; a
     // purely transitive package is resolved upward by NuGet.
-    IsConstrained: (id, tfm) => {
-      const key = id.toLowerCase();
-      if (context.selected.has(key)) return true;
-      if (!context.directKnown) return true;
-      if (context.directPackages.get(tfm)?.has(key)) return true;
-      return context.centralTransitivePinning && context.centralIds.has(key);
+    const ids = new Set(context.selected.keys());
+    if (context.directKnown) {
+      for (const id of context.directPackages.get(tfm) ?? []) ids.add(id);
+      if (context.centralTransitivePinning) {
+        for (const id of context.centralIds) ids.add(id);
+      }
+    }
+    constrained[tfm] = [...ids];
+  }
+
+  const proxy = ReadProxyUrl();
+  const closure = await coreProcess.CallAsync<ClosureResultWire>(
+    "computeRequirementClosure",
+    {
+      selected: [...context.selected.values()].map((entry) => ({
+        id: entry.id,
+        version: entry.version,
+      })),
+      tfms: context.tfms,
+      effective: Object.fromEntries(context.effective),
+      constrained,
+      constrainAll: !context.directKnown,
+      maxInspected: 250,
+      sources: context.sources.map((source) => ({
+        url: source.Url,
+        ...(source.Username !== undefined && { username: source.Username }),
+        ...(source.Password !== undefined && { password: source.Password }),
+        ...(proxy !== undefined && { proxy }),
+      })),
     },
-    GetDependencies: async (id, version, tfm) => {
-      const frameworks = await fetchDependencyFrameworksAsync(
-        id,
-        version,
-        context.sources,
-        context.detailsCache,
-        context.signal
-      );
-      if (!frameworks) return null;
-      const dependencies = selectDependencyGroup(frameworks, [tfm]);
-      return dependencies?.map((dependency) => ({ Id: dependency.package, Range: dependency.versionRange })) ?? null;
-    },
-  });
+    context.signal
+  );
 
   for (const conflict of closure.Conflicts) {
     const resolved = context.effective.get(conflict.PackageId.toLowerCase()) ?? conflict.RequiredVersion;
@@ -2854,7 +2882,11 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         const skippedPaths: string[] = [];
         let projectsScanned = 0;
         for (const projectPath of projectPaths) {
-          const analysis = await AnalyzeProjectAsync(projectPath);
+          const analysis = await coreProcess.CallAsync<{
+            Issues: DependencyIssue[];
+            Skipped: boolean;
+            Reason?: string;
+          }>("analyzeProjectDependencies", { projectPath });
           if (analysis.Skipped) {
             skippedPaths.push(projectPath);
             Logger.debug(`getDependencyIssues: skipped ${projectPath} (${analysis.Reason ?? "unknown"})`);
@@ -2892,8 +2924,8 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       try {
         let target = request.Target;
         if (!target) {
-          const cpmVersions = await CpmResolver.GetPackageVersionsAsync(request.ProjectPath);
-          target = cpmVersions?.has(request.PackageId) ? "cpm" : "project";
+          const cpmMap = await CpmReader.GetFrameworkPackageMapAsync(request.ProjectPath);
+          target = cpmMap && CpmReader.HasPackage(cpmMap, request.PackageId) ? "cpm" : "project";
         }
 
         if (target === "cpm") {
@@ -2956,7 +2988,8 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
           return fail("Central Package Management is not enabled in this workspace.");
         }
 
-        const defined = (await CpmResolver.GetPackageVersionsAsync(projectPath)) ?? new Map<string, string>();
+        const cpmMap = await CpmReader.GetFrameworkPackageMapAsync(projectPath);
+        const defined = cpmMap ? CpmReader.PackageIds(cpmMap) : new Set<string>();
         const plan = PlanCentralUpdates(request.Updates, defined);
         if (plan.Changes.length === 0 && plan.Conditional.length === 0) {
           return ok({ Applied: [], Skipped: plan.Skipped, PropsFile: propsFile });
@@ -3068,7 +3101,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
         const projectPaths = await findProjectFilesForDiagnosticsAsync();
         const projectPath = projectPaths.find((candidate) => existsSync(candidate));
-        UpdateGlobalJsonSdkVersion({
+        await UpdateGlobalJsonSdkVersion({
           StartDirectory: projectPath ? path.dirname(projectPath) : workspaceRoot,
           Version: version,
         });
@@ -3241,7 +3274,7 @@ async function findProjectFilesForDiagnosticsAsync(): Promise<string[]> {
 
 type RestoreFailure = {
   projectPaths: string[];
-  conflicts: RestoreConflict[];
+  conflicts: RestoreConflictInfo[];
   message: string;
   /** First classified cause, so the UI can explain the failure. */
   failure?: DotnetFailure;
@@ -3300,7 +3333,7 @@ async function restoreProjectsInternalAsync(
   onProgress?: (progress: RestoreProgress) => void
 ): Promise<RestoreFailure | null> {
   const failedPaths: string[] = [];
-  const conflicts: RestoreConflict[] = [];
+  const conflicts: RestoreConflictInfo[] = [];
   const summaries: string[] = [];
   const failures: DotnetFailure[] = [];
   const uniquePaths = [...new Set(projectPaths)];
@@ -3319,14 +3352,14 @@ async function restoreProjectsInternalAsync(
     try {
       await restoreOneProjectAsync(projectPath, signal, allowConflictResolution, reportProgress);
     } catch (err) {
-      recordRestoreFailure(err, projectPath, failedPaths, conflicts, summaries, failures);
+      await recordRestoreFailure(err, projectPath, failedPaths, conflicts, summaries, failures);
     }
   }
 
   if (failedPaths.length === 0) return null;
 
   const details = conflicts.length > 0
-    ? FormatRestoreConflicts(conflicts)
+    ? FormatRestoreConflictInfo(conflicts)
     : [...new Set(summaries)].slice(0, 3).join(" | ");
   const detailsSuffix = details ? `: ${details}` : ".";
   const firstFailure = failures[0];
@@ -3359,30 +3392,37 @@ async function restoreOneProjectAsync(
   );
 }
 
-function recordRestoreFailure(
+async function recordRestoreFailure(
   err: unknown,
   projectPath: string,
   failedPaths: string[],
-  conflicts: RestoreConflict[],
+  conflicts: RestoreConflictInfo[],
   summaries: string[],
   failures: DotnetFailure[]
-): void {
+): Promise<void> {
   Logger.error(`restoreProjectsInternal: Failed to restore ${projectPath}`, err);
   failedPaths.push(projectPath);
   if (err instanceof DotnetError) {
-    conflicts.push(...ParseRestoreConflicts(err.output));
-    if (err.failure) {
-      failures.push(err.failure);
-      // A classified cause is more useful than the raw error block; the detail
-      // stays available through the diagnostics panel.
-      summaries.push(err.failure.Summary);
-      return;
-    }
-    const summary = SummarizeRestoreFailure(err.output);
-    if (summary) summaries.push(summary);
+    const failure = err.failure
+      ?? await ClassifyDotnetFailureAsync(err.output, { ProjectPath: projectPath });
+    conflicts.push(...(failure.Conflicts ?? []));
+    failures.push(failure);
+    // A classified cause is more useful than the raw error block; the detail
+    // stays available through the diagnostics panel.
+    summaries.push(failure.Summary);
     return;
   }
   summaries.push(err instanceof Error ? err.message : String(err));
+}
+
+/** One actionable sentence from the structured conflicts. */
+function FormatRestoreConflictInfo(conflicts: RestoreConflictInfo[]): string {
+  const entries = conflicts.map((conflict) => {
+    const head = conflict.PackageId ? `${conflict.Code} ${conflict.PackageId}` : conflict.Code;
+    const chains = conflict.Chains.join("; ");
+    return chains ? `${head} — ${chains}` : `${head} — ${conflict.Message}`;
+  });
+  return [...new Set(entries)].join(" | ");
 }
 
 /**
@@ -3447,7 +3487,7 @@ async function collectDefinedPackagesAsync(
   const propsReports: CleanupReport["PropsFiles"] = [];
 
   for (const file of propsFiles) {
-    const map = await CpmResolver.ParseCpmFileAsync(file.fsPath);
+    const map = await CpmReader.ParseCpmFileAsync(file.fsPath);
     const definedHere = collectDefinedInFile(map);
     for (const [key, id] of definedHere) defined.set(key, id);
 
@@ -3508,7 +3548,7 @@ async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSig
 
   for (const file of projectFiles) {
     if (signal?.aborted) return;
-    const cpmFile = await CpmResolver.FindCpmFilePathAsync(file.fsPath);
+    const cpmFile = await CpmReader.FindCpmFilePathAsync(file.fsPath);
     if (!cpmFile) continue;
     cpmFiles.add(cpmFile);
 
@@ -3569,9 +3609,11 @@ async function resolveRestoreConflictAsync(
   // Only a package downgrade has an unambiguous automatic remedy (reference the
   // higher version). NU1107 conflicts between an exact pin and a lower bound
   // have no single correct answer, so they are reported instead of rewritten.
-  const conflicts = ParseRestoreConflicts(err.output)
-    .filter((conflict) => conflict.code === "NU1605" || conflict.code === "NU1109")
-    .filter((conflict) => conflict.packageId && conflict.suggestedVersion);
+  const failure = err.failure
+    ?? await ClassifyDotnetFailureAsync(err.output, { ProjectPath: projectPath });
+  const conflicts = (failure.Conflicts ?? [])
+    .filter((conflict) => conflict.Code === "NU1605" || conflict.Code === "NU1109")
+    .filter((conflict) => conflict.PackageId && conflict.SuggestedVersion);
   if (conflicts.length === 0) throw err;
 
   Logger.info(`restoreWithConflictResolution: Detected ${conflicts.length} NU1605 conflict(s) in ${projectPath}, applying fixes`);
@@ -3582,15 +3624,16 @@ async function resolveRestoreConflictAsync(
 }
 
 async function applyConflictFixesAsync(
-  conflicts: RestoreConflict[],
+  conflicts: RestoreConflictInfo[],
   projectPath: string
 ): Promise<boolean> {
-  const cpmVersions = await CpmResolver.GetPackageVersionsAsync(projectPath);
+  const cpmMap = await CpmReader.GetFrameworkPackageMapAsync(projectPath);
   let fixedAny = false;
 
-  for (const { packageId, suggestedVersion } of conflicts) {
-    const requiredVersion = suggestedVersion!;
-    if (cpmVersions?.has(packageId)) {
+  for (const conflict of conflicts) {
+    const packageId = conflict.PackageId;
+    const requiredVersion = conflict.SuggestedVersion!;
+    if (cpmMap && CpmReader.HasPackage(cpmMap, packageId)) {
       Logger.info(`restoreWithConflictResolution: Updating CPM ${packageId} to ${requiredVersion}`);
       await CpmWriter.UpdatePackageVersionAsync(projectPath, packageId, requiredVersion);
       fixedAny = true;
@@ -3719,6 +3762,12 @@ async function getLatestVersion(
 function getVersionMajor(version: string): number | null {
   const release = version.split("+")[0]!.split("-")[0]!;
   const match = /^(\d+)\./.exec(release);
+  return match ? Number.parseInt(match[1]!, 10) : null;
+}
+
+/** `net10.0-windows` → 10; `netstandard2.0` and unparseable TFMs → null. */
+function getTfmMajorVersion(tfm: string): number | null {
+  const match = /^net(\d+)\.\d+/i.exec(tfm.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 

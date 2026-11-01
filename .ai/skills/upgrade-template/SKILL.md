@@ -100,7 +100,7 @@ If your project has a legacy CLAUDE.md, REASONIX.md, or DEEPSEEK.md from an earl
 1. After upgrading, review any project-specific content in the old file (CLAUDE.md, etc.)
 2. Merge custom sections into the new `AGENTS.md` (the master file for all AI clients)
 3. Delete the old file once migration is complete
-4. Run `python .ai/scripts/sync-skills.py` to synchronize all skills
+4. Run `python .ai/scripts/sync-platforms.py` to synchronize all skills
 
 **Example:** If your CLAUDE.md has custom agent definitions or work-type mappings, copy those sections into AGENTS.md, adapt them to the new structure, then delete the old file.
 
@@ -108,7 +108,7 @@ For help migrating old `.claude/` layouts, `.reasonix/`, or other client-specifi
 
 ## After Upgrade
 
-The script automatically runs `sync-skills.py` and `sync-agents.py` in the target project after every upgrade,
+The script automatically runs `sync-platforms.py` and `sync-agents.py` in the target project after every upgrade,
 syncing all skills to Claude Code, GitHub Copilot, and Reasonix Code targets.
 
 ## Running This as Claude

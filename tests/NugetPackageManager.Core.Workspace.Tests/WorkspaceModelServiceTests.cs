@@ -5,31 +5,34 @@
 // resolutions and the `CpmEnabled` / `TargetFrameworks` / `TfmSource` fields.
 
 using NugetPackageManager.Core.Workspace.Cpm;
+using System.Diagnostics.CodeAnalysis;
+using NugetPackageManager.TestUtilities;
 
 namespace NugetPackageManager.Core.Workspace.Tests;
 
 [TestClass]
+[SuppressMessage(
+    "Design",
+    "CA1001:Types that own disposable fields should be disposable",
+    Justification = "MSTest creates one instance per test and TestCleanup disposes the workspace.")]
 public class WorkspaceModelServiceTests
 {
     private static readonly string[] net10Only = ["net10.0"];
     private static readonly string[] net10AndNet11 = ["net10.0", "net11.0"];
 
-    private string directory = string.Empty;
+    private TemporaryDirectory? workspace;
 
     [TestInitialize]
     public void Setup()
     {
-        directory = Path.Combine(Path.GetTempPath(), "workspace-model", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
+        workspace = new TemporaryDirectory("workspace-model");
     }
 
     [TestCleanup]
     public void Cleanup()
     {
-        if (Directory.Exists(directory))
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        workspace?.Dispose();
+        workspace = null;
     }
 
     [TestMethod]
@@ -73,7 +76,7 @@ public class WorkspaceModelServiceTests
     public async Task GetProjectsAsync_CentralPackages_ResolvesVersionsAndFlag()
     {
         // Arrange
-        File.WriteAllText(Path.Combine(directory, "Directory.Packages.props"), """
+        workspace!.WriteFile("Directory.Packages.props", """
             <Project>
               <PropertyGroup>
                 <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
@@ -108,7 +111,7 @@ public class WorkspaceModelServiceTests
     public async Task GetProjectsAsync_ConditionalCpm_ProducesResolutionsPerFramework()
     {
         // Arrange
-        File.WriteAllText(Path.Combine(directory, "Directory.Packages.props"), """
+        workspace!.WriteFile("Directory.Packages.props", """
             <Project>
               <PropertyGroup>
                 <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
@@ -156,7 +159,7 @@ public class WorkspaceModelServiceTests
     public async Task GetProjectsAsync_ConditionMatchesSingleVersion_FillsVersion()
     {
         // Arrange
-        File.WriteAllText(Path.Combine(directory, "Directory.Packages.props"), """
+        workspace!.WriteFile("Directory.Packages.props", """
             <Project>
               <PropertyGroup>
                 <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
@@ -218,7 +221,7 @@ public class WorkspaceModelServiceTests
     public async Task GetProjectsAsync_UnreadableProject_IsSkipped()
     {
         // Arrange
-        var broken = Path.Combine(directory, "Broken.csproj");
+        var broken = workspace!.Combine("Broken.csproj");
         File.WriteAllText(broken, "<Project><unclosed>");
 
         using var service = new WorkspaceModelService();
@@ -236,18 +239,15 @@ public class WorkspaceModelServiceTests
     {
         // The fixtures the TypeScript suite used to assert against, now checked where the
         // resolution logic lives.
-        var repositoryRoot = FindRepositoryRoot();
-        var fixtures = Path.Combine(repositoryRoot, "tests", "__fixtures__");
-
-        File.WriteAllText(
-            Path.Combine(directory, "Directory.Packages.props"),
-            File.ReadAllText(Path.Combine(fixtures, "cpm", "negated-positive.props")));
+        File.Copy(
+            TestPaths.Fixture("cpm", "negated-positive.props"),
+            workspace!.Combine("Directory.Packages.props"));
 
         var projects = new List<string>();
         foreach (var fixture in new[] { "net10", "net11", "multi", "net10-windows" })
         {
-            var target = Path.Combine(directory, $"{fixture}.csproj");
-            File.Copy(Path.Combine(fixtures, "projects", fixture, $"{fixture}.csproj"), target);
+            var target = workspace!.Combine($"{fixture}.csproj");
+            File.Copy(TestPaths.Fixture("projects", fixture, $"{fixture}.csproj"), target);
             projects.Add(target);
         }
 
@@ -291,27 +291,6 @@ public class WorkspaceModelServiceTests
         Assert.AreEqual("1.0.0", shared.CpmResolutions[0].Version);
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = AppContext.BaseDirectory;
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory, "package.json")))
-            {
-                return directory;
-            }
-
-            directory = Path.GetDirectoryName(directory);
-        }
-
-        throw new InvalidOperationException("repository root not found");
-    }
-
-    private string WriteProject(string name, string content)
-    {
-        var path = Path.Combine(directory, $"{name}.csproj");
-        File.WriteAllText(path, content);
-        return path;
-    }
+    private string WriteProject(string name, string content) =>
+        workspace!.WriteFile($"{name}.csproj", content);
 }

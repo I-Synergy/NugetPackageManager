@@ -623,6 +623,8 @@ suite('UpdatesView', () => {
 
         assert.strictEqual(succeeded, true);
         assert.strictEqual(events, 1);
+        // The header renders "<n> updates available"; the suffix must not repeat the count.
+        assert.strictEqual(view.statusText, 'Updated Pkg.Shared to 2.0.0');
     });
 
     test('renders live progress while the update job runs and clears it afterwards', async () => {

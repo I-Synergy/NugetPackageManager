@@ -15,7 +15,7 @@ Collect these before proceeding (infer from context where possible):
 | Input | Required | Notes |
 |-------|----------|-------|
 | **Base hex color** | Yes | The brand's primary color, e.g. `#0078D7`. If the user shows a logo/icon, read it visually and identify the dominant brand color. |
-| **Theme name** | Yes | Folder name under `i-synergy-{theme}`, e.g. `business`, `pointofsales`, `budgets`. Infer from context if obvious. |
+| **Theme name** | Yes | Folder name under `i-synergy-{theme}`, e.g. `business`, `pointofsales`, `retail`. Infer from context if obvious. |
 | **Logo images** | Optional | If provided, place in the `img/` folder (see below) and optionally adjust `--b-logo-w`/`--b-logo-h`. |
 
 ---

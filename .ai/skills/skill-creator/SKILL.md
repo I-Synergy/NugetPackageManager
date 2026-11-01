@@ -225,6 +225,6 @@ In Claude.ai, the core workflow is the same (draft → test → review → impro
 ## Three-tier skill architecture (this template)
 
 New skills created with this skill go into `.ai/skills/{name}/SKILL.md` (source of truth).
-Run `/update-skills` after creating or editing to sync:
+Run `/sync-platforms` after creating or editing to sync:
 - `.claude/skills/{name}/SKILL.md` — thin wrapper for Claude Code
 - `.github/skills/{name}/SKILL.md` — full copy for GitHub Copilot

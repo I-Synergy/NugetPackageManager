@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- fix: a package id that does not exist is now reported as `packageNotFound` instead of `sourceUnreachable` — the core mapped a 404 on the registration index to a feed failure, so the host's "package not found" message never appeared and the user saw an unreachable-source error for a typo.
+- fix: after a single-row update the Updates status line no longer repeats the count ("8 updates available · 8 updates available"); the suffix now says what changed ("Updated Newtonsoft.Json to 13.0.3") and the header keeps the count.
+- chore: the browser dev mock now implements the job RPCs (`startBatchUpdateAsync`, `startProjectUpdateAsync`, `startConsolidateAsync`, `startCleanupAsync`, `getJobAsync`, `cancelJobAsync`), `getOutdatedScanProgressAsync` and `updateBadgeAsync`, and the dev proxy honours the sort selection — progress, completion, cancel and sorting are testable in `npm run dev` without VS Code.
+
 - refactor: clear the SonarCloud findings introduced by the toolchain and dependency-plan work — cognitive complexity in 14 functions (each split into named helpers with no behaviour change), nested ternaries and template literals, six super-linear regular expressions, a duplicate import, an `export … from` re-export, two ternary defaults and eight regex templates converted to `String.raw`. `npm run lint` is now clean (0 errors, 0 warnings).
 - fix: Cleanup's duplicate analysis now uses the same project scope as the rest of the extension — the solution's projects when a solution exists, otherwise workspace projects minus `excludeGlobs`/hidden folders. Previously it globbed every `.csproj`, so a cached tree such as `.ai/tmp/catalog-cache` was analysed and its 32 foreign projects were restored on tab open. The automatic restore is also capped at 20 projects per pass.
 - feat: opening Cleanup restores projects without a fresh `project.assets.json` (progress in the section, one attempt per open, **Restore again** on failure), so the duplicate analysis always covers the whole solution.

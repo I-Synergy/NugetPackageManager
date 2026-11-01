@@ -4,12 +4,14 @@
     Central package versions for the C# projects in this repository.
 
     This file is discovered by every project below the root, which is why the
-    `__fixtures__` tree opts out explicitly: those `.csproj` files are test data the extension
-    evaluates at runtime, and they declare their own package versions.
+    `tests/NugetPackageManager.TestUtilities/Fixtures/` tree opts out explicitly: those
+    `.csproj` files are test data the extension evaluates at runtime, and they declare their own
+    package versions.
   -->
   <PropertyGroup>
     <IsSidecarProject>true</IsSidecarProject>
-    <IsSidecarProject Condition="$(MSBuildProjectFullPath.Contains('__fixtures__'))">false</IsSidecarProject>
+    <!-- Segment match on both separators, so `Fixtures` is recognised on Windows and Unix. -->
+    <IsSidecarProject Condition="$([System.String]::Copy('$(MSBuildProjectFullPath)').Replace('\','/').Contains('/Fixtures/'))">false</IsSidecarProject>
     <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' == 'true'">true</ManagePackageVersionsCentrally>
     <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' != 'true'">false</ManagePackageVersionsCentrally>
   </PropertyGroup>

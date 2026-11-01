@@ -66,7 +66,11 @@ suite('TaskExecutor Tests', () => {
 
             assert.strictEqual(options.cwd, root);
             assert.strictEqual(options.failureContext?.ProjectPath, projectPath);
-            assert.strictEqual(options.failureContext?.Context?.PinnedSdkVersion, '10.0.403');
+            assert.strictEqual(options.failureContext?.PinnedSdkVersion, '10.0.403');
+            assert.strictEqual(
+                options.failureContext?.GlobalJsonPath,
+                path.join(root, 'global.json')
+            );
         } finally {
             fs.rmSync(root, { recursive: true, force: true });
         }
