@@ -12,9 +12,9 @@ namespace NugetPackageManager.Core.NuGet.Sources;
 public static class PackageMapping
 {
     /// <summary>Maps a <c>SearchQueryService</c> response (<c>data[]</c>).</summary>
-    public static List<PackageDto> MapSearch(JsonElement root)
+    public static List<Package> MapSearch(JsonElement root)
     {
-        var results = new List<PackageDto>();
+        var results = new List<Package>();
         if (root.ValueKind != JsonValueKind.Object
             || !root.TryGetProperty("data", out var data)
             || data.ValueKind != JsonValueKind.Array)
@@ -24,7 +24,7 @@ public static class PackageMapping
 
         foreach (var item in data.EnumerateArray())
         {
-            results.Add(new PackageDto
+            results.Add(new Package
             {
                 Id = Text(item, "@id"),
                 Name = Text(item, "id"),
@@ -47,12 +47,12 @@ public static class PackageMapping
     }
 
     /// <summary>
-    /// Maps the registration index for one package to a <see cref="PackageDto"/>.
+    /// Maps the registration index for one package to a <see cref="Package"/>.
     /// Returns null when the index carries no versions.
     /// </summary>
     /// <param name="leaves">The registration leaves, already flattened across pages.</param>
     /// <param name="prerelease">Whether prerelease versions are eligible.</param>
-    public static PackageDto? MapRegistration(IReadOnlyList<JsonElement> leaves, bool prerelease)
+    public static Package? MapRegistration(IReadOnlyList<JsonElement> leaves, bool prerelease)
     {
         ArgumentNullException.ThrowIfNull(leaves);
 
@@ -65,7 +65,7 @@ public static class PackageMapping
         var latest = selected[^1];
         var entry = CatalogEntry(latest);
 
-        return new PackageDto
+        return new Package
         {
             Id = Text(latest, "@id"),
             Name = entry is null ? string.Empty : Text(entry.Value, "id"),
@@ -89,9 +89,9 @@ public static class PackageMapping
     }
 
     /// <summary>Maps a catalog entry's <c>dependencyGroups</c> (<c>PackageDetails</c>).</summary>
-    public static PackageDetailsDto MapDependencyGroups(JsonElement catalogEntry)
+    public static PackageDetails MapDependencyGroups(JsonElement catalogEntry)
     {
-        var frameworks = new Dictionary<string, List<PackageDependencyDto>>(StringComparer.Ordinal);
+        var frameworks = new Dictionary<string, List<PackageDependency>>(StringComparer.Ordinal);
 
         if (catalogEntry.ValueKind == JsonValueKind.Object
             && catalogEntry.TryGetProperty("dependencyGroups", out var groups)
@@ -99,13 +99,13 @@ public static class PackageMapping
         {
             foreach (var group in groups.EnumerateArray())
             {
-                var dependencies = new List<PackageDependencyDto>();
+                var dependencies = new List<PackageDependency>();
 
                 if (group.TryGetProperty("dependencies", out var items) && items.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var dependency in items.EnumerateArray())
                     {
-                        dependencies.Add(new PackageDependencyDto
+                        dependencies.Add(new PackageDependency
                         {
                             Package = Text(dependency, "id"),
                             VersionRange = Text(dependency, "range"),
@@ -122,9 +122,9 @@ public static class PackageMapping
             }
         }
 
-        return new PackageDetailsDto
+        return new PackageDetails
         {
-            Dependencies = new PackageDependencyGroupDto { Frameworks = frameworks },
+            Dependencies = new PackageDependencyGroup { Frameworks = frameworks },
         };
     }
 

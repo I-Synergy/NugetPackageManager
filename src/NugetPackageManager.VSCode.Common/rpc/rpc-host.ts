@@ -52,7 +52,7 @@ export class RpcHost {
     if (ac.signal.aborted) return;
 
     const response: RpcResponse = { type: "rpc-response", id, result };
-    this.webview.postMessage(response);
+    void this.webview.postMessage(response);
   }
 
   private isRpcCancel(msg: unknown): msg is RpcCancel {

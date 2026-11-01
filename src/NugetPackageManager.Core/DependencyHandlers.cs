@@ -145,8 +145,8 @@ public sealed class DependencyHandlers
     /// The dependency group that applies to <paramref name="tfm"/>: an exact (case-insensitive)
     /// group first, then the same major line of another <c>net</c> framework.
     /// </summary>
-    private static List<PackageDependencyDto>? SelectDependencyGroup(
-        Dictionary<string, List<PackageDependencyDto>> frameworks,
+    private static List<PackageDependency>? SelectDependencyGroup(
+        Dictionary<string, List<PackageDependency>> frameworks,
         string tfm)
     {
         if (frameworks.Count == 0)

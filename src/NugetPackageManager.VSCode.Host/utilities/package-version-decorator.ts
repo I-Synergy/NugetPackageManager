@@ -79,7 +79,7 @@ export class PackageVersionDecorator implements vscode.Disposable {
             this._timeout = undefined;
         }
         this._timeout = setTimeout(() => {
-            this.updateDecorationsAsync(editor).catch((err) => {
+            void this.updateDecorationsAsync(editor).catch((err) => {
                 Logger.error("PackageVersionDecorator: Failed to update decorations", err);
             });
         }, 500);

@@ -633,7 +633,7 @@ export class PackagesView extends LitElement {
     await this.reloadChildViewsAsync();
     await this.RefreshVulnerabilityCountAsync();
     await this.RefreshUpdateCountAsync();
-    this.debouncedLoadProjectsPackages();
+    void this.debouncedLoadProjectsPackages();
   }
 
   private async reloadChildViewsAsync(forceReload: boolean = false): Promise<void> {
@@ -806,7 +806,7 @@ export class PackagesView extends LitElement {
     let completed = 0;
 
     if (total > 0) {
-      hostApi.updateStatusBarAsync({
+      void hostApi.updateStatusBarAsync({
         Percentage: 0,
         Message: "Loading installed packages...",
       });
@@ -815,7 +815,7 @@ export class PackagesView extends LitElement {
     try {
       const CONCURRENCY = 5;
       let idx = 0;
-      const runNext = async (): Promise<void> => {
+      const runNextAsync = async (): Promise<void> => {
         while (idx < this.projectsPackages.length) {
           if (ac.signal.aborted) return;
           const pkg = this.projectsPackages[idx++]!;
@@ -828,7 +828,7 @@ export class PackagesView extends LitElement {
           });
         }
       };
-      const workers = Array.from({ length: Math.min(CONCURRENCY, this.projectsPackages.length) }, runNext);
+      const workers = Array.from({ length: Math.min(CONCURRENCY, this.projectsPackages.length) }, runNextAsync);
       await Promise.allSettled(workers);
     } finally {
       if (!ac.signal.aborted) {

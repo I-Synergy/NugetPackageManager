@@ -2,40 +2,6 @@ using System.Xml.Linq;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
-/// <summary>One conditional <c>ItemGroup</c> of a <c>Directory.Packages.props</c>.</summary>
-/// <remarks>
-/// <see cref="Order"/> is mutable on purpose: the same condition can appear in several groups and
-/// the last occurrence must win, so the entry is updated in place rather than replaced.
-/// </remarks>
-public sealed class CpmFrameworkEntry
-{
-    public required string Condition { get; init; }
-
-    public required string Framework { get; init; }
-
-    public required Dictionary<string, string> Versions { get; init; }
-
-    public int Order { get; set; }
-}
-
-/// <summary>
-/// A parsed <c>Directory.Packages.props</c>: unconditional versions, the conditional groups in
-/// document order, and whether any conditional group exists at all.
-/// </summary>
-public sealed record CpmPackageMap(
-    Dictionary<string, string> Unconditional,
-    List<CpmFrameworkEntry> Conditional,
-    bool HasConditionalGroups);
-
-/// <summary>One version line of a package for one target framework.</summary>
-public sealed record CpmVersionResolution(
-    string PackageId,
-    string Tfm,
-    string Version,
-    string Condition,
-    string ConditionLabel,
-    bool Matched);
-
 /// <summary>
 /// Reads <c>Directory.Packages.props</c> and resolves package versions per target framework.
 ///

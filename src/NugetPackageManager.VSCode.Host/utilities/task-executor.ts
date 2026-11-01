@@ -3,10 +3,12 @@ import { spawn } from "node:child_process";
 import { Logger } from "@/common/logger";
 import {
   ClassifyDotnetFailureAsync,
-  type DotnetFailure,
   type DotnetFailureContext,
 } from "./dotnet-failure";
 import { ResolveDotnetContext } from "./dotnet-context";
+import { DotnetError } from "./dotnet-error";
+
+export { DotnetError };
 
 export interface OperationProgress {
   stage: string;
@@ -27,17 +29,6 @@ export interface ExecuteCommandOptions {
   command?: string;
   /** Extra facts used to classify a failure into a user-facing cause. */
   failureContext?: DotnetFailureContext;
-}
-
-export class DotnetError extends Error {
-  constructor(
-    message: string,
-    public readonly output: string,
-    public readonly failure?: DotnetFailure
-  ) {
-    super(message);
-    this.name = "DotnetError";
-  }
 }
 
 function IsDotnetCommand(command: string): boolean {

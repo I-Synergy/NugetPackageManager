@@ -1,49 +1,6 @@
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace NugetPackageManager.Core.Diagnostics;
-
-/// <summary>One dependency chain in a restore diagnostic.</summary>
-public sealed record RestoreConstraint(string Chain, string Range);
-
-/// <summary>
-/// A recognized <c>NUxxxx</c> diagnostic. <see cref="PackageId"/> is empty when the
-/// diagnostic does not name one.
-/// </summary>
-public sealed class RestoreConflict
-{
-    public required string Code { get; init; }
-
-    public string PackageId { get; set; } = string.Empty;
-
-    /// <summary>The version NuGet suggests referencing directly, when offered.</summary>
-    public string? SuggestedVersion { get; set; }
-
-    public string? ProjectName { get; set; }
-
-    public required string Message { get; init; }
-
-    public List<RestoreConstraint> Constraints { get; } = [];
-}
-
-/// <summary>Structured conflict as it crosses the RPC boundary (<c>RestoreConflictInfo</c>).</summary>
-public sealed record RestoreConflictInfo
-{
-    [JsonPropertyName("Code")]
-    public required string Code { get; init; }
-
-    [JsonPropertyName("PackageId")]
-    public required string PackageId { get; init; }
-
-    [JsonPropertyName("SuggestedVersion")]
-    public string? SuggestedVersion { get; init; }
-
-    [JsonPropertyName("Message")]
-    public required string Message { get; init; }
-
-    [JsonPropertyName("Chains")]
-    public required IReadOnlyList<string> Chains { get; init; }
-}
 
 /// <summary>
 /// Parser for the version-conflict diagnostics emitted by <c>dotnet restore</c>.

@@ -1,59 +1,6 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace NugetPackageManager.Core.Workspace.Dependencies;
-
-/// <summary>One row of the dependency-issue report (<c>DependencyIssue</c> in the host).</summary>
-public sealed record DependencyIssueDto
-{
-    [JsonPropertyName("ProjectPath")]
-    public required string ProjectPath { get; init; }
-
-    [JsonPropertyName("Tfm")]
-    public required string Tfm { get; init; }
-
-    [JsonPropertyName("PackageId")]
-    public required string PackageId { get; init; }
-
-    [JsonPropertyName("DirectVersion")]
-    public required string DirectVersion { get; init; }
-
-    [JsonPropertyName("ResolvedVersion")]
-    public required string ResolvedVersion { get; init; }
-
-    /// <summary><c>Redundant</c> or <c>Pinned</c>.</summary>
-    [JsonPropertyName("Kind")]
-    public required string Kind { get; init; }
-
-    [JsonPropertyName("Chain")]
-    public required string Chain { get; init; }
-}
-
-/// <summary>Result of analysing one project's restored graph.</summary>
-public sealed record DependencyAnalysis
-{
-    [JsonPropertyName("Issues")]
-    public required IReadOnlyList<DependencyIssueDto> Issues { get; init; }
-
-    [JsonPropertyName("Skipped")]
-    public required bool Skipped { get; init; }
-
-    [JsonPropertyName("Reason")]
-    public string? Reason { get; init; }
-}
-
-/// <summary>
-/// The direct references and framework list of a restored project, for the batch preflight.
-/// Ids are lower-cased, as the host's previous reader did.
-/// </summary>
-public sealed record RestoredDirectDependencies
-{
-    [JsonPropertyName("DirectByTfm")]
-    public required IReadOnlyDictionary<string, List<string>> DirectByTfm { get; init; }
-
-    [JsonPropertyName("HasDirectSection")]
-    public required bool HasDirectSection { get; init; }
-}
 
 /// <summary>
 /// Reads the official restore output (<c>obj/project.assets.json</c>) and reports direct
@@ -165,10 +112,10 @@ public static class AssetsGraph
         };
     }
 
-    internal static IReadOnlyList<DependencyIssueDto> Analyze(string assetsJson, string projectPath)
+    internal static IReadOnlyList<DependencyIssue> Analyze(string assetsJson, string projectPath)
     {
         var assets = Parse(assetsJson);
-        var issues = new List<DependencyIssueDto>();
+        var issues = new List<DependencyIssue>();
 
         foreach (var (tfm, target) in assets.Targets ?? [])
         {
@@ -189,7 +136,7 @@ public static class AssetsGraph
             Reason = reason,
         };
 
-    private static List<DependencyIssueDto> AnalyzeTarget(
+    private static List<DependencyIssue> AnalyzeTarget(
         AssetsDocument assets,
         string tfm,
         Dictionary<string, AssetsTargetEntry> target,
@@ -205,7 +152,7 @@ public static class AssetsGraph
             return [];
         }
 
-        var issues = new List<DependencyIssueDto>();
+        var issues = new List<DependencyIssue>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var id in directIds)
@@ -260,7 +207,7 @@ public static class AssetsGraph
             .Select(entry => entry.Key)];
     }
 
-    private static DependencyIssueDto? BuildIssue(
+    private static DependencyIssue? BuildIssue(
         Dictionary<string, GraphNode> graph,
         List<string> directIds,
         string id,
@@ -284,7 +231,7 @@ public static class AssetsGraph
         var required = HighestRequiredVersion(graph, id);
         var isRedundant = required is not null && VersionSemantics.Compare(node.Version, required) <= 0;
 
-        return new DependencyIssueDto
+        return new DependencyIssue
         {
             ProjectPath = projectPath,
             Tfm = tfm,
@@ -361,9 +308,9 @@ public static class AssetsGraph
     }
 
     /// <summary>One row per package; prefer the Redundant verdict when two frameworks disagree.</summary>
-    private static List<DependencyIssueDto> DedupeIssues(List<DependencyIssueDto> issues)
+    private static List<DependencyIssue> DedupeIssues(List<DependencyIssue> issues)
     {
-        var byPackage = new Dictionary<string, DependencyIssueDto>(StringComparer.Ordinal);
+        var byPackage = new Dictionary<string, DependencyIssue>(StringComparer.Ordinal);
 
         foreach (var issue in issues)
         {
@@ -386,44 +333,4 @@ public static class AssetsGraph
 
         public required Dictionary<string, string> Dependencies { get; init; }
     }
-}
-
-/// <summary>The subset of <c>project.assets.json</c> the analysis needs.</summary>
-public sealed class AssetsDocument
-{
-    [JsonPropertyName("targets")]
-    public Dictionary<string, Dictionary<string, AssetsTargetEntry>>? Targets { get; init; }
-
-    [JsonPropertyName("project")]
-    public AssetsProject? Project { get; init; }
-}
-
-public sealed class AssetsProject
-{
-    [JsonPropertyName("frameworks")]
-    public Dictionary<string, AssetsProjectFramework>? Frameworks { get; init; }
-}
-
-public sealed class AssetsProjectFramework
-{
-    [JsonPropertyName("dependencies")]
-    public Dictionary<string, AssetsDirectDependency>? Dependencies { get; init; }
-}
-
-public sealed class AssetsDirectDependency
-{
-    [JsonPropertyName("target")]
-    public string? Target { get; init; }
-
-    [JsonPropertyName("version")]
-    public string? Version { get; init; }
-}
-
-public sealed class AssetsTargetEntry
-{
-    [JsonPropertyName("type")]
-    public string? Type { get; init; }
-
-    [JsonPropertyName("dependencies")]
-    public Dictionary<string, string>? Dependencies { get; init; }
 }

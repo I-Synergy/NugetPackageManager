@@ -8,7 +8,7 @@ namespace NugetPackageManager.Core.NuGet.Models;
 /// <see cref="Id"/> is the NuGet.org registration leaf URL, not a package id — that is what
 /// the existing contract carries, and the webview uses it as an opaque version handle.
 /// </summary>
-public sealed record PackageDto
+public sealed record Package
 {
     [JsonPropertyName("Id")]
     public required string Id { get; init; }
@@ -51,36 +51,4 @@ public sealed record PackageDto
 
     [JsonPropertyName("Tags")]
     public required IReadOnlyList<string> Tags { get; init; }
-}
-
-/// <summary>A version and the registration leaf URL that identifies it.</summary>
-public sealed record PackageVersionRef
-{
-    [JsonPropertyName("Version")]
-    public required string Version { get; init; }
-
-    [JsonPropertyName("Id")]
-    public required string Id { get; init; }
-}
-
-/// <summary>Dependency groups for one package version (<c>PackageDetails</c>).</summary>
-public sealed record PackageDetailsDto
-{
-    [JsonPropertyName("dependencies")]
-    public required PackageDependencyGroupDto Dependencies { get; init; }
-}
-
-public sealed record PackageDependencyGroupDto
-{
-    [JsonPropertyName("frameworks")]
-    public required Dictionary<string, List<PackageDependencyDto>> Frameworks { get; init; }
-}
-
-public sealed record PackageDependencyDto
-{
-    [JsonPropertyName("package")]
-    public required string Package { get; init; }
-
-    [JsonPropertyName("versionRange")]
-    public required string VersionRange { get; init; }
 }

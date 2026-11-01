@@ -16,7 +16,7 @@ suite('LocalNuGetFeed', () => {
         fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
 
-    async function writePackage(id: string, version: string): Promise<string> {
+    async function writePackageAsync(id: string, version: string): Promise<string> {
         const zip = new JSZip();
         zip.file(`${id}.nuspec`, `<?xml version="1.0" encoding="utf-8"?>
 <package>
@@ -39,8 +39,8 @@ suite('LocalNuGetFeed', () => {
     }
 
     test('lists packages and exposes their versions', async () => {
-        await writePackage('Local.Test', '1.0.0');
-        await writePackage('Local.Test', '2.0.0-beta.1');
+        await writePackageAsync('Local.Test', '1.0.0');
+        await writePackageAsync('Local.Test', '2.0.0-beta.1');
 
         const feed = new LocalNuGetFeed(tempDir);
         const stable = await feed.GetPackagesAsync('local', false, 0, 10);
@@ -53,7 +53,7 @@ suite('LocalNuGetFeed', () => {
     });
 
     test('reads nuspec dependencies from a package version', async () => {
-        const nupkg = await writePackage('Local.Dependency', '1.2.3');
+        const nupkg = await writePackageAsync('Local.Dependency', '1.2.3');
         const feed = new LocalNuGetFeed(tempDir);
         const details = await feed.GetPackageDetailsAsync(nupkg);
 

@@ -78,7 +78,7 @@ public class DependencyHandlersTests
             .ReturnsAsync(Package("2.0.0"));
         source
             .Setup(x => x.GetPackageDetailsAsync("leaf/A/2.0.0", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Details(("net10.0", [new PackageDependencyDto
+            .ReturnsAsync(Details(("net10.0", [new PackageDependency
             {
                 Package = "B",
                 VersionRange = "[2.0.0, )",
@@ -115,8 +115,8 @@ public class DependencyHandlersTests
         source
             .Setup(x => x.GetPackageDetailsAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(Details(
-                ("net9.0", [new PackageDependencyDto { Package = "Old", VersionRange = "[9.0.0, )" }]),
-                ("net10.0-windows", [new PackageDependencyDto { Package = "C", VersionRange = "[2.0.0, )" }])));
+                ("net9.0", [new PackageDependency { Package = "Old", VersionRange = "[9.0.0, )" }]),
+                ("net10.0-windows", [new PackageDependency { Package = "C", VersionRange = "[2.0.0, )" }])));
 
         var handlers = CreateHandlers(Provider(source));
 
@@ -170,7 +170,7 @@ public class DependencyHandlersTests
         return provider.Object;
     }
 
-    private static PackageDto Package(params string[] versions) => new()
+    private static Package Package(params string[] versions) => new()
     {
         Id = "leaf",
         Name = "A",
@@ -192,11 +192,11 @@ public class DependencyHandlersTests
         Tags = [],
     };
 
-    private static PackageDetailsDto Details(
-        params (string Tfm, List<PackageDependencyDto> Dependencies)[] groups) =>
+    private static PackageDetails Details(
+        params (string Tfm, List<PackageDependency> Dependencies)[] groups) =>
         new()
         {
-            Dependencies = new PackageDependencyGroupDto
+            Dependencies = new PackageDependencyGroup
             {
                 Frameworks = groups.ToDictionary(group => group.Tfm, group => group.Dependencies),
             },

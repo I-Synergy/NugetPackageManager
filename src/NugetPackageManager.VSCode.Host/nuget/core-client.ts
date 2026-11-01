@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Logger } from "@/common/logger";
+import { CoreError } from "./core-error";
+
+export { CoreError };
 
 /**
  * Transport for the C# NuGet sidecar.
@@ -31,17 +34,6 @@ export type CoreClientOptions = {
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESTARTS = 3;
-
-/** Failure reported by the client or forwarded from the sidecar. */
-export class CoreError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "CoreError";
-    this.code = code;
-  }
-}
 
 type PendingCall = {
   resolve: (value: unknown) => void;

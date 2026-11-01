@@ -80,8 +80,8 @@ import { BuildToolchainDiagnosticsAsync, ProbeToolchainAsync } from "./utilities
 import { GetSdkInstallRoot } from "./utilities/sdk-locations";
 import {
   IsValidSdkVersion as IsValidGlobalJsonSdkVersion,
-  UpdateGlobalJsonSdkVersion,
   UpdateGlobalJsonSdkVersionAsync,
+  WriteGlobalJsonSdkVersionAsync,
 } from "./utilities/global-json";
 import { InstallSdkAsync, IsValidSdkVersion, SdkInstallError } from "./utilities/sdk-install";
 import { ResolveDotnetCommand, ResolveDotnetContext, ResolveWorkingDirectory } from "./utilities/dotnet-context";
@@ -494,7 +494,7 @@ async function applyBatchUpdateAsync(
     for (const projectPath of nonCpmProjects) {
       // A transactional batch restores once at the end; letting `dotnet add`
       // restore here would turn one restore into one per package.
-      await executeAddPackage(
+      await executeAddPackageAsync(
         update.PackageId,
         projectPath,
         update.Version,
@@ -806,7 +806,7 @@ async function applyProjectUpdateAsync(
   report: JobReporter
 ): Promise<void> {
   if (request.Type === "UNINSTALL") {
-    await executeRemovePackage(request.PackageId, request.ProjectPath, request.OperationId, signal);
+    await executeRemovePackageAsync(request.PackageId, request.ProjectPath, request.OperationId, signal);
     if (cpm.isCpmPackage) {
       await cleanupUnusedCpmPackageAsync(request.PackageId, signal);
     }
@@ -838,7 +838,7 @@ async function applyProjectUpdateAsync(
     return;
   }
 
-  await executeAddPackage(
+  await executeAddPackageAsync(
     request.PackageId,
     request.ProjectPath,
     request.Version,
@@ -1095,7 +1095,7 @@ async function applyConsolidationAddsAsync(
 ): Promise<void> {
   const skipRestoreConfig = getSetting<boolean>("skipRestore", false);
   for (const projectPath of nonCpmProjects) {
-    await executeAddPackage(
+    await executeAddPackageAsync(
       request.PackageId,
       projectPath,
       request.TargetVersion,
@@ -1785,7 +1785,7 @@ async function collectOutdatedCandidatesAsync(params: OutdatedCandidateParams): 
   const batchSize = Number.isFinite(configuredConcurrency)
     ? Math.min(32, Math.max(1, Math.trunc(configuredConcurrency)))
     : 8;
-  const latestCache = new Map<string, Promise<Awaited<ReturnType<typeof getLatestVersion>>>>();
+  const latestCache = new Map<string, Promise<Awaited<ReturnType<typeof getLatestVersionAsync>>>>();
   const candidates: OutdatedCandidate[] = [];
   const latestStarted = Date.now();
   params.report(`Checking latest versions (0/${installedKeys.length})…`, 30, 0, installedKeys.length);
@@ -1817,7 +1817,7 @@ async function collectOutdatedCandidatesAsync(params: OutdatedCandidateParams): 
 async function buildOutdatedCandidateAsync(
   key: string,
   params: OutdatedCandidateParams,
-  latestCache: Map<string, Promise<Awaited<ReturnType<typeof getLatestVersion>>>>,
+  latestCache: Map<string, Promise<Awaited<ReturnType<typeof getLatestVersionAsync>>>>,
   candidates: OutdatedCandidate[]
 ): Promise<void> {
   if (params.signal?.aborted) return;
@@ -1828,7 +1828,7 @@ async function buildOutdatedCandidateAsync(
   if (!latestCache.has(lookupKey)) {
     latestCache.set(
       lookupKey,
-      getLatestVersion(packageId, params.request.Prerelease, params.sources, params.signal)
+      getLatestVersionAsync(packageId, params.request.Prerelease, params.sources, params.signal)
     );
   }
   const latest = await latestCache.get(lookupKey)!;
@@ -2569,7 +2569,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       if (protocol !== "https:" && protocol !== "http:") {
         return Promise.resolve(fail(`Refusing to open unsupported URL scheme: ${protocol}`));
       }
-      vscode.env.openExternal(vscode.Uri.parse(request.Url));
+      void vscode.env.openExternal(vscode.Uri.parse(request.Url));
       return Promise.resolve(ok(undefined as void));
     },
 
@@ -3101,7 +3101,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         const workspaceRoot = getWorkspaceRoots()[0] ?? process.cwd();
         const projectPaths = await findProjectFilesForDiagnosticsAsync();
         const projectPath = projectPaths.find((candidate) => existsSync(candidate));
-        await UpdateGlobalJsonSdkVersion({
+        await WriteGlobalJsonSdkVersionAsync({
           StartDirectory: projectPath ? path.dirname(projectPath) : workspaceRoot,
           Version: version,
         });
@@ -3352,7 +3352,7 @@ async function restoreProjectsInternalAsync(
     try {
       await restoreOneProjectAsync(projectPath, signal, allowConflictResolution, reportProgress);
     } catch (err) {
-      await recordRestoreFailure(err, projectPath, failedPaths, conflicts, summaries, failures);
+      await recordRestoreFailureAsync(err, projectPath, failedPaths, conflicts, summaries, failures);
     }
   }
 
@@ -3392,7 +3392,7 @@ async function restoreOneProjectAsync(
   );
 }
 
-async function recordRestoreFailure(
+async function recordRestoreFailureAsync(
   err: unknown,
   projectPath: string,
   failedPaths: string[],
@@ -3659,7 +3659,7 @@ async function applyConflictFixesAsync(
   return fixedAny;
 }
 
-async function executeRemovePackage(packageId: string, projectPath: string, operationId?: string, signal?: AbortSignal): Promise<void> {
+async function executeRemovePackageAsync(packageId: string, projectPath: string, operationId?: string, signal?: AbortSignal): Promise<void> {
   StatusBarUtils.ShowText(`Removing package ${packageId}...`);
   const args = ["remove", projectPath.replace(/\\/g, "/"), "package", packageId];
   await TaskExecutor.ExecuteCommandAsync(
@@ -3673,7 +3673,7 @@ async function executeRemovePackage(packageId: string, projectPath: string, oper
   );
 }
 
-async function executeAddPackage(
+async function executeAddPackageAsync(
   packageId: string,
   projectPath: string,
   version?: string,
@@ -3706,7 +3706,7 @@ async function executeAddPackage(
   );
 }
 
-async function getLatestVersion(
+async function getLatestVersionAsync(
   packageId: string,
   prerelease: boolean,
   sources: Array<{ Name: string; Url: string; Patterns?: string[] }>,

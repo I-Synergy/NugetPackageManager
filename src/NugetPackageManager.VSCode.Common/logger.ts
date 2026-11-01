@@ -69,7 +69,7 @@ export class Logger {
             this._tracer = this._provider.getTracer(context.extension.id);
 
             context.subscriptions.push(new vscode.Disposable(() => {
-                this._provider.shutdown();
+                void this._provider.shutdown();
             }));
         }
     }

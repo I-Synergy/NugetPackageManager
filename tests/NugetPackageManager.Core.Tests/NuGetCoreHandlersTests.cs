@@ -154,7 +154,7 @@ public class NuGetCoreHandlersTests
     public async Task GetPackage_ReturnsWhatTheSourceReturns()
     {
         // Arrange
-        var package = new PackageDto
+        var package = new Package
         {
             Id = "https://api.nuget.org/v3/registration5-gz-semver2/newtonsoft.json/13.0.3.json",
             Name = "Newtonsoft.Json",

@@ -4,23 +4,6 @@ using System.Text.RegularExpressions;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
-/// <summary>One node of a parsed MSBuild condition.</summary>
-public abstract record ConditionNode;
-
-public sealed record LiteralNode(bool Value) : ConditionNode;
-
-public sealed record NotNode(ConditionNode Operand) : ConditionNode;
-
-public sealed record AndNode(ConditionNode Left, ConditionNode Right) : ConditionNode;
-
-public sealed record OrNode(ConditionNode Left, ConditionNode Right) : ConditionNode;
-
-public sealed record CompareNode(string Property, string Operator, string Value) : ConditionNode;
-
-public sealed record CallNode(string Property, string Method, string Value) : ConditionNode;
-
-public sealed record PropertyNode(string Name) : ConditionNode;
-
 /// <summary>
 /// Parser and evaluator for the subset of MSBuild condition syntax that
 /// <c>Directory.Packages.props</c> files use to scope a package version to a target framework.

@@ -1,57 +1,5 @@
-using System.Text.Json.Serialization;
 
 namespace NugetPackageManager.Core.Workspace.Dependencies;
-
-/// <summary>One package the user is moving, with its target version.</summary>
-public sealed record SelectedPackage(string Id, string Version);
-
-/// <summary>One declared dependency of a concrete package version.</summary>
-public sealed record ClosureDependency(string Id, string Range);
-
-/// <summary>A requirement the current graph does not satisfy.</summary>
-public sealed record ClosureConflict
-{
-    /// <summary>The package that must be raised.</summary>
-    [JsonPropertyName("PackageId")]
-    public required string PackageId { get; init; }
-
-    /// <summary>Version of the package that declares the requirement.</summary>
-    [JsonPropertyName("RequiredByVersion")]
-    public required string RequiredByVersion { get; init; }
-
-    [JsonPropertyName("RequiredBy")]
-    public required string RequiredBy { get; init; }
-
-    [JsonPropertyName("Range")]
-    public required string Range { get; init; }
-
-    [JsonPropertyName("RequiredVersion")]
-    public required string RequiredVersion { get; init; }
-
-    [JsonPropertyName("Tfm")]
-    public required string Tfm { get; init; }
-}
-
-public sealed record ClosureResult
-{
-    [JsonPropertyName("Conflicts")]
-    public required IReadOnlyList<ClosureConflict> Conflicts { get; init; }
-
-    /// <summary>Effective versions after applying every required version, keyed lower-case.</summary>
-    [JsonPropertyName("Planned")]
-    public required IReadOnlyDictionary<string, string> Planned { get; init; }
-}
-
-/// <summary>Where a package belongs in the apply order.</summary>
-public sealed record RequirementOrder
-{
-    /// <summary>0 = nothing it requires must move first; higher = apply later.</summary>
-    [JsonPropertyName("Order")]
-    public required int Order { get; init; }
-
-    [JsonPropertyName("DependsOn")]
-    public required IReadOnlyList<string> DependsOn { get; init; }
-}
 
 /// <summary>Dependency metadata for one concrete package version and framework.</summary>
 public delegate Task<IReadOnlyList<ClosureDependency>?> DependencyLookup(

@@ -87,11 +87,11 @@ suite('RPC transport', () => {
     });
 
     test('RpcHost aborts the handler and suppresses the response on cancel', async () => {
-        let receive: (msg: unknown) => Promise<void> = async () => {};
+        let receiveAsync: (msg: unknown) => Promise<void> = async () => {};
         const posted: unknown[] = [];
         const webview = {
             onDidReceiveMessage: (handler: (msg: unknown) => Promise<void>) => {
-                receive = handler;
+                receiveAsync = handler;
                 return { dispose: () => {} };
             },
             postMessage: async (msg: unknown) => {
@@ -113,9 +113,9 @@ suite('RPC transport', () => {
 
         const host = new RpcHost(webview as never, api);
         const request: RpcRequest = { type: 'rpc-request', id: 7, method: 'getProjectsAsync', params: {} };
-        const handling = receive(request);
+        const handling = receiveAsync(request);
 
-        receive({ type: 'rpc-cancel', id: 7 });
+        void receiveAsync({ type: 'rpc-cancel', id: 7 });
         await handling;
 
         assert.strictEqual(observedSignal?.aborted, true);

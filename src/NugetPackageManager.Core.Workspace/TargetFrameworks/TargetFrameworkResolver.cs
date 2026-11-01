@@ -15,11 +15,6 @@ public enum TargetFrameworkSource
     Override,
 }
 
-/// <summary>The frameworks one project builds for, and how they were found.</summary>
-public sealed record TargetFrameworkInfo(
-    IReadOnlyList<string> Frameworks,
-    TargetFrameworkSource Source,
-    bool EvaluationFailed = false);
 
 /// <summary>
 /// Resolves the target frameworks a project actually builds for.

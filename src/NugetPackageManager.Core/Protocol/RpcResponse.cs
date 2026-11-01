@@ -1,0 +1,19 @@
+using System.Text.Json.Serialization;
+
+namespace NugetPackageManager.Core.Protocol;
+
+/// <summary>One response line: <c>{"id":1,"ok":true,"value":...}</c> or <c>{"id":1,"ok":false,"error":{...}}</c>.</summary>
+public sealed record RpcResponse
+{
+    [JsonPropertyName("id")]
+    public required long Id { get; init; }
+
+    [JsonPropertyName("ok")]
+    public required bool Ok { get; init; }
+
+    [JsonPropertyName("value")]
+    public object? Value { get; init; }
+
+    [JsonPropertyName("error")]
+    public RpcError? Error { get; init; }
+}

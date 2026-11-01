@@ -50,7 +50,7 @@ export function IsValidSdkVersion(version: string): boolean {
 }
 
 /** Pins `options.Version` in the nearest `global.json`, creating one when none exists. */
-export async function UpdateGlobalJsonSdkVersion(
+export async function WriteGlobalJsonSdkVersionAsync(
     options: GlobalJsonUpdateOptions
 ): Promise<GlobalJsonUpdateResult> {
     const result = await coreProcess.CallAsync<Omit<GlobalJsonUpdateResult, "Source">>(
@@ -75,7 +75,7 @@ export async function UpdateGlobalJsonSdkVersionAsync(
 ): Promise<GlobalJsonUpdateResult> {
     const startDirectory = path.resolve(options.StartDirectory);
     if (FindGlobalJsonUpwards(startDirectory)) {
-        return UpdateGlobalJsonSdkVersion(options);
+        return WriteGlobalJsonSdkVersionAsync(options);
     }
 
     const created = await TryCreateWithTemplateAsync(
@@ -83,7 +83,7 @@ export async function UpdateGlobalJsonSdkVersionAsync(
         options.Version.trim(),
         options.Command ?? "dotnet"
     );
-    return created ?? UpdateGlobalJsonSdkVersion(options);
+    return created ?? WriteGlobalJsonSdkVersionAsync(options);
 }
 
 async function TryCreateWithTemplateAsync(

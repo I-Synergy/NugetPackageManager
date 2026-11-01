@@ -23,9 +23,9 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
 
     /// <summary>The TypeScript client's 5-minute package cache; the host calls this per row.</summary>
     private static readonly TimeSpan packageCacheTtl = TimeSpan.FromMinutes(5);
-    private readonly ConcurrentDictionary<string, (PackageDto Package, DateTimeOffset StoredAt)> packageCache =
+    private readonly ConcurrentDictionary<string, (Package Package, DateTimeOffset StoredAt)> packageCache =
         new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, PackageDetailsDto> detailsCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PackageDetails> detailsCache = new(StringComparer.Ordinal);
 
     public HttpNuGetSource(SourceDescriptor source, HttpMessageHandler? handler = null)
     {
@@ -42,7 +42,7 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
         }
     }
 
-    public async Task<IReadOnlyList<PackageDto>> SearchAsync(
+    public async Task<IReadOnlyList<Package>> SearchAsync(
         string filter,
         bool prerelease,
         int skip,
@@ -66,7 +66,7 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
         return PackageMapping.MapSearch(document.RootElement);
     }
 
-    public async Task<PackageDto> GetPackageAsync(string id, bool prerelease, CancellationToken cancellationToken)
+    public async Task<Package> GetPackageAsync(string id, bool prerelease, CancellationToken cancellationToken)
     {
         await EnsureServiceIndexAsync(cancellationToken).ConfigureAwait(false);
 
@@ -114,7 +114,7 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
         }
     }
 
-    public async Task<PackageDetailsDto> GetPackageDetailsAsync(
+    public async Task<PackageDetails> GetPackageDetailsAsync(
         string packageVersionUrl,
         CancellationToken cancellationToken)
     {
@@ -141,7 +141,7 @@ public sealed class HttpNuGetSource : INuGetSource, IDisposable
         return details;
     }
 
-    private async Task<PackageDetailsDto> ReadDetailsAsync(
+    private async Task<PackageDetails> ReadDetailsAsync(
         System.Text.Json.JsonElement leaf,
         CancellationToken cancellationToken)
     {
