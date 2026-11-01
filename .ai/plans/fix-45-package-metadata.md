@@ -1,6 +1,6 @@
 # Fix #45 — take package metadata from the search resource (full NuGet.Protocol migration)
 
-Status: IN PROGRESS
+Status: IN PROGRESS — core migration landed (commit 56f565d), branch pushed
 Branch: `fix/45-package-metadata` (cut from `spike/blazor-wasm-webview`)
 Issue: https://github.com/I-Synergy/NugetPackageManager/issues/45
 
@@ -63,15 +63,15 @@ the PR body.
 
 ## Phases
 
-- [ ] P1 `Package` nullable fields + TS types + UI (— / hidden badge)
-- [ ] P2 `Sources/PackageMetadataMapper.cs` — `IPackageSearchMetadata` → `Package`, pure and unit-testable
-- [ ] P3 `SourceRepositoryFactory.Create(descriptor, handler)` with the handler override
-- [ ] P4 `Sources/ProtocolNuGetSource.cs` — `INuGetSource` over the four resources, with the search enrichment and caches
-- [ ] P5 Wire `NuGetSourceProvider` + handlers; delete `HttpNuGetSource`, `PackageMapping`, `NuGetHttpClient`
-- [ ] P6 `getPackageDetails` → `{ Id, Version }` (C#, RPC types, host-api, webview, DependencyHandlers)
+- [x] P1 `Package` nullable fields + TS types + UI (— / hidden badge)
+- [x] P2 `Sources/PackageMetadataMapper.cs` — `IPackageSearchMetadata` → `Package`, pure and unit-testable
+- [x] P3 `SourceRepositoryFactory` reused as-is (default provider chain; proxy/auth untouched)
+- [x] P4 `Sources/ProtocolNuGetSource.cs` — `INuGetSource` over the four resources, with the search enrichment and caches
+- [x] P5 Wire `NuGetSourceProvider` + handlers; delete `HttpNuGetSource`, `PackageMapping`, `NuGetHttpClient`
+- [x] P6 `getPackageDetails` → `{ Id, Version }` (C#, RPC types, host-api, webview, DependencyHandlers)
 - [ ] P7 `OutdatedPackage` carries `TotalDownloads`/`Verified`; Updates rows render them
 - [ ] P8 One `emptyPackage` factory; `Id`/`Name` semantics fixed
-- [ ] P9 Tests: mapper unit tests, source tests over a stub handler, update `PackageLookupFailureTests`
+- [~] P9 Tests: source + mapper tests done (39 pass); handler/webview tests updated mapper unit tests, source tests over a stub handler, update `PackageLookupFailureTests`
       and the mapping tests; keep `dotnet test` green
 - [ ] P10 `npm run quality`, CHANGELOG/README note, commit with `Fixes #45`
 
@@ -84,6 +84,21 @@ the PR body.
 - **Performance** — one extra search call per newly selected package (cached); the updates scan
   can reuse the metadata it already fetched.
 - **SonarCloud** — deleting `PackageMapping` removes ~350 lines of new-code duplication risk.
+
+## State at hand-off
+
+Committed on the branch (`56f565d`) and pushed:
+`ProtocolNuGetSource` (registration + search enrichment), `PackageMetadataMapper`, nullable
+`TotalDownloads`/`Verified` through C#/wire/UI, the `{ id, version }` details contract, and new
+tests (`ProtocolNuGetSourceTests` — 39 pass, including "feed without search ⇒ null, not 0").
+
+**Blocked on the owner's in-flight `NugetPackageManager.Common` refactor** (moving the
+`invalidParams`/`internalError` constants out of `RpcException`): `src/NugetPackageManager.Common`
+currently fails the solution build (IDE0005/CS1591 on `Constants.cs`), so only
+`Core.NuGet.Tests` could be run. Re-run `dotnet test` + `npm run quality` once that lands.
+
+Remaining: P7 (carry the metadata into `OutdatedPackage` so **Updates list rows** are right
+without a refetch), P8 (one empty-package factory, settle `Id` vs `Name`), then P10.
 
 ## Verification
 
