@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <FooBarVersion>1.2.3</FooBarVersion>
+    <LoggingNet10Version>10.0.13</LoggingNet10Version>
+    <LoggingNet11Version>11.0.0-rc.2.26504.105</LoggingNet11Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="$(LoggingNet10Version)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="$(LoggingNet11Version)" />
+  </ItemGroup>
+</Project>

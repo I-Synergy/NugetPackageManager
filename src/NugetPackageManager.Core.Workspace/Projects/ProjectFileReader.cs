@@ -16,9 +16,14 @@ public static class ProjectFileReader
     /// <summary>
     /// Reads one project. <paramref name="cpmVersions"/> is the flat CPM map the caller has
     /// already resolved (package id → version); passing null leaves every version at its
-    /// project value.
+    /// project value. <paramref name="evaluatedVersions"/> optionally supplies MSBuild-evaluated
+    /// versions (package id → version) for references whose raw value references a property such
+    /// as <c>$(FooBar)</c>.
     /// </summary>
-    public static ProjectModel Read(string projectPath, IReadOnlyDictionary<string, string>? cpmVersions = null)
+    public static ProjectModel Read(
+        string projectPath,
+        IReadOnlyDictionary<string, string>? cpmVersions = null,
+        IReadOnlyDictionary<string, string>? evaluatedVersions = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
 
@@ -36,7 +41,8 @@ public static class ProjectFileReader
             var version = ReadVersion(reference);
             var versionOverride = ReadVersionOverride(reference);
 
-            var (resolvedVersion, versionSource) = ResolveVersion(packageId, version, versionOverride, cpmVersions);
+            var (resolvedVersion, versionSource) =
+                ResolveVersion(packageId, version, versionOverride, cpmVersions, evaluatedVersions);
 
             packages.Add(new ProjectPackageModel
             {
@@ -67,11 +73,12 @@ public static class ProjectFileReader
         string packageId,
         string? version,
         string? versionOverride,
-        IReadOnlyDictionary<string, string>? cpmVersions)
+        IReadOnlyDictionary<string, string>? cpmVersions,
+        IReadOnlyDictionary<string, string>? evaluatedVersions)
     {
         if (!string.IsNullOrEmpty(versionOverride))
         {
-            return (versionOverride, SourceOverride);
+            return (ResolveEvaluatedVersion(packageId, versionOverride, evaluatedVersions), SourceOverride);
         }
 
         if (cpmVersions is not null
@@ -81,7 +88,27 @@ public static class ProjectFileReader
             return (centralVersion, SourceCentral);
         }
 
-        return (version ?? string.Empty, SourceProject);
+        return (ResolveEvaluatedVersion(packageId, version ?? string.Empty, evaluatedVersions), SourceProject);
+    }
+
+    /// <summary>
+    /// Replaces a raw <c>$(…)</c> version with the MSBuild-evaluated value when one is known;
+    /// literal versions and versions without an evaluation are returned unchanged.
+    /// </summary>
+    private static string ResolveEvaluatedVersion(
+        string packageId,
+        string rawVersion,
+        IReadOnlyDictionary<string, string>? evaluatedVersions)
+    {
+        if (evaluatedVersions is null
+            || !rawVersion.Contains("$(", StringComparison.Ordinal)
+            || !evaluatedVersions.TryGetValue(packageId, out var effective)
+            || string.IsNullOrEmpty(effective))
+        {
+            return rawVersion;
+        }
+
+        return effective;
     }
 
     private static string? ReadVersion(XElement reference) =>

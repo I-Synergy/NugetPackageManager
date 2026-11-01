@@ -1,0 +1,60 @@
+<!--
+============================================================================================================================================
+C:\repo\src\App\App.csproj
+============================================================================================================================================
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <ProjectLevelVersion>5.0.0</ProjectLevelVersion>
+  </PropertyGroup>
+  <!--
+============================================================================================================================================
+  <Import Project="$(DirectoryBuildPropsPath)" Condition="'$(ImportDirectoryBuildProps)' == 'true' and exists('$(DirectoryBuildPropsPath)')">
+
+C:\repo\src\Directory.Build.props
+============================================================================================================================================
+-->
+  <!--<Import Project="$(AlternateCommonProps)" Condition="'$(AlternateCommonProps)' != ''" />-->
+  <PropertyGroup>
+    <CommentedImportScopeVersion>6.0.0</CommentedImportScopeVersion>
+    <FooBarVersion>1.2.3</FooBarVersion>
+    <OtherVersion>4.0.0</OtherVersion>
+  </PropertyGroup>
+  <!--
+============================================================================================================================================
+  <Import Project="build\versions.props">
+
+C:\repo\src\build\versions.props
+============================================================================================================================================
+-->
+  <PropertyGroup>
+    <FooBarVersion>2.0.0</FooBarVersion>
+    <NestedOnlyVersion>3.0.0</NestedOnlyVersion>
+  </PropertyGroup>
+  <!--
+============================================================================================================================================
+  </Import>
+
+C:\repo\src\Directory.Build.props
+============================================================================================================================================
+-->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <FooBarVersion>9.9.9</FooBarVersion>
+  </PropertyGroup>
+  <!--
+============================================================================================================================================
+  </Import>
+
+C:\repo\src\App\App.csproj
+============================================================================================================================================
+-->
+  <Target Name="LateProperty">
+    <PropertyGroup>
+      <FooBarVersion>7.7.7</FooBarVersion>
+      <TargetOnlyVersion>8.8.8</TargetOnlyVersion>
+    </PropertyGroup>
+  </Target>
+  <ItemGroup>
+    <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+  </ItemGroup>
+</Project>

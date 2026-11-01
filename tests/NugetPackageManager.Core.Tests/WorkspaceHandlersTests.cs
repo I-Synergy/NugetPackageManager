@@ -156,6 +156,87 @@ public class WorkspaceHandlersTests
         Assert.IsNull(result);
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task UpdateCpmVersions_ReturnsChangedFiles()
+    {
+        var handlers = CreateHandlers();
+        var parameters = Serialize(new
+        {
+            propsFilePath = propsPath,
+            changes = new[] { new { packageId = "Newtonsoft.Json", version = "13.0.4", scope = "first" } },
+        });
+
+        var result = await handlers["updateCpmVersions"](parameters, CancellationToken.None);
+
+        var root = ToJson(result);
+        Assert.AreEqual(1, root.GetProperty("applied").GetInt32());
+        var changedFiles = root.GetProperty("changedFiles").EnumerateArray().Select(item => item.GetString()).ToList();
+        CollectionAssert.Contains(changedFiles, propsPath);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task UpdateCpmVersions_AcceptsProjectAndWorkspaceRootParams()
+    {
+        var handlers = CreateHandlers();
+        var parameters = Serialize(new
+        {
+            propsFilePath = propsPath,
+            projectPaths = new[] { Path.Combine(directory, "App.csproj") },
+            workspaceRoots = new[] { directory },
+            changes = new[] { new { packageId = "Newtonsoft.Json", version = "13.0.4", scope = "first" } },
+        });
+
+        var result = await handlers["updateCpmVersions"](parameters, CancellationToken.None);
+
+        var root = ToJson(result);
+        Assert.AreEqual(1, root.GetProperty("applied").GetInt32());
+        CollectionAssert.Contains(
+            root.GetProperty("changedFiles").EnumerateArray().Select(item => item.GetString()).ToList(),
+            propsPath);
+        StringAssert.Contains(File.ReadAllText(propsPath), "Version=\"13.0.4\"");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task ResolveCpmWriteTargets_NoOpChange_ReturnsEmptyArray()
+    {
+        var handlers = CreateHandlers();
+        // A literal-only props file whose addressed version already matches the request: the writer
+        // would not modify anything, so nothing needs snapshotting.
+        var parameters = Serialize(new
+        {
+            propsFilePath = propsPath,
+            projectPaths = Array.Empty<string>(),
+            workspaceRoots = Array.Empty<string>(),
+            changes = new[] { new { packageId = "Newtonsoft.Json", version = "13.0.3", scope = "first" } },
+        });
+
+        var result = await handlers["resolveCpmWriteTargets"](parameters, CancellationToken.None);
+
+        var root = ToJson(result);
+        Assert.AreEqual(0, root.GetProperty("files").GetArrayLength());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task ResolveCpmWriteTargets_MissingPropsPath_ReportsInvalidParams()
+    {
+        var handlers = CreateHandlers();
+
+        var error = await Assert.ThrowsExactlyAsync<RpcException>(
+            () => handlers["resolveCpmWriteTargets"](Parse("""{"changes":[]}"""), CancellationToken.None));
+
+        Assert.AreEqual("invalidParams", error.Code);
+    }
+
+    private static JsonElement ToJson(object? value)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(value, ProtocolJson.Options));
+        return document.RootElement.Clone();
+    }
+
     private static Dictionary<string, RpcHandler> CreateHandlers() =>
         new WorkspaceHandlers(new WorkspaceModelService()).Create();
 

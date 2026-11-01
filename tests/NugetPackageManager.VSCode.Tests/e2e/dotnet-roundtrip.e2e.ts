@@ -128,6 +128,68 @@ suite('E2E: dotnet round trip', () => {
         assert.doesNotMatch(readProject(), /13\.0\.3/, 'the csproj must not pin the version under CPM');
     });
 
+    test('keeps a version variable defined in Directory.Build.props and edits that file', async () => {
+        fs.writeFileSync(path.join(projectDir, 'Directory.Build.props'), `
+            <Project>
+              <PropertyGroup>
+                <NewtonsoftJsonVersion>13.0.1</NewtonsoftJsonVersion>
+              </PropertyGroup>
+            </Project>
+            `.trim());
+        fs.writeFileSync(path.join(projectDir, 'Directory.Packages.props'), `
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Newtonsoft.Json" Version="$(NewtonsoftJsonVersion)" />
+              </ItemGroup>
+            </Project>
+            `.trim());
+        writeProject(`
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" />
+              </ItemGroup>
+            </Project>
+            `.trim());
+
+        // The MSBuild evaluation must report the effective version, not the raw reference.
+        // Call the core RPC directly: host discovery is solution-restricted, and this fixture is
+        // not part of the repository solution.
+        const projects = await coreProcess.CallAsync<
+            Array<{ Path: string; Packages: Array<{ Id: string; Version: string }> }>
+        >('getProjects', { projectPaths: [projectPath], extraTargetFrameworks: [] });
+        const project = projects.find((candidate) => candidate.Path === projectPath);
+        assert.ok(project, 'getProjects must report the fixture project');
+        const installed = project.Packages.find((pkg) => pkg.Id === 'Newtonsoft.Json');
+        assert.ok(installed, 'getProjects must report Newtonsoft.Json');
+        assert.strictEqual(installed.Version, '13.0.1', 'the effective version comes from the property');
+
+        unwrap(await api.updateProjectAsync({
+            ProjectPath: projectPath,
+            PackageId: 'Newtonsoft.Json',
+            Version: '13.0.3',
+            Type: 'UPDATE',
+        }));
+
+        const buildProps = fs.readFileSync(path.join(projectDir, 'Directory.Build.props'), 'utf8');
+        assert.match(
+            buildProps,
+            /<NewtonsoftJsonVersion>\s*13\.0\.3\s*<\/NewtonsoftJsonVersion>/,
+            'the property definition in Directory.Build.props is rewritten'
+        );
+        const packagesProps = fs.readFileSync(path.join(projectDir, 'Directory.Packages.props'), 'utf8');
+        assert.match(
+            packagesProps,
+            /Version="\$\(NewtonsoftJsonVersion\)"/,
+            'the package entry keeps the variable reference'
+        );
+    });
+
     test('reports the package as outdated against the configured feed', async () => {
         unwrap(await api.updateProjectAsync({
             ProjectPath: projectPath,

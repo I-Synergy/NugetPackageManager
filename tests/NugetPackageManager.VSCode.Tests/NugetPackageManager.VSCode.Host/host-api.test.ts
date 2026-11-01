@@ -162,6 +162,11 @@ function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
             case 'updateCpmVersions':
                 return { applied: (params as unknown as { changes: unknown[] }).changes.length };
 
+            case 'resolveCpmWriteTargets':
+                // By default the write plan touches only the props file, which the snapshot set
+                // already includes. Tests that need a property file override this via stubCoreCall.
+                return { files: [] };
+
             case 'removePackageVersion':
                 return { removed: true };
 
@@ -882,6 +887,8 @@ suite('HostAPI Tests', () => {
             assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
                 propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
                 changes: [{ packageId: 'Pkg.Shared', version: '1.5.0', scope: 'unconditional' }],
+                projectPaths: [projectPath],
+                workspaceRoots: [workspaceDir],
             }]);
         });
 
@@ -913,6 +920,8 @@ suite('HostAPI Tests', () => {
                     condition: "!$(TargetFramework.StartsWith('net11.0'))",
                     scope: 'group',
                 }],
+                projectPaths: [projectPath],
+                workspaceRoots: [workspaceDir],
             }]);
         });
 
@@ -996,6 +1005,45 @@ suite('HostAPI Tests', () => {
                     `unexpected dotnet command: ${args.join(' ')}`
                 );
             }
+        });
+
+        test('a batch failure rolls back a property file returned by resolveCpmWriteTargets', async () => {
+            setupWorkspace('unconditional-plus-conditional.props');
+            const propertyPath = path.join(workspaceDir, 'Directory.Build.props');
+            const propertyContent =
+                '<Project>\n  <PropertyGroup>\n    <PkgSharedVersion>1.0.0</PkgSharedVersion>\n  </PropertyGroup>\n</Project>\n';
+            fs.writeFileSync(propertyPath, propertyContent);
+
+            // The writer would edit the property file, not the props file; the snapshot set must
+            // therefore include it so a failed restore can roll it back.
+            stubCoreCall('resolveCpmWriteTargets', () => ({ files: [propertyPath] }));
+            stubCoreCall('updateCpmVersions', async () => {
+                fs.writeFileSync(propertyPath, propertyContent.replace('1.0.0', '1.5.0'));
+                return { applied: 1 };
+            });
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').rejects(
+                new DotnetError('dotnet exited with code 1', '')
+            );
+
+            const api = createHostAPI();
+            const result = await api.batchUpdatePackagesAsync({
+                Updates: [{
+                    PackageId: 'Pkg.Shared',
+                    Version: '1.5.0',
+                    ProjectPaths: [projectPath],
+                    Scope: 'unconditional',
+                }],
+                Transactional: true,
+                SkipRestore: false,
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.RolledBack, true);
+            assert.strictEqual(
+                fs.readFileSync(propertyPath, 'utf8'),
+                propertyContent,
+                'the property file returned by resolveCpmWriteTargets must be restored'
+            );
         });
 
         test('rejects update and restore paths outside the workspace', async () => {
@@ -1190,7 +1238,53 @@ suite('HostAPI Tests', () => {
                 packageId: 'Microsoft.EntityFrameworkCore.Relational',
                 version: '11.0.0-rc.3.26522.148',
                 scope: 'unconditional',
+                workspaceRoots: [workspaceDir],
             }]);
+        });
+
+        test('updateCentralVersions restores a property file when its restore fails', async () => {
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            const propsPath = path.join(workspaceDir, 'Directory.Packages.props');
+            const propertyPath = path.join(workspaceDir, 'Directory.Build.props');
+            const propsContent = [
+                '<Project>',
+                '  <ItemGroup>',
+                '    <PackageVersion Include="Pkg.Shared" Version="$(PkgSharedVersion)" />',
+                '  </ItemGroup>',
+                '</Project>',
+            ].join('\n');
+            const propertyContent =
+                '<Project>\n  <PropertyGroup>\n    <PkgSharedVersion>1.0.0</PkgSharedVersion>\n  </PropertyGroup>\n</Project>\n';
+            fs.writeFileSync(projectPath, '<Project Sdk="Microsoft.NET.Sdk"></Project>');
+            fs.writeFileSync(propsPath, propsContent);
+            fs.writeFileSync(propertyPath, propertyContent);
+
+            sandbox.stub(CpmReader, 'GetFrameworkPackageMapAsync').resolves(
+                cpmMap({ unconditional: { 'Pkg.Shared': '1.0.0' } })
+            );
+            // The write resolves to the property file, not the props file.
+            stubCoreCall('resolveCpmWriteTargets', () => ({ files: [propertyPath] }));
+            stubCoreCall('updateCpmVersions', async () => {
+                fs.writeFileSync(propertyPath, propertyContent.replace('1.0.0', '1.5.0'));
+                return { applied: 1 };
+            });
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').rejects(
+                new DotnetError('dotnet exited with code 1', '')
+            );
+
+            const api = createHostAPI();
+            const result = await api.updateCentralVersionsAsync({
+                ProjectPaths: [projectPath],
+                Updates: [{ PackageId: 'Pkg.Shared', Version: '1.5.0' }],
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.ok(result.ok && result.value.RestoreError, 'the restore failure is reported');
+            assert.strictEqual(
+                fs.readFileSync(propertyPath, 'utf8'),
+                propertyContent,
+                'the property file the central write edited must be restored'
+            );
         });
     });
 
@@ -1290,6 +1384,8 @@ suite('HostAPI Tests', () => {
             assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
                 propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
                 changes: [{ packageId: 'Pkg.Shared', version: '1.5.0', scope: 'unconditional' }],
+                projectPaths: [projectPath],
+                workspaceRoots: [workspaceDir],
             }]);
         });
 
@@ -1450,6 +1546,7 @@ suite('HostAPI Tests', () => {
                 version: '1.5.0',
                 condition: "$(TargetFramework.StartsWith('net10.0'))",
                 scope: 'group',
+                workspaceRoots: [workspaceDir],
             }]);
         });
 
@@ -1474,6 +1571,8 @@ suite('HostAPI Tests', () => {
             assert.deepStrictEqual(coreCallsTo('updateCpmVersions'), [{
                 propsFilePath: path.join(workspaceDir, 'Directory.Packages.props'),
                 changes: [{ packageId: 'Pkg.Shared', version: '3.0.0', scope: 'unconditional' }],
+                projectPaths: [projectPath],
+                workspaceRoots: [workspaceDir],
             }]);
         });
 

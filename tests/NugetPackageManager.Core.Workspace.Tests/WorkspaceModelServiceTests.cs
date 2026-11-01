@@ -291,6 +291,356 @@ public class WorkspaceModelServiceTests
         Assert.AreEqual("1.0.0", shared.CpmResolutions[0].Version);
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_UnconditionalPropertyVersion_ResolvesToEffectiveValue()
+    {
+        // Arrange — a `$(FooBarVersion)` central version must reach the model evaluated.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Unconditional", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation(("Foo.Bar", "1.2.3")));
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        var package = projects[0].Packages[0];
+        Assert.AreEqual("1.2.3", package.Version);
+        Assert.AreEqual("central", package.VersionSource);
+        Assert.IsTrue(projects[0].CpmEnabled);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_ConditionalPropertyVersions_ProducesRowPerTfmWithEvaluatedValues()
+    {
+        // Arrange — a property-based conditional group per framework.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <Net10Version>10.0.1</Net10Version>
+                <Net11Version>11.0.0</Net11Version>
+              </PropertyGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageVersion Include="Pkg.Shared" Version="$(Net10Version)" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
+                <PackageVersion Include="Pkg.Shared" Version="$(Net11Version)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("ConditionalProps", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Pkg.Shared" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, tfm) => tfm switch
+        {
+            "net10.0" => Evaluation(("Pkg.Shared", "10.0.1")),
+            "net11.0" => Evaluation(("Pkg.Shared", "11.0.0")),
+            _ => Evaluation(),
+        });
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert — one row per TFM, evaluated value, existing condition label.
+        var package = projects[0].Packages[0];
+        Assert.IsNotNull(package.CpmResolutions);
+        Assert.AreEqual(2, package.CpmResolutions.Count);
+        var net10 = package.CpmResolutions.Single(row => row.Tfm == "net10.0");
+        var net11 = package.CpmResolutions.Single(row => row.Tfm == "net11.0");
+        Assert.AreEqual("10.0.1", net10.Version);
+        Assert.AreEqual("11.0.0", net11.Version);
+        Assert.AreEqual("net10.0", net10.ConditionLabel);
+        Assert.AreEqual("net11.0", net11.ConditionLabel);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void ApplyResolutions_MultipleResolutionsAndEmptyFlatVersion_IsNotSkipped()
+    {
+        // Arrange — the mandatory multi-TFM regression: a package with framework-scoped versions
+        // has no single flat `Version`, yet must keep every resolution.
+        var unconditional = new Dictionary<string, string>(StringComparer.Ordinal);
+        var conditional = new List<CpmFrameworkEntry>
+        {
+            new()
+            {
+                Condition = "'$(TargetFramework)' == 'net10.0'",
+                Framework = "net10.0",
+                Versions = new Dictionary<string, string>(StringComparer.Ordinal) { ["Pkg.Shared"] = "10.0.1" },
+                Order = 1,
+            },
+            new()
+            {
+                Condition = "'$(TargetFramework)' == 'net11.0'",
+                Framework = "net11.0",
+                Versions = new Dictionary<string, string>(StringComparer.Ordinal) { ["Pkg.Shared"] = "11.0.0" },
+                Order = 2,
+            },
+        };
+        var map = new CpmPackageMap(unconditional, conditional, true);
+        var project = new Models.ProjectModel
+        {
+            Name = "Multi.csproj",
+            Path = "Multi.csproj",
+            CpmEnabled = true,
+            Packages = [new Models.ProjectPackageModel { Id = "Pkg.Shared", Version = string.Empty, IsPinned = false, VersionSource = "central" }],
+        };
+
+        // Act
+        var result = WorkspaceModelService.ApplyResolutions(project, map, ["net10.0", "net11.0"]);
+
+        // Assert
+        var package = result.Packages[0];
+        Assert.IsNotNull(package.CpmResolutions);
+        Assert.AreEqual(2, package.CpmResolutions.Count);
+        Assert.AreEqual(string.Empty, package.Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_EvaluatorReturnsNull_KeepsRawPropertyVersion()
+    {
+        // Arrange
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Fallback", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => null);
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert — evaluation failure leaves the raw XML value.
+        Assert.AreEqual("$(FooBarVersion)", projects[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_NoPropertyReference_NeverInvokesEvaluator()
+    {
+        // Arrange — literal versions must not pay for a `dotnet msbuild` call.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Literal", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation());
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        Assert.AreEqual(0, evaluator.Calls);
+        Assert.AreEqual("13.0.3", projects[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_NonCpmPropertyReference_ResolvesWhileLiteralSiblingIsUntouched()
+    {
+        // Arrange — non-CPM project with one property-based and one literal reference.
+        var project = WriteProject("NonCpm", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />
+                <PackageReference Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, tfm) => tfm is null
+            ? EvaluationWithReferences(("Foo.Bar", "1.2.3"))
+            : Evaluation());
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        var packages = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3", packages["Foo.Bar"].Version);
+        Assert.AreEqual("project", packages["Foo.Bar"].VersionSource);
+        Assert.AreEqual("3.1.1", packages["Serilog"].Version);
+        Assert.IsFalse(projects[0].CpmEnabled);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PropertyVersionFixture_ResolvesBothUnconditionalAndConditional()
+    {
+        // The checked-in property-based fixture, reached through TestPaths.Fixture, resolved
+        // through a fake evaluator (no `dotnet msbuild` spawn).
+        File.Copy(
+            TestPaths.Fixture("cpm", "property-versions.props"),
+            workspace!.Combine("Directory.Packages.props"));
+
+        var project = WriteProject("PropertyFixture", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+                <PackageReference Include="Microsoft.Extensions.Logging" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, tfm) => tfm switch
+        {
+            "net10.0" => Evaluation(("Microsoft.Extensions.Logging", "10.0.13")),
+            "net11.0" => Evaluation(("Microsoft.Extensions.Logging", "11.0.0-rc.2.26504.105")),
+            _ => Evaluation(("Foo.Bar", "1.2.3")),
+        });
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        var byId = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3", byId["Foo.Bar"].Version);
+        Assert.AreEqual(
+            "10.0.13",
+            byId["Microsoft.Extensions.Logging"].CpmResolutions!.Single(row => row.Tfm == "net10.0").Version);
+        Assert.AreEqual(
+            "11.0.0-rc.2.26504.105",
+            byId["Microsoft.Extensions.Logging"].CpmResolutions!.Single(row => row.Tfm == "net11.0").Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PropertyWithSuffix_UsesEvaluatedValueAndKeepsUnresolvedRaw()
+    {
+        // Arrange — one version embeds the property in surrounding text and evaluates; the second
+        // package is missing from the evaluation, so its raw expression has to survive.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+                <MissingVersion>9.9.9</MissingVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)-beta" />
+                <PackageVersion Include="Missing.Package" Version="$(MissingVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Suffix", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+                <PackageReference Include="Missing.Package" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation(("Foo.Bar", "1.2.3-beta")));
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert — the whole expression is replaced; a package absent from the evaluation keeps
+        // its raw XML value.
+        var packages = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3-beta", packages["Foo.Bar"].Version);
+        Assert.AreEqual("$(MissingVersion)", packages["Missing.Package"].Version);
+    }
+
+    private static CpmEvaluation Evaluation(
+        params (string Id, string Version)[] central) =>
+        new()
+        {
+            CentralVersions = central.ToDictionary(entry => entry.Id, entry => entry.Version, StringComparer.OrdinalIgnoreCase),
+            PackageReferences = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+        };
+
+    private static CpmEvaluation EvaluationWithReferences(
+        params (string Id, string Version)[] packageReferences) =>
+        new()
+        {
+            CentralVersions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            PackageReferences = packageReferences.ToDictionary(entry => entry.Id, entry => entry.Version, StringComparer.OrdinalIgnoreCase),
+        };
+
+    private sealed class FakeCpmEvaluator(Func<string, string?, CpmEvaluation?> factory) : ICpmEvaluator
+    {
+        public int Calls { get; private set; }
+
+        public Task<CpmEvaluation?> EvaluateAsync(
+            string projectPath,
+            string? targetFramework,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(factory(projectPath, targetFramework));
+        }
+    }
+
     private string WriteProject(string name, string content) =>
         workspace!.WriteFile($"{name}.csproj", content);
 }

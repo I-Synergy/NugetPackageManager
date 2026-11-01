@@ -13,9 +13,15 @@ namespace NugetPackageManager.Core.Workspace;
 /// The caller decides *which* files belong to the workspace (VS Code's globbing, solution
 /// restriction and exclude settings live there); this service answers what each project contains.
 /// </summary>
-public sealed class WorkspaceModelService(TargetFrameworkResolver? frameworkResolver = null) : IDisposable
+public sealed class WorkspaceModelService(
+    TargetFrameworkResolver? frameworkResolver = null,
+    ICpmEvaluator? cpmEvaluator = null) : IDisposable
 {
+    private const string PropertyReference = "$(";
+
     private readonly TargetFrameworkResolver frameworkResolver = frameworkResolver ?? new TargetFrameworkResolver();
+    private readonly ICpmEvaluator cpmEvaluator = cpmEvaluator ?? new CpmEvaluator();
+    private readonly bool ownsEvaluator = cpmEvaluator is null;
     private readonly Dictionary<string, CpmPackageMap> cpmCache = [];
 
     public async Task<IReadOnlyList<ProjectModel>> GetProjectsAsync(
@@ -48,19 +54,80 @@ public sealed class WorkspaceModelService(TargetFrameworkResolver? frameworkReso
         return [.. projects.OrderBy(project => project.Name, StringComparer.OrdinalIgnoreCase)];
     }
 
+    /// <summary>
+    /// Drops the evaluator's cached effective versions so the next scan re-runs MSBuild.
+    ///
+    /// The evaluator's stamp only covers the project, <c>Directory.Packages.props</c> and
+    /// <c>Directory.Build.props</c>; a CPM write that edits a property in some other imported
+    /// <c>.props</c> file therefore needs this explicit nudge. Only the evaluator this service
+    /// created is invalidated — an injected fake is left alone.
+    /// </summary>
+    public void InvalidateVersionCache()
+    {
+        if (ownsEvaluator && cpmEvaluator is CpmEvaluator owned)
+        {
+            owned.ClearCache();
+        }
+    }
+
     private async Task<ProjectModel> ParseProjectAsync(
         string projectPath,
         IReadOnlyList<string> overrides,
         CancellationToken cancellationToken)
     {
         var cpmMap = LoadCpmMap(projectPath);
+        return cpmMap is null
+            ? await ParseNonCpmProjectAsync(projectPath, cancellationToken).ConfigureAwait(false)
+            : await ParseCpmProjectAsync(projectPath, cpmMap, overrides, cancellationToken).ConfigureAwait(false);
+    }
 
-        var project = ProjectFileReader.Read(projectPath, cpmMap is null ? null : BuildFlatMap(cpmMap)) with
+    private async Task<ProjectModel> ParseNonCpmProjectAsync(string projectPath, CancellationToken cancellationToken)
+    {
+        var project = ProjectFileReader.Read(projectPath) with { CpmEnabled = false };
+
+        if (project.Packages.Any(package => package.Version.Contains(PropertyReference, StringComparison.Ordinal)))
         {
-            CpmEnabled = cpmMap is not null,
-        };
+            var evaluation = await cpmEvaluator
+                .EvaluateAsync(projectPath, targetFramework: null, cancellationToken)
+                .ConfigureAwait(false);
 
-        if (cpmMap is not { HasConditionalGroups: true })
+            if (evaluation is not null)
+            {
+                project = ProjectFileReader.Read(projectPath, null, evaluation.PackageReferences) with
+                {
+                    CpmEnabled = false,
+                };
+            }
+        }
+
+        return project with { TargetFrameworks = [], TfmSource = "xml" };
+    }
+
+    private async Task<ProjectModel> ParseCpmProjectAsync(
+        string projectPath,
+        CpmPackageMap cpmMap,
+        IReadOnlyList<string> overrides,
+        CancellationToken cancellationToken)
+    {
+        var usesProperties = HasPropertyReferences(cpmMap);
+        var flatMap = BuildFlatMap(cpmMap);
+
+        CpmEvaluation? defaultEvaluation = null;
+        if (usesProperties)
+        {
+            // One evaluation with no TargetFramework supplies the flat map ProjectFileReader uses.
+            defaultEvaluation = await cpmEvaluator
+                .EvaluateAsync(projectPath, targetFramework: null, cancellationToken)
+                .ConfigureAwait(false);
+            if (defaultEvaluation is not null)
+            {
+                flatMap = MergeEvaluatedVersions(flatMap, defaultEvaluation.CentralVersions);
+            }
+        }
+
+        var project = ProjectFileReader.Read(projectPath, flatMap) with { CpmEnabled = true };
+
+        if (!cpmMap.HasConditionalGroups)
         {
             // No conditional versions means no reason to spend a `dotnet msbuild` call.
             return project with { TargetFrameworks = [], TfmSource = "xml" };
@@ -76,17 +143,52 @@ public sealed class WorkspaceModelService(TargetFrameworkResolver? frameworkReso
             TfmSource = SourceName(frameworks.Source),
         };
 
-        return ApplyResolutions(project, cpmMap, frameworks.Frameworks);
+        var effectiveByTfm = usesProperties
+            ? await BuildEffectiveVersionsByTfmAsync(projectPath, defaultEvaluation, frameworks.Frameworks, cancellationToken)
+                .ConfigureAwait(false)
+            : null;
+
+        return ApplyResolutions(project, cpmMap, frameworks.Frameworks, effectiveByTfm);
+    }
+
+    private async Task<Dictionary<string, IReadOnlyDictionary<string, string>>> BuildEffectiveVersionsByTfmAsync(
+        string projectPath,
+        CpmEvaluation? defaultEvaluation,
+        IReadOnlyList<string> tfms,
+        CancellationToken cancellationToken)
+    {
+        var byTfm = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        if (defaultEvaluation is not null)
+        {
+            byTfm[string.Empty] = defaultEvaluation.CentralVersions;
+        }
+
+        foreach (var tfm in tfms)
+        {
+            var evaluation = await cpmEvaluator
+                .EvaluateAsync(projectPath, tfm, cancellationToken)
+                .ConfigureAwait(false);
+            if (evaluation is not null)
+            {
+                byTfm[tfm] = evaluation.CentralVersions;
+            }
+        }
+
+        return byTfm;
     }
 
     /// <summary>One row per version line; a single distinct version also fills <c>Version</c>.</summary>
-    internal static ProjectModel ApplyResolutions(ProjectModel project, CpmPackageMap map, IReadOnlyList<string> tfms)
+    internal static ProjectModel ApplyResolutions(
+        ProjectModel project,
+        CpmPackageMap map,
+        IReadOnlyList<string> tfms,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? effectiveVersionsByTfm = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentNullException.ThrowIfNull(map);
 
         var packageIds = project.Packages.Select(package => package.Id).ToList();
-        var resolutions = CpmPropsReader.ResolveVersions(map, packageIds, tfms);
+        var resolutions = CpmPropsReader.ResolveVersions(map, packageIds, tfms, effectiveVersionsByTfm);
 
         var packages = new List<ProjectPackageModel>(project.Packages.Count);
         foreach (var package in project.Packages)
@@ -137,6 +239,33 @@ public sealed class WorkspaceModelService(TargetFrameworkResolver? frameworkReso
         return parsed;
     }
 
+    /// <summary>True when any version line (unconditional or conditional) references a property.</summary>
+    private static bool HasPropertyReferences(CpmPackageMap map) =>
+        map.Unconditional.Values.Any(IsPropertyVersion)
+        || map.Conditional.Any(entry => entry.Versions.Values.Any(IsPropertyVersion));
+
+    private static bool IsPropertyVersion(string version) =>
+        version.Contains(PropertyReference, StringComparison.Ordinal);
+
+    /// <summary>Replaces property-based flat values with the evaluated version when one is known.</summary>
+    private static Dictionary<string, string> MergeEvaluatedVersions(
+        Dictionary<string, string> flat,
+        IReadOnlyDictionary<string, string> evaluated)
+    {
+        var merged = new Dictionary<string, string>(flat, StringComparer.Ordinal);
+        foreach (var (packageId, version) in flat)
+        {
+            if (IsPropertyVersion(version)
+                && evaluated.TryGetValue(packageId, out var effective)
+                && !string.IsNullOrEmpty(effective))
+            {
+                merged[packageId] = effective;
+            }
+        }
+
+        return merged;
+    }
+
     /// <summary>Unconditional versions first, then the first conditional value per package.</summary>
     internal static Dictionary<string, string> BuildFlatMap(CpmPackageMap map)
     {
@@ -164,5 +293,12 @@ public sealed class WorkspaceModelService(TargetFrameworkResolver? frameworkReso
         _ => "xml",
     };
 
-    public void Dispose() => frameworkResolver.Dispose();
+    public void Dispose()
+    {
+        frameworkResolver.Dispose();
+        if (ownsEvaluator)
+        {
+            (cpmEvaluator as IDisposable)?.Dispose();
+        }
+    }
 }
