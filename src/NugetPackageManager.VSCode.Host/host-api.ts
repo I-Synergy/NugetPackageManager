@@ -64,10 +64,8 @@ import type {
 } from "@/common/rpc/types";
 import type { Result } from "@/common/rpc/result";
 import { ok, fail } from "@/common/rpc/result";
-import ProjectParser from "./utilities/project-parser";
 import CpmResolver, { type CpmFrameworkEntry, type CpmPackageMap, type CpmVersionChange } from "./utilities/cpm-resolver";
 import { getTfmMajorVersion } from "./utilities/cpm-condition";
-import ProjectFrameworkResolver from "./utilities/project-framework-resolver";
 import { findPathOutsideWorkspaceAsync } from "./utilities/workspace-path";
 import { compareVersions, isVersionInRange, satisfiesVersionRange } from "./utilities/version";
 import { isValidNuGetVersion, isValidPackageId } from "./utilities/nuget-identifier";
@@ -212,17 +210,6 @@ async function parseSolutionProjectPathsAsync(slnPath: string): Promise<string[]
   }
 }
 
-/** Merges all CPM groups into a single flat map for ProjectParser (which expects a flat map). */
-function buildFlatCpmMap(cpmMap: CpmPackageMap): Map<string, string> {
-  const flat = new Map(cpmMap.unconditional);
-  for (const entry of cpmMap.conditional) {
-    for (const [id, version] of entry.versions) {
-      if (!flat.has(id)) flat.set(id, version);
-    }
-  }
-  return flat;
-}
-
 const DEFAULT_FRAMEWORK_ALIGNED_PATTERNS = [
   "Microsoft.Extensions.*",
   "Microsoft.AspNetCore.*",
@@ -255,76 +242,34 @@ function isFrameworkAlignedPackage(packageId: string, patterns: string[]): boole
   return patterns.some((pattern) => matchesPackagePattern(pattern, packageId));
 }
 
-type CpmParseContext = {
-  mapCache: Map<string, Promise<CpmPackageMap>>;
-  tfmOverrides: string[];
-};
-
-function createCpmParseContext(): CpmParseContext {
-  return {
-    mapCache: new Map<string, Promise<CpmPackageMap>>(),
-    tfmOverrides: getCpmSettings().extraTargetFrameworks,
-  };
-}
-
 /**
- * Resolves the CPM map, target frameworks and per-package resolutions for one project.
- * Projects without a CPM file (or without conditional groups) skip MSBuild evaluation.
+ * Parses projects through the .NET core, which owns csproj reading, CPM resolution and
+ * target-framework evaluation. Discovery stays here: which files belong to the workspace is a
+ * VS Code question, and duplicating that globbing in the core would drift.
  */
-async function parseProjectWithCpmAsync(
-  projectPath: string,
-  context: CpmParseContext
-): Promise<{ project: Project; cpmMap: CpmPackageMap | null; tfms: string[] }> {
-  const cpmMap = await loadCpmMapAsync(projectPath, context);
-  const tfmInfo = await resolveTfmInfoAsync(projectPath, cpmMap, context);
-  const cpmVersions = cpmMap ? buildFlatCpmMap(cpmMap) : null;
-  const project = await ProjectParser.ParseAsync(projectPath, cpmVersions);
-  project.CpmEnabled = cpmMap !== null;
-  project.TargetFrameworks = tfmInfo.Frameworks;
-  project.TfmSource = tfmInfo.Source;
-
-  if (cpmMap) {
-    applyCpmResolutions(project, cpmMap, tfmInfo.Frameworks);
+async function parseProjectsAsync(projectPaths: string[], signal?: AbortSignal): Promise<Project[]> {
+  if (projectPaths.length === 0) {
+    return [];
   }
 
-  return { project, cpmMap, tfms: tfmInfo.Frameworks };
+  return coreProcess.CallAsync<Project[]>(
+    "getProjects",
+    {
+      projectPaths,
+      extraTargetFrameworks: getCpmSettings().extraTargetFrameworks,
+    },
+    signal
+  );
 }
 
-async function loadCpmMapAsync(projectPath: string, context: CpmParseContext): Promise<CpmPackageMap | null> {
-  const cpmFilePath = await CpmResolver.FindCpmFilePathAsync(projectPath);
-  if (!cpmFilePath) return null;
-  if (!context.mapCache.has(cpmFilePath)) {
-    context.mapCache.set(cpmFilePath, CpmResolver.ParseCpmFileAsync(cpmFilePath));
+async function parseProjectAsync(projectPath: string, signal?: AbortSignal): Promise<Project> {
+  const projects = await parseProjectsAsync([projectPath], signal);
+  const project = projects[0];
+  if (!project) {
+    throw new Error(`The .NET core returned no project model for ${projectPath}`);
   }
-  return (await context.mapCache.get(cpmFilePath)) ?? null;
-}
 
-async function resolveTfmInfoAsync(
-  projectPath: string,
-  cpmMap: CpmPackageMap | null,
-  context: CpmParseContext
-): Promise<{ Frameworks: string[]; Source: string }> {
-  if (!cpmMap?.hasConditionalGroups) {
-    return { Frameworks: [], Source: "xml" };
-  }
-  return ProjectFrameworkResolver.GetTargetFrameworksAsync(projectPath, context.tfmOverrides);
-}
-
-function applyCpmResolutions(project: Project, cpmMap: CpmPackageMap, tfms: string[]): void {
-  const packageIds = project.Packages.map((pkg) => pkg.Id);
-  const resolutions = CpmResolver.ResolveVersions(cpmMap, packageIds, tfms);
-
-  for (const pkg of project.Packages) {
-    const resolved = resolutions.get(pkg.Id);
-    if (!resolved || resolved.length === 0) continue;
-
-    pkg.CpmResolutions = resolved;
-    const conditional = resolved.find((item) => item.Condition !== "");
-    if (conditional) pkg.CpmFramework = conditional.ConditionLabel;
-
-    const versions = [...new Set(resolved.map((item) => item.Version))];
-    if (versions.length === 1) pkg.Version = versions[0]!;
-  }
+  return project;
 }
 
 /** Keeps hidden/scratch directories out of every package and project scan. */
@@ -765,9 +710,9 @@ async function runProjectUpdateAsync(
 
   nugetApiFactory.ClearCache();
   report("Refreshing project…", 95);
-  const parsed = await parseProjectWithCpmAsync(request.ProjectPath, createCpmParseContext());
+  const project = await parseProjectAsync(request.ProjectPath, signal);
 
-  return ok({ Project: parsed.project, IsCpmEnabled: cpm.isCpmEnabled });
+  return ok({ Project: project, IsCpmEnabled: cpm.isCpmEnabled });
 }
 
 type ProjectCpmState = {
@@ -1478,7 +1423,7 @@ async function buildDirectPackagesAsync(
 ): Promise<Map<string, { id: string; versions: Set<string> }>> {
   const direct = new Map<string, { id: string; versions: Set<string> }>();
   try {
-    const parsedProject = await ProjectParser.ParseAsync(projectPath, null);
+    const parsedProject = await parseProjectAsync(projectPath);
     for (const pkg of parsedProject.Packages) {
       direct.set(pkg.Id.toLowerCase(), { id: pkg.Id, versions: new Set([pkg.Version]) });
     }
@@ -1660,36 +1605,31 @@ async function parseOutdatedProjectsAsync(
   projectFiles: Array<{ fsPath: string }>,
   report: (stage: string, percent: number, completed?: number, total?: number) => void
 ): Promise<Project[]> {
-  const cpmContext = createCpmParseContext();
   const parseStarted = Date.now();
   const totalProjects = projectFiles.length;
-  let parsedProjects = 0;
   report(`Parsing projects (0/${totalProjects})…`, 4, 0, totalProjects);
 
-  const parseResults = await Promise.allSettled(
-    projectFiles.map(async (file) => {
-      try {
-        return await parseProjectWithCpmAsync(file.fsPath, cpmContext);
-      } finally {
-        parsedProjects += 1;
-        report(
-          `Parsing projects (${parsedProjects}/${totalProjects})…`,
-          4 + (26 * parsedProjects) / Math.max(1, totalProjects),
-          parsedProjects,
-          totalProjects
-        );
-      }
-    })
-  );
-
+  // Batched so the progress bar still moves; the core parses each batch in one round trip.
+  const chunkSize = Math.max(1, Math.ceil(totalProjects / 10));
   const projects: Project[] = [];
-  parseResults.forEach((result, index) => {
-    if (result.status === "fulfilled") {
-      projects.push(result.value.project);
-    } else {
-      Logger.error(`getOutdatedPackages: Failed to parse ${projectFiles[index]?.fsPath ?? "?"}`, result.reason);
-    }
-  });
+
+  for (let index = 0; index < totalProjects; index += chunkSize) {
+    const chunk = projectFiles.slice(index, index + chunkSize);
+    const parsed = await parseProjectsAsync(chunk.map((file) => file.fsPath));
+    projects.push(...parsed);
+
+    const completed = Math.min(totalProjects, index + chunk.length);
+    report(
+      `Parsing projects (${completed}/${totalProjects})…`,
+      4 + (26 * completed) / Math.max(1, totalProjects),
+      completed,
+      totalProjects
+    );
+  }
+
+  if (projects.length !== totalProjects) {
+    Logger.debug(`getOutdatedPackages: ${totalProjects - projects.length} project(s) could not be parsed`);
+  }
 
   const tfmSources = new Map<string, number>();
   for (const project of projects) {
@@ -2073,22 +2013,13 @@ async function parseProjectsForScanAsync(
   projectFiles: Array<{ fsPath: string }>,
   logLabel: string
 ): Promise<{ projects: Project[]; anyCpmEnabled: boolean }> {
-  const cpmContext = createCpmParseContext();
-  const parseResults = await Promise.allSettled(
-    projectFiles.map(async (file) => parseProjectWithCpmAsync(file.fsPath, cpmContext))
-  );
+  const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath));
 
-  const projects: Project[] = [];
-  let anyCpmEnabled = false;
-  parseResults.forEach((result, index) => {
-    if (result.status === "fulfilled") {
-      projects.push(result.value.project);
-      if (result.value.project.CpmEnabled) anyCpmEnabled = true;
-    } else {
-      Logger.error(`${logLabel}: Failed to parse ${projectFiles[index]?.fsPath ?? "?"}`, result.reason);
-    }
-  });
-  return { projects, anyCpmEnabled };
+  if (projects.length !== projectFiles.length) {
+    Logger.debug(`${logLabel}: ${projectFiles.length - projects.length} project(s) could not be parsed`);
+  }
+
+  return { projects, anyCpmEnabled: projects.some((project) => project.CpmEnabled) };
 }
 
 type ConsistencyEntry = {
@@ -2448,59 +2379,20 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
 
       Logger.info(`getProjects: Found ${projectFiles.length} project files`);
 
+      if (projectFiles.length === 0) {
+        return ok({ Projects: [] });
+      }
+
       // The .NET core owns project parsing, CPM resolution and framework evaluation. VS Code
       // keeps discovery: workspace globbing, solution restriction and exclude settings are host
       // concerns, and duplicating them in the core would drift.
-      if (coreProcess.IsConfigured) {
-        try {
-          const projects = await coreProcess.CallAsync<Array<Project>>(
-            "getProjects",
-            {
-              projectPaths: projectFiles.map((file) => file.fsPath),
-              extraTargetFrameworks: settings.extraTargetFrameworks,
-            },
-            signal
-          );
-          return ok({ Projects: projects });
-        } catch (error) {
-          Logger.warn(`getProjects: The .NET core failed; falling back to the in-process path (${String(error)})`);
-        }
-      }
-
-      const cpmContext = createCpmParseContext();
-      const showTfmProgress = projectFiles.length > 20;
-      if (showTfmProgress) {
-        StatusBarUtils.ShowText(`Resolving target frameworks for ${projectFiles.length} projects...`);
-      }
-      let parseResults: PromiseSettledResult<Project>[];
       try {
-        parseResults = await Promise.allSettled(
-          projectFiles.map(async (file) => {
-            if (signal?.aborted) throw new Error("cancelled");
-            const parsed = await parseProjectWithCpmAsync(file.fsPath, cpmContext);
-            return parsed.project;
-          })
-        );
-      } finally {
-        if (showTfmProgress) {
-          StatusBarUtils.hide();
-        }
+        const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
+        return ok({ Projects: projects });
+      } catch (error) {
+        Logger.error("getProjects: The .NET core could not parse the workspace", error);
+        return fail(formatApiError(error));
       }
-      if (signal?.aborted) return fail("cancelled");
-      const projects: Project[] = [];
-      parseResults.forEach((r, i) => {
-        if (r.status === "fulfilled") {
-          projects.push(r.value);
-        } else {
-          Logger.error(`getProjects: Failed to parse project ${projectFiles[i]?.fsPath ?? "?"}`, r.reason);
-        }
-      });
-
-      const sorted = [...projects].sort((a, b) =>
-        a.Name?.toLowerCase().localeCompare(b.Name?.toLowerCase())
-      );
-
-      return ok({ Projects: sorted });
     },
 
     async getPackagesAsync(request: GetPackagesRequest, signal?: AbortSignal): Promise<Result<GetPackagesResponse>> {
@@ -3527,19 +3419,22 @@ async function collectUsedPackagesAsync(
   signal?: AbortSignal
 ): Promise<Map<string, string>> {
   const used = new Map<string, string>();
-  for (const file of projectFiles) {
-    if (signal?.aborted) break;
-    try {
-      const project = await ProjectParser.ParseAsync(file.fsPath, null);
-      for (const pkg of project.Packages) {
-        used.set(pkg.Id.toLowerCase(), pkg.Id);
-      }
-    } catch (err) {
-      // Do not produce a report that could delete a used package because one
-      // project could not be read.
-      throw new Error(`Failed to scan ${file.fsPath}: ${err instanceof Error ? err.message : String(err)}`);
+  const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
+
+  // Do not produce a report that could delete a used package because one project could not be
+  // read: the core skipping a project is a gap, so refuse to answer.
+  if (projects.length !== projectFiles.length) {
+    throw new Error(
+      `Failed to scan ${projectFiles.length - projects.length} of ${projectFiles.length} project(s)`
+    );
+  }
+
+  for (const project of projects) {
+    for (const pkg of project.Packages) {
+      used.set(pkg.Id.toLowerCase(), pkg.Id);
     }
   }
+
   return used;
 }
 
@@ -3603,20 +3498,28 @@ async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSig
   const cpmFiles = new Set<string>();
   const referencedCpmFiles = new Set<string>();
 
+  // Parse once, up front: the loop below needs each project's package ids and must stay
+  // conservative about projects the core could not read.
+  const parsedProjects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
+  const packagesByPath = new Map(
+    parsedProjects.map((project) => [path.normalize(project.Path), project.Packages] as const)
+  );
+
   for (const file of projectFiles) {
     if (signal?.aborted) return;
     const cpmFile = await CpmResolver.FindCpmFilePathAsync(file.fsPath);
     if (!cpmFile) continue;
     cpmFiles.add(cpmFile);
 
-    try {
-      const project = await ProjectParser.ParseAsync(file.fsPath, null);
-      if (project.Packages.some((pkg) => pkg.Id.toLowerCase() === packageId.toLowerCase())) {
-        referencedCpmFiles.add(cpmFile);
-      }
-    } catch (err) {
+    const packages = packagesByPath.get(path.normalize(file.fsPath));
+    if (!packages) {
       // Be conservative: if a project cannot be parsed, never delete its CPM entry.
-      Logger.warn(`cleanupUnusedCpmPackage: Could not parse ${file.fsPath}`, err);
+      Logger.warn(`cleanupUnusedCpmPackage: Could not parse ${file.fsPath}`);
+      referencedCpmFiles.add(cpmFile);
+      continue;
+    }
+
+    if (packages.some((pkg) => pkg.Id.toLowerCase() === packageId.toLowerCase())) {
       referencedCpmFiles.add(cpmFile);
     }
   }
@@ -3693,7 +3596,7 @@ async function applyConflictFixesAsync(
       continue;
     }
 
-    const project = await ProjectParser.ParseAsync(projectPath, null);
+    const project = await parseProjectAsync(projectPath);
     if (!project.Packages.some((p) => p.Id === packageId)) continue;
 
     Logger.info(`restoreWithConflictResolution: Updating direct reference ${packageId} to ${requiredVersion} in ${projectPath}`);

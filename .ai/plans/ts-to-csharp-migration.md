@@ -91,12 +91,25 @@ model. Discovery deliberately stays in TypeScript — workspace globbing, soluti
 the exclude settings are VS Code concerns, and reimplementing them in the core would drift. If the
 core is absent or fails, the host logs and falls back to the in-process path.
 
-**Why no TypeScript was deleted yet.** `project-parser.ts`, `project-framework-resolver.ts` and
-`cpm-resolver.ts` still serve six call sites in `host-api.ts` that this wave did not touch —
-`getProjectAsync`, the install/update flows and the CPM write path. Deleting them now would break
-those. Wave C2 moves those call sites onto the same handler and removes the files; it also covers
-`UpdateCpmVersionsAsync`, whose atomic single-read/write with pre-write verification is the most
-delicate code in the repository and deserves its own parity fixtures.
+**C2 part 1 — the TypeScript parsers are gone.** Every call site now goes through one
+`parseProjectsAsync` helper that calls the core's `getProjects`, so
+`project-parser.ts` (109 lines) and `project-framework-resolver.ts` (366 lines) are deleted,
+along with their 367 lines of tests. What changed in behaviour:
+
+- `getProjectsAsync` has no in-process fallback any more: a core failure is a reported error,
+  not a silent second implementation.
+- The updates scan parses in batches of ~10 so the progress bar still moves; one round trip per
+  batch instead of one process-free parse per project.
+- `collectUsedPackagesAsync` refuses to answer when the core skips a project, preserving the
+  "never delete a used package" rule the per-project try/catch used to provide.
+- The per-TFM fixture assertions moved to `Core.Workspace.Tests`, where the resolution logic now
+  lives; they run the same `negated-positive.props` and `projects/*` fixtures.
+
+**C2 part 2 — still to do.** `cpm-resolver.ts` (write path: `UpdateCpmVersionsAsync`,
+`RemovePackageVersionAsync`, `UpdatePackageVersionAsync` and the verification pass) and
+`cpm-condition.ts`, which the writer still uses for labels. That is the most delicate code in the
+repository — an atomic single-read/write with pre-write verification — and it needs its own
+parity fixtures before it moves.
 
 Two porting notes worth keeping. `System.Text.Json` and the compiler are stricter than the
 TypeScript: `switch` expressions over enums need a `_` arm (CS8524) while the style analyzer

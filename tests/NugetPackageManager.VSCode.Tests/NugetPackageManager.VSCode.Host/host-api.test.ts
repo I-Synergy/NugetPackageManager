@@ -6,12 +6,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { repositoryPath } from '../test-paths';
 import { createHostAPI } from '@/host/host-api';
-import ProjectParser from '@/host/utilities/project-parser';
 import nugetApiFactory from '@/host/nuget/api-factory';
 import coreProcess from '@/host/nuget/core-process';
 import NuGetConfigResolver from '@/host/utilities/nuget-config-resolver';
 import CpmResolver from '@/host/utilities/cpm-resolver';
-import ProjectFrameworkResolver from '@/host/utilities/project-framework-resolver';
 import TaskExecutorDefault, { DotnetError } from '@/host/utilities/task-executor';
 import { OperationJobs } from '@/host/utilities/operation-jobs';
 import type { Result } from '@/common/rpc/result';
@@ -20,6 +18,32 @@ import { Logger } from '@/common/logger';
 
 function fixturesRoot(): string {
     return repositoryPath('tests', '__fixtures__');
+}
+
+/**
+ * Routes the core's `getProjects` call. The host sends every path in one request and the core
+ * skips projects it cannot read, so `resolve` returns null for an unreadable project.
+ */
+function stubProjectParsing(
+    sandbox: sinon.SinonSandbox,
+    resolve: (projectPath: string) => Project | null
+): sinon.SinonStub {
+    return sandbox.stub(coreProcess, 'CallAsync').callsFake((async (
+        method: string,
+        params: { projectPaths?: string[] }
+    ) => {
+        if (method !== 'getProjects') {
+            throw new Error(`unexpected core method: ${method}`);
+        }
+
+        const projects: Project[] = [];
+        for (const projectPath of params.projectPaths ?? []) {
+            const project = resolve(projectPath);
+            if (project) projects.push(project);
+        }
+
+        return projects;
+    }) as never);
 }
 
 suite('HostAPI Tests', () => {
@@ -54,7 +78,6 @@ suite('HostAPI Tests', () => {
             const call = sandbox.stub(coreProcess, 'CallAsync').resolves([
                 { Name: 'FromCore', Path: '/ws/MyApp/MyApp.csproj', Packages: [], CpmEnabled: false },
             ]);
-            const parse = sandbox.stub(ProjectParser, 'ParseAsync');
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({});
@@ -62,37 +85,29 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Projects[0]!.Name, 'FromCore');
             assert.strictEqual(call.firstCall.args[0], 'getProjects');
-            assert.strictEqual(parse.called, false, 'the in-process parser must not run');
         });
 
-        test('falls back to the in-process path when the core fails', async () => {
+        test('reports a failure when the core cannot parse the workspace', async () => {
             coreConfigured = true;
             const projectUri = { fsPath: '/ws/MyApp/MyApp.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([projectUri]);
             sandbox.stub(coreProcess, 'CallAsync').rejects(new Error('core exploded'));
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves({
-                Name: 'MyApp',
-                Path: '/ws/MyApp/MyApp.csproj',
-                Packages: [],
-                CpmEnabled: false,
-            });
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({});
 
-            assert.ok(result.ok);
-            assert.strictEqual(result.value.Projects[0]!.Name, 'MyApp');
+            assert.strictEqual(result.ok, false);
         });
 
         test('returns sorted projects on success', async () => {
             const projectUri = { fsPath: '/ws/MyApp/MyApp.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([projectUri]);
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves({
+            stubProjectParsing(sandbox, () => ({
                 Name: 'MyApp',
                 Path: '/ws/MyApp/MyApp.csproj',
                 Packages: [],
                 CpmEnabled: false,
-            } as Project);
+            } as Project));
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({ ForceReload: false });
@@ -117,9 +132,11 @@ suite('HostAPI Tests', () => {
             const uri2 = { fsPath: '/ws/B.csproj' } as vscode.Uri;
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uri1, uri2]);
 
-            const parseStub = sandbox.stub(ProjectParser, 'ParseAsync');
-            parseStub.onFirstCall().resolves({ Name: 'A', Path: '/ws/A.csproj', Packages: [], CpmEnabled: false } as Project);
-            parseStub.onSecondCall().rejects(new Error('parse failed'));
+            stubProjectParsing(sandbox, (projectPath) =>
+                projectPath === '/ws/A.csproj'
+                    ? ({ Name: 'A', Path: '/ws/A.csproj', Packages: [], CpmEnabled: false } as Project)
+                    : null
+            );
 
             const api = createHostAPI();
             const result = await api.getProjectsAsync({});
@@ -325,9 +342,11 @@ suite('HostAPI Tests', () => {
             const uriB = makeProjectUri('/ws/B.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uriA, uriB]);
 
-            const parseStub = sandbox.stub(ProjectParser, 'ParseAsync');
-            parseStub.onFirstCall().resolves(makeProject('A', '/ws/A.csproj', '1.0.0'));
-            parseStub.onSecondCall().resolves(makeProject('B', '/ws/B.csproj', '2.0.0'));
+            stubProjectParsing(sandbox, (projectPath) =>
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            );
 
             setupNugetApi('2.0.0');
 
@@ -350,7 +369,7 @@ suite('HostAPI Tests', () => {
                 await gate;
                 return [uri];
             });
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves(makeProject('A', '/ws/A.csproj', '1.0.0'));
+            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0'));
             setupNugetApi('2.0.0');
 
             const api = createHostAPI();
@@ -396,7 +415,7 @@ suite('HostAPI Tests', () => {
                 }],
             } as unknown as Project;
 
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves(project);
+            stubProjectParsing(sandbox, () => project);
             setupNugetApi('3.0.0');
 
             const api = createHostAPI();
@@ -414,8 +433,7 @@ suite('HostAPI Tests', () => {
             const uriA = makeProjectUri('/ws/A.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uriA]);
 
-            const parseStub = sandbox.stub(ProjectParser, 'ParseAsync');
-            parseStub.resolves(makeProject('A', '/ws/A.csproj', '2.0.0'));
+            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '2.0.0'));
 
             setupNugetApi('2.0.0');
 
@@ -431,8 +449,7 @@ suite('HostAPI Tests', () => {
             const uri = makeProjectUri('/ws/A.csproj');
             sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
 
-            const parseStub = sandbox.stub(ProjectParser, 'ParseAsync');
-            parseStub.resolves(makeProject('A', '/ws/A.csproj', '1.0.0-beta'));
+            stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0-beta'));
 
             setupNugetApi('1.0.0');
 
@@ -448,8 +465,7 @@ suite('HostAPI Tests', () => {
         test('serves the persisted scan when PreferCache is set', async () => {
             const uri = makeProjectUri('/ws/A.csproj');
             const findFiles = sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
-            const parseStub = sandbox.stub(ProjectParser, 'ParseAsync');
-            parseStub.resolves(makeProject('A', '/ws/A.csproj', '1.0.0'));
+            const parseStub = stubProjectParsing(sandbox, () => makeProject('A', '/ws/A.csproj', '1.0.0'));
             setupNugetApi('2.0.0');
 
             let stored: unknown;
@@ -489,118 +505,24 @@ suite('HostAPI Tests', () => {
         sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
             String(pattern).includes('Directory.Packages.props') ? [] : [fake, real]
         );
-        const parseStub = sandbox.stub(ProjectParser, 'ParseAsync').callsFake(async (projectPath: string) => {
-            if (projectPath === fake.fsPath) throw new Error('invalid content');
-            return { Name: 'Real', Path: real.fsPath, Packages: [] } as unknown as Project;
-        });
+        const parseStub = stubProjectParsing(sandbox, (projectPath) =>
+            projectPath === fake.fsPath
+                ? null
+                : ({ Name: 'Real', Path: real.fsPath, Packages: [] } as unknown as Project)
+        );
 
         const api = createHostAPI();
         const result = await api.getCleanupReportAsync({});
 
         assert.ok(result.ok);
         assert.strictEqual(parseStub.callCount, 1);
-        assert.ok(!parseStub.calledWith(fake.fsPath));
+        assert.ok(!JSON.stringify(parseStub.firstCall.args[1]).includes('fake.csproj'));
     });
 
     // ----------------------------------------------------------------
     // CPM multi-framework projects
     // ----------------------------------------------------------------
     suite('CPM multi-framework projects', () => {
-        let workspaceDir: string;
-        let projectsDir: string;
-
-        function projectUris(): vscode.Uri[] {
-            return fs.readdirSync(projectsDir)
-                .filter((file) => file.endsWith('.csproj'))
-                .map((file) => ({ fsPath: path.join(projectsDir, file) }) as vscode.Uri);
-        }
-
-        setup(() => {
-            workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-cpm-'));
-            projectsDir = path.join(workspaceDir, 'projects');
-            fs.mkdirSync(projectsDir, { recursive: true });
-
-            fs.writeFileSync(
-                path.join(workspaceDir, 'Directory.Packages.props'),
-                fs.readFileSync(path.join(fixturesRoot(), 'cpm', 'negated-positive.props'), 'utf8')
-            );
-
-            for (const fixture of ['net10', 'net11', 'multi', 'net10-windows']) {
-                fs.copyFileSync(
-                    path.join(fixturesRoot(), 'projects', fixture, `${fixture}.csproj`),
-                    path.join(projectsDir, `${fixture}.csproj`)
-                );
-            }
-
-            ProjectFrameworkResolver.SetEvaluatorForTests(async (projectPath) => {
-                const name = path.basename(projectPath).toLowerCase();
-                if (name.startsWith('multi')) return ['net10.0', 'net11.0'];
-                if (name.startsWith('net11')) return ['net11.0'];
-                if (name.startsWith('net10-windows')) return ['net10.0-windows10.0.26100.0'];
-                return ['net10.0'];
-            });
-        });
-
-        teardown(() => {
-            ProjectFrameworkResolver.SetEvaluatorForTests(null);
-            ProjectFrameworkResolver.ClearCache();
-            fs.rmSync(workspaceDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-        });
-
-        test('attaches per-TFM resolutions to each project variant', async () => {
-            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
-                String(pattern).includes('sln') ? [] : projectUris()
-            );
-
-            const api = createHostAPI();
-            const result = await api.getProjectsAsync({ ForceReload: false });
-            assert.ok(result.ok);
-
-            const byName = new Map(result.value.Projects.map((project) => [project.Name, project]));
-
-            const net10 = byName.get('net10.csproj')!;
-            assert.deepStrictEqual(net10.TargetFrameworks, ['net10.0']);
-            const loggingNet10 = net10.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
-            assert.deepStrictEqual(loggingNet10.CpmResolutions, [{
-                PackageId: 'Microsoft.Extensions.Logging',
-                Tfm: 'net10.0',
-                Version: '10.0.13',
-                Condition: "!$(TargetFramework.StartsWith('net11.0'))",
-                ConditionLabel: 'not net11.0',
-                Matched: true,
-            }]);
-
-            const net11 = byName.get('net11.csproj')!;
-            const loggingNet11 = net11.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
-            assert.strictEqual(loggingNet11.CpmResolutions!.length, 1);
-            assert.strictEqual(loggingNet11.CpmResolutions![0]!.Tfm, 'net11.0');
-            assert.strictEqual(loggingNet11.CpmResolutions![0]!.Version, '11.0.0-rc.2.26504.105');
-
-            const multi = byName.get('multi.csproj')!;
-            assert.deepStrictEqual(multi.TargetFrameworks, ['net10.0', 'net11.0']);
-            const loggingMulti = multi.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
-            assert.strictEqual(loggingMulti.CpmResolutions!.length, 2);
-            assert.strictEqual(
-                loggingMulti.CpmResolutions!.find((r) => r.Tfm === 'net10.0')!.Version,
-                '10.0.13'
-            );
-            assert.strictEqual(
-                loggingMulti.CpmResolutions!.find((r) => r.Tfm === 'net11.0')!.Version,
-                '11.0.0-rc.2.26504.105'
-            );
-
-            const windows = byName.get('net10-windows.csproj')!;
-            const loggingWindows = windows.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
-            assert.strictEqual(loggingWindows.CpmResolutions!.length, 1);
-            assert.strictEqual(loggingWindows.CpmResolutions![0]!.Tfm, 'net10.0-windows10.0.26100.0');
-            assert.strictEqual(loggingWindows.CpmResolutions![0]!.Version, '10.0.13');
-
-            const shared = multi.Packages.find((pkg) => pkg.Id === 'Shared.Library')!;
-            assert.strictEqual(shared.CpmResolutions!.length, 1);
-            assert.strictEqual(shared.CpmResolutions![0]!.Tfm, '');
-            assert.strictEqual(shared.CpmResolutions![0]!.Version, '1.0.0');
-        });
-
         test('keeps framework lines separate when grouping inconsistencies', async () => {
             const projects = [
                 { name: 'net10-a', condition: "net", tfm: 'net10.0', version: '1.0.0' },
@@ -611,9 +533,10 @@ suite('HostAPI Tests', () => {
 
             sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
             sandbox.stub(CpmResolver, 'FindCpmFilePathAsync').resolves(null);
-            sandbox.stub(ProjectParser, 'ParseAsync').callsFake(async (projectPath: string) => {
+            stubProjectParsing(sandbox, (projectPath) => {
                 const name = path.basename(projectPath, '.csproj');
-                const fixture = projects.find((p) => p.name === name)!;
+                const fixture = projects.find((p) => p.name === name);
+                if (!fixture) return null;
                 return {
                     Path: projectPath,
                     Name: fixture.name,
@@ -654,9 +577,42 @@ suite('HostAPI Tests', () => {
         });
 
         test('reports one outdated row per TFM with version-aligned latest', async () => {
+            const uris = [
+                { fsPath: '/ws/net10.csproj' } as vscode.Uri,
+                { fsPath: '/ws/net11.csproj' } as vscode.Uri,
+            ];
             sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
-                String(pattern).includes('sln') ? [] : projectUris()
+                String(pattern).includes('sln') ? [] : uris
             );
+
+            // The core supplies the per-TFM resolutions; this test covers the host's row shaping.
+            stubProjectParsing(sandbox, (projectPath) => {
+                const net11 = projectPath.includes('net11');
+                const tfm = net11 ? 'net11.0' : 'net10.0';
+                const version = net11 ? '11.0.0-rc.2.26504.105' : '10.0.13';
+                return {
+                    Path: projectPath,
+                    Name: path.basename(projectPath),
+                    CpmEnabled: true,
+                    TargetFrameworks: [tfm],
+                    TfmSource: 'msbuild',
+                    Packages: [{
+                        Id: 'Microsoft.Extensions.Logging',
+                        Version: version,
+                        IsPinned: false,
+                        VersionSource: 'central',
+                        CpmFramework: net11 ? undefined : 'not net11.0',
+                        CpmResolutions: [{
+                            Tfm: tfm,
+                            Version: version,
+                            Condition: net11 ? "$(TargetFramework.StartsWith('net11.0'))" : "!$(TargetFramework.StartsWith('net11.0'))",
+                            ConditionLabel: net11 ? 'net11.0' : 'not net11.0',
+                            Matched: true,
+                        }],
+                    }],
+                } as Project;
+            });
+
             sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
                 { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
             ]);
@@ -725,7 +681,6 @@ suite('HostAPI Tests', () => {
         }
 
         teardown(() => {
-            ProjectFrameworkResolver.SetEvaluatorForTests(null);
             if (workspaceDir) {
                 fs.rmSync(workspaceDir, { recursive: true, force: true });
             }
@@ -915,11 +870,31 @@ suite('HostAPI Tests', () => {
 
         test('matches vulnerabilities case-insensitively and returns the original package ID', async () => {
             setupWorkspace('negated-positive.props');
-            ProjectFrameworkResolver.SetEvaluatorForTests(async () => ['net10.0']);
 
             sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
                 String(pattern).includes('sln') ? [] : [{ fsPath: projectPath }] as vscode.Uri[]
             );
+            stubProjectParsing(sandbox, () => ({
+                Path: projectPath,
+                Name: 'App.csproj',
+                CpmEnabled: true,
+                TargetFrameworks: ['net10.0'],
+                TfmSource: 'msbuild',
+                Packages: [{
+                    Id: 'Microsoft.Extensions.Logging',
+                    Version: '10.0.13',
+                    IsPinned: false,
+                    VersionSource: 'central',
+                    CpmFramework: 'not net11.0',
+                    CpmResolutions: [{
+                        Tfm: 'net10.0',
+                        Version: '10.0.13',
+                        Condition: "!$(TargetFramework.StartsWith('net11.0'))",
+                        ConditionLabel: 'not net11.0',
+                        Matched: true,
+                    }],
+                }],
+            } as Project));
             sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
                 { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
             ]);
@@ -1096,7 +1071,6 @@ suite('HostAPI Tests', () => {
 
         teardown(() => {
             OperationJobs.Reset();
-            ProjectFrameworkResolver.SetEvaluatorForTests(null);
             if (workspaceDir) {
                 fs.rmSync(workspaceDir, { recursive: true, force: true });
             }
@@ -1246,6 +1220,12 @@ suite('HostAPI Tests', () => {
         test('runs a package update as a job', async () => {
             setupWorkspace('unconditional-plus-conditional.props');
             sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').resolves();
+            stubProjectParsing(sandbox, () => ({
+                Path: projectPath,
+                Name: 'App.csproj',
+                CpmEnabled: true,
+                Packages: [],
+            } as Project));
 
             const api = createHostAPI();
             const started = await api.startProjectUpdateAsync({
@@ -1661,7 +1641,7 @@ suite('HostAPI Tests', () => {
                     }],
                 }],
             } as unknown as Project;
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves(project);
+            stubProjectParsing(sandbox, () => project);
             sandbox.stub(vscode.workspace, 'findFiles').resolves([{ fsPath: projectPath } as vscode.Uri]);
 
             const relationalVersions = [
@@ -1740,7 +1720,7 @@ suite('HostAPI Tests', () => {
                     }],
                 }],
             } as unknown as Project;
-            sandbox.stub(ProjectParser, 'ParseAsync').resolves(project);
+            stubProjectParsing(sandbox, () => project);
             sandbox.stub(vscode.workspace, 'findFiles').resolves([{ fsPath: projectPath } as vscode.Uri]);
 
             const relationalVersions = [

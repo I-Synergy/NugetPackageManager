@@ -11,6 +11,9 @@ namespace NugetPackageManager.Core.Workspace.Tests;
 [TestClass]
 public class WorkspaceModelServiceTests
 {
+    private static readonly string[] net10Only = ["net10.0"];
+    private static readonly string[] net10AndNet11 = ["net10.0", "net11.0"];
+
     private string directory = string.Empty;
 
     [TestInitialize]
@@ -225,6 +228,84 @@ public class WorkspaceModelServiceTests
 
         // Assert
         Assert.AreEqual(0, projects.Count);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_CpmFixtures_MatchTheKnownFrameworkLines()
+    {
+        // The fixtures the TypeScript suite used to assert against, now checked where the
+        // resolution logic lives.
+        var repositoryRoot = FindRepositoryRoot();
+        var fixtures = Path.Combine(repositoryRoot, "tests", "__fixtures__");
+
+        File.WriteAllText(
+            Path.Combine(directory, "Directory.Packages.props"),
+            File.ReadAllText(Path.Combine(fixtures, "cpm", "negated-positive.props")));
+
+        var projects = new List<string>();
+        foreach (var fixture in new[] { "net10", "net11", "multi", "net10-windows" })
+        {
+            var target = Path.Combine(directory, $"{fixture}.csproj");
+            File.Copy(Path.Combine(fixtures, "projects", fixture, $"{fixture}.csproj"), target);
+            projects.Add(target);
+        }
+
+        using var service = new WorkspaceModelService();
+
+        // Act
+        var models = await service.GetProjectsAsync(projects, [], CancellationToken.None);
+
+        // Assert
+        var byName = models.ToDictionary(project => project.Name, StringComparer.OrdinalIgnoreCase);
+
+        var net10 = byName["net10.csproj"];
+        CollectionAssert.AreEqual(net10Only, net10.TargetFrameworks!.ToArray());
+        var loggingNet10 = net10.Packages.Single(package => package.Id == "Microsoft.Extensions.Logging");
+        Assert.AreEqual(1, loggingNet10.CpmResolutions!.Count);
+        Assert.AreEqual("net10.0", loggingNet10.CpmResolutions[0].Tfm);
+        Assert.AreEqual("10.0.13", loggingNet10.CpmResolutions[0].Version);
+        Assert.AreEqual("not net11.0", loggingNet10.CpmResolutions[0].ConditionLabel);
+        Assert.AreEqual("not net11.0", loggingNet10.CpmFramework);
+
+        var net11 = byName["net11.csproj"];
+        var loggingNet11 = net11.Packages.Single(package => package.Id == "Microsoft.Extensions.Logging");
+        Assert.AreEqual("net11.0", loggingNet11.CpmResolutions![0].Tfm);
+        Assert.AreEqual("11.0.0-rc.2.26504.105", loggingNet11.CpmResolutions[0].Version);
+
+        var multi = byName["multi.csproj"];
+        CollectionAssert.AreEqual(net10AndNet11, multi.TargetFrameworks!.ToArray());
+        var loggingMulti = multi.Packages.Single(package => package.Id == "Microsoft.Extensions.Logging");
+        Assert.AreEqual(2, loggingMulti.CpmResolutions!.Count);
+        Assert.AreEqual("10.0.13", loggingMulti.CpmResolutions.Single(r => r.Tfm == "net10.0").Version);
+        Assert.AreEqual("11.0.0-rc.2.26504.105", loggingMulti.CpmResolutions.Single(r => r.Tfm == "net11.0").Version);
+
+        var windows = byName["net10-windows.csproj"];
+        var loggingWindows = windows.Packages.Single(package => package.Id == "Microsoft.Extensions.Logging");
+        Assert.AreEqual("net10.0-windows10.0.26100.0", loggingWindows.CpmResolutions![0].Tfm);
+        Assert.AreEqual("10.0.13", loggingWindows.CpmResolutions[0].Version);
+
+        var shared = multi.Packages.Single(package => package.Id == "Shared.Library");
+        Assert.AreEqual(1, shared.CpmResolutions!.Count);
+        Assert.AreEqual(string.Empty, shared.CpmResolutions[0].Tfm);
+        Assert.AreEqual("1.0.0", shared.CpmResolutions[0].Version);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = AppContext.BaseDirectory;
+
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory, "package.json")))
+            {
+                return directory;
+            }
+
+            directory = Path.GetDirectoryName(directory);
+        }
+
+        throw new InvalidOperationException("repository root not found");
     }
 
     private string WriteProject(string name, string content)
