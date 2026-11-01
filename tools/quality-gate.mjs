@@ -5,8 +5,12 @@
 //
 // Usage: node tools/quality-gate.mjs [--coverage] [--fix] [--skip-build] [--skip-tests] [--help]
 //
-// Steps: build -> lint (ESLint + SonarJS) -> type check -> compile tests -> tests -> npm audit.
+// Steps: build -> lint (ESLint + SonarJS) -> type check -> C# build -> C# tests
+//        -> compile tests -> tests -> npm audit.
 // With --coverage the test step writes coverage/lcov.info for the SonarCloud scan in CI.
+//
+// The C# steps are skipped with a warning when no .NET SDK (9.0.200+ for the .slnx solution)
+// is available, so the gate still works on a machine without it.
 
 import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
@@ -14,6 +18,9 @@ import { join } from "node:path";
 
 const ROOT = join(import.meta.dirname, "..");
 const isWindows = process.platform === "win32";
+const SOLUTION = "NugetPackageManager.slnx";
+/** `.slnx` solutions need this SDK; older ones cannot read the file at all. */
+const MINIMUM_DOTNET = [9, 0, 200];
 
 const args = new Set(process.argv.slice(2));
 const help = args.has("--help") || args.has("-h");
@@ -28,7 +35,7 @@ if (help) {
   --coverage    collect coverage/lcov.info while running the test suite
   --fix         let ESLint apply its automatic fixes before the gate runs
   --skip-build  skip the esbuild bundle step
-  --skip-tests  skip test compilation and execution
+  --skip-tests  skip test compilation and execution (TypeScript and C#)
   --help        show this message`);
   process.exit(0);
 }
@@ -63,6 +70,38 @@ if (fix) {
 
 const steps = [];
 
+/** The installed .NET SDK version, or null when there is no usable one. */
+function resolveDotnetSdk() {
+  const probe = spawnSync("dotnet", ["--version"], {
+    cwd: ROOT,
+    shell: isWindows,
+    encoding: "utf8",
+  });
+
+  if (probe.error || probe.status !== 0) {
+    return null;
+  }
+
+  const version = (probe.stdout ?? "").trim();
+  const parts = version.split(".").map((part) => Number.parseInt(part, 10));
+  const [major = 0, minor = 0, patch = 0] = parts;
+  const [requiredMajor, requiredMinor, requiredPatch] = MINIMUM_DOTNET;
+
+  const tooOld =
+    major < requiredMajor ||
+    (major === requiredMajor && minor < requiredMinor) ||
+    (major === requiredMajor && minor === requiredMinor && patch < requiredPatch);
+
+  if (tooOld) {
+    console.warn(
+      `  .NET SDK ${version} is too old for ${SOLUTION}; ${MINIMUM_DOTNET.join(".")} or newer is required.`,
+    );
+    return null;
+  }
+
+  return version;
+}
+
 if (!skipBuild) {
   steps.push(["Build", "npm", ["run", "esbuild"]]);
 }
@@ -71,6 +110,18 @@ steps.push(
   ["Lint + SonarJS", "npm", ["run", "lint"]],
   ["Type check", "npm", ["run", "typecheck"]],
 );
+
+const dotnetVersion = resolveDotnetSdk();
+if (dotnetVersion === null) {
+  console.log("\n⚠ No usable .NET SDK — skipping the C# build and tests.");
+} else {
+  console.log(`\n.NET SDK ${dotnetVersion}`);
+  steps.push(["C# build", "dotnet", ["build", SOLUTION, "-c", "Release"]]);
+
+  if (!skipTests) {
+    steps.push(["C# tests", "dotnet", ["test", SOLUTION, "-c", "Release", "--no-build"]]);
+  }
+}
 
 if (!skipTests) {
   steps.push(

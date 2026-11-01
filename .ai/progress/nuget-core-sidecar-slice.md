@@ -56,7 +56,10 @@ Repository layout now follows `.ai/skills/solution-generator/SKILL.md`:
       the adapter wiring follow in the next step.
 - [ ] Parity harness
 - [ ] Wire behind `nugetpackagemanager.useCore`
-- [ ] Gate, packaging, docs
+- [x] Gate, packaging, docs
+      — `npm run quality` now builds and tests the C# solution (skipped with a warning when no
+      usable .NET SDK is present), `vscode:prepublish` publishes the core into `dist/core`, and
+      all three workflows install the SDK and run `dotnet build` / `dotnet test`.
 
 ## Notes
 
