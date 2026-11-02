@@ -263,6 +263,62 @@ export class PackageRow extends LitElement {
     `;
   }
 
+  private renderNameLine(): unknown {
+    return html`
+      <div class="name-line">
+        <span class="name ${this.selectable ? "name-selectable" : ""}" @click=${() => this.onNameClick()}>${this.package.Name}</span>
+        ${this.package.Verified
+          ? html`<span class="codicon codicon-verified-filled verified-badge" title="Verified owner"></span>`
+          : nothing}
+        ${this.package.CpmFramework
+          ? html`<span class="tfm-badge" title="Framework-scoped version">${getBaseTargetFramework(this.package.CpmFramework)}</span>`
+          : nothing}
+        <slot name="badges"></slot>
+        ${this.showAuthors && this.package.Authors
+          ? html`<span class="authors">by ${this.package.Authors}</span>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderIcon(): unknown {
+    return this.showIcon
+      ? html`<img
+          class="icon"
+          alt=""
+          src=${this.resolvedIconUrl}
+          @error=${() => this.onIconError()}
+        />`
+      : nothing;
+  }
+
+  private renderVersion(): unknown {
+    return this.showVersion
+      ? html`<div class="package-version">${this.renderVersionContent()}</div>`
+      : nothing;
+  }
+
+  private renderDescription(): unknown {
+    return this.showDescription && this.package.Description
+      ? html`<div class="description">${this.package.Description}</div>`
+      : nothing;
+  }
+
+  private renderMeta(): unknown {
+    if (!this.showMeta || (this.package.TotalDownloads ?? 0) <= 0) {
+      return nothing;
+    }
+
+    return html`
+      <div class="meta-line">
+        <span class="downloads">
+          <span class="codicon codicon-cloud-download"></span>
+          ${FormatDownloads(this.package.TotalDownloads)}
+        </span>
+      </div>
+    `;
+  }
+
   override render() {
     if (!this.package) {
       return nothing;
@@ -282,47 +338,15 @@ export class PackageRow extends LitElement {
         }}
       >
         <slot name="leading"></slot>
-        ${this.showIcon
-          ? html`<img
-              class="icon"
-              alt=""
-              src=${this.resolvedIconUrl}
-              @error=${() => this.onIconError()}
-            />`
-          : nothing}
+        ${this.renderIcon()}
         <div class="package-content">
           <div class="package-header">
-            <div class="name-line">
-              <span class="name ${this.selectable ? "name-selectable" : ""}" @click=${() => this.onNameClick()}>${this.package.Name}</span>
-              ${this.package.Verified
-                ? html`<span class="codicon codicon-verified-filled verified-badge" title="Verified owner"></span>`
-                : nothing}
-              ${this.package.CpmFramework
-                ? html`<span class="tfm-badge" title="Framework-scoped version">${getBaseTargetFramework(this.package.CpmFramework)}</span>`
-                : nothing}
-              <slot name="badges"></slot>
-              ${this.showAuthors && this.package.Authors
-                ? html`<span class="authors">by ${this.package.Authors}</span>`
-                : nothing}
-            </div>
-            ${this.showVersion
-              ? html`<div class="package-version">${this.renderVersionContent()}</div>`
-              : nothing}
+            ${this.renderNameLine()}
+            ${this.renderVersion()}
             <slot name="actions"></slot>
           </div>
-          ${this.showDescription && this.package.Description
-            ? html`<div class="description">${this.package.Description}</div>`
-            : nothing}
-          ${this.showMeta && (this.package.TotalDownloads ?? 0) > 0
-            ? html`
-                <div class="meta-line">
-                  <span class="downloads">
-                    <span class="codicon codicon-cloud-download"></span>
-                    ${FormatDownloads(this.package.TotalDownloads)}
-                  </span>
-                </div>
-              `
-            : nothing}
+          ${this.renderDescription()}
+          ${this.renderMeta()}
           <slot name="details"></slot>
         </div>
       </div>
