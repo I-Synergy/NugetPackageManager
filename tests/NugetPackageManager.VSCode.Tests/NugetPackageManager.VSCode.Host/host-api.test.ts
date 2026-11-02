@@ -474,6 +474,39 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Packages.length, 1);
             assert.strictEqual(result.value.Packages[0]!.Id, 'Newtonsoft.Json');
+            assert.strictEqual(result.value.Packages[0]!.SourceUrl, 'https://api.nuget.org/v3/index.json');
+        });
+
+        test('tags each search result with the source that returned it', async () => {
+            const sources = [
+                { Name: 'one', Url: 'https://one.example/v3/index.json' },
+                { Name: 'two', Url: 'https://two.example/v3/index.json' },
+            ];
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves(sources);
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').callsFake(async (url: string) => ({
+                GetPackagesAsync: async () => ({
+                    data: [{
+                        Id: url.includes('one') ? 'One.Pkg' : 'Two.Pkg',
+                        Name: url.includes('one') ? 'One.Pkg' : 'Two.Pkg',
+                        Version: '1.0.0',
+                    }],
+                }),
+            }) as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>);
+
+            const api = createHostAPI();
+            const result = await api.getPackagesAsync({
+                Url: '',
+                Filter: 'pkg',
+                Prerelease: false,
+                Skip: 0,
+                Take: 20,
+            });
+
+            assert.ok(result.ok);
+            const byId = new Map(result.value.Packages.map((pkg) => [pkg.Id, pkg.SourceUrl]));
+            assert.strictEqual(byId.get('One.Pkg'), sources[0]!.Url);
+            assert.strictEqual(byId.get('Two.Pkg'), sources[1]!.Url);
         });
     });
 

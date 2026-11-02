@@ -1594,13 +1594,19 @@ async function searchAcrossSourcesAsync(
   const promises = sources.map(async (source) => {
     try {
       const api = await nugetApiFactory.GetSourceApiAsync(source.Url);
-      return await api.GetPackagesAsync(
+      const result = await api.GetPackagesAsync(
         request.Filter,
         request.Prerelease,
         request.Skip,
         request.Take,
         signal
       );
+      // A search result is shown without a single selected source; carry the source that
+      // produced it so the Details panel can load dependencies.
+      for (const pkg of result.data) {
+        pkg.SourceUrl = source.Url;
+      }
+      return result;
     } catch (error) {
       Logger.error(`getPackages: Failed to fetch from ${source.Url}`, error);
       return { data: [] as Package[] };
@@ -1672,6 +1678,9 @@ async function fetchPackagesFromUrlAsync(
     request.Take,
     signal
   );
+  for (const pkg of packages.data) {
+    pkg.SourceUrl = url;
+  }
   Logger.info(`getPackages: Successfully fetched ${packages.data.length} packages`);
   return packages;
 }

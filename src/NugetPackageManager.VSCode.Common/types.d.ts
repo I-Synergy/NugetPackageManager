@@ -7,6 +7,8 @@ type Package = {
   LicenseUrl: string;
   ProjectUrl: string;
   Registration: string;
+  /** Feed that returned this search result; lets Browse load details with "All sources". */
+  SourceUrl?: string;
   /** null when the feed does not publish a download count (registration-only metadata). */
   TotalDownloads: number | null;
   /** null when the feed does not publish the verified-owner flag. */

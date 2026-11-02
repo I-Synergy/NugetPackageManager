@@ -22,6 +22,28 @@ suite('PackageViewModel', () => {
         assert.notStrictEqual(PackageViewModel.Empty('A'), PackageViewModel.Empty('B'));
     });
 
+    test('copies the source that returned the package', () => {
+        const pkg = new PackageViewModel({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: '',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: null,
+            Verified: null,
+            InstalledVersion: '',
+            Version: '1.0.0',
+            Versions: [],
+            Tags: [],
+            SourceUrl: 'https://api.nuget.org/v3/index.json',
+        });
+
+        assert.strictEqual(pkg.SourceUrl, 'https://api.nuget.org/v3/index.json');
+    });
+
     test('UpdatePackage copies the popularity metadata from the lookup', () => {
         const pkg = PackageViewModel.Empty('Contoso.Sdk');
 
