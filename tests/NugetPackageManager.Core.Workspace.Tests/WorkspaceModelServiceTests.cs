@@ -108,6 +108,63 @@ public class WorkspaceModelServiceTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public async Task GetProjectsAsync_CpmPropsChangedOnDisk_RefreshesCachedVersion()
+    {
+        // Regression: the sidecar used to keep serving the props map it parsed at process start,
+        // so the Installed tab showed stale versions after an external edit (or the extension's
+        // own batch update). The cache now stamps the file's last-write time and length.
+        // Arrange
+        var propsPath = workspace!.Combine("Directory.Packages.props");
+        File.WriteAllText(propsPath, """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Refresh", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Newtonsoft.Json" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        using var service = new WorkspaceModelService();
+
+        // Act — first scan warms the cache.
+        var before = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        Assert.AreEqual("13.0.3", before[0].Packages[0].Version);
+        Assert.AreEqual("central", before[0].Packages[0].VersionSource);
+
+        // Overwrite with a same-length version so only the timestamp can distinguish the two, and
+        // move the timestamp forward explicitly to dodge filesystem granularity.
+        File.WriteAllText(propsPath, """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Newtonsoft.Json" Version="14.0.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        File.SetLastWriteTimeUtc(propsPath, DateTime.UtcNow.AddMinutes(1));
+
+        // Act — same service instance, cached props map must be refreshed.
+        var after = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        Assert.AreEqual("14.0.0", after[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public async Task GetProjectsAsync_ConditionalCpm_ProducesResolutionsPerFramework()
     {
         // Arrange

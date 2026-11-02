@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Xml;
 using NugetPackageManager.Core.Workspace.Cpm;
 using NugetPackageManager.Core.Workspace.Models;
@@ -22,7 +23,7 @@ public sealed class WorkspaceModelService(
     private readonly TargetFrameworkResolver frameworkResolver = frameworkResolver ?? new TargetFrameworkResolver();
     private readonly ICpmEvaluator cpmEvaluator = cpmEvaluator ?? new CpmEvaluator();
     private readonly bool ownsEvaluator = cpmEvaluator is null;
-    private readonly Dictionary<string, CpmPackageMap> cpmCache = [];
+    private readonly ConcurrentDictionary<string, CachedCpmMap> cpmCache = new(StringComparer.Ordinal);
 
     public async Task<IReadOnlyList<ProjectModel>> GetProjectsAsync(
         IReadOnlyList<string> projectPaths,
@@ -55,15 +56,20 @@ public sealed class WorkspaceModelService(
     }
 
     /// <summary>
-    /// Drops the evaluator's cached effective versions so the next scan re-runs MSBuild.
+    /// Drops the evaluator's and the CPM props map's cached state so the next scan re-runs MSBuild
+    /// and re-parses <c>Directory.Packages.props</c>.
     ///
     /// The evaluator's stamp only covers the project, <c>Directory.Packages.props</c> and
     /// <c>Directory.Build.props</c>; a CPM write that edits a property in some other imported
-    /// <c>.props</c> file therefore needs this explicit nudge. Only the evaluator this service
-    /// created is invalidated — an injected fake is left alone.
+    /// <c>.props</c> file therefore needs this explicit nudge. Clearing the props map cache as well
+    /// makes a write made through the extension visible even when the filesystem timestamp is too
+    /// coarse to change. Only the evaluator this service created is invalidated — an injected fake
+    /// is left alone.
     /// </summary>
     public void InvalidateVersionCache()
     {
+        cpmCache.Clear();
+
         if (ownsEvaluator && cpmEvaluator is CpmEvaluator owned)
         {
             owned.ClearCache();
@@ -221,6 +227,11 @@ public sealed class WorkspaceModelService(
         return project with { Packages = packages };
     }
 
+    /// <summary>
+    /// Returns the parsed central package map for <paramref name="projectPath"/>, caching it per
+    /// props file until the file's last-write time or length changes. The stamp makes external
+    /// edits — and the extension's own writes — visible without a sidecar restart.
+    /// </summary>
     private CpmPackageMap? LoadCpmMap(string projectPath)
     {
         var cpmFile = CpmPropsReader.FindCpmFile(projectPath);
@@ -229,15 +240,21 @@ public sealed class WorkspaceModelService(
             return null;
         }
 
-        if (cpmCache.TryGetValue(cpmFile, out var cached))
+        // A fresh FileInfo per call: a cached instance would keep the stamp it was created with.
+        var stamp = new FileInfo(cpmFile);
+        if (cpmCache.TryGetValue(cpmFile, out var cached)
+            && cached.Length == stamp.Length
+            && cached.LastWriteUtc == stamp.LastWriteTimeUtc)
         {
-            return cached;
+            return cached.Map;
         }
 
         var parsed = CpmPropsReader.Parse(File.ReadAllText(cpmFile));
-        cpmCache[cpmFile] = parsed;
+        cpmCache[cpmFile] = new CachedCpmMap(parsed, stamp.Length, stamp.LastWriteTimeUtc);
         return parsed;
     }
+
+    private sealed record CachedCpmMap(CpmPackageMap Map, long Length, DateTime LastWriteUtc);
 
     /// <summary>True when any version line (unconditional or conditional) references a property.</summary>
     private static bool HasPropertyReferences(CpmPackageMap map) =>
