@@ -100,6 +100,25 @@ public class ProtocolNuGetSourceTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public async Task GetPackageAsync_PrereleaseOnlyPackageIsFoundWhenTheFilterIsOff()
+    {
+        // An installed prerelease package (Aspire.Hosting.Maui, Microsoft.Maui.DevFlow.Agent,
+        // …) must resolve even when the global Prerelease toggle is off. Asking the metadata
+        // resource with includePrerelease=false hides every version, so the package was reported
+        // as missing from each configured feed.
+        using var source = CreateSource(registered: [Metadata("13.0.0-preview.1.25560.3")]);
+
+        var package = await source.GetPackageAsync("Aspire.Hosting.Maui", prerelease: false, CancellationToken.None);
+
+        Assert.AreEqual("13.0.0-preview.1.25560.3", package.Version);
+        string[] expected = ["13.0.0-preview.1.25560.3"];
+        CollectionAssert.AreEqual(
+            expected,
+            package.Versions.Select(version => version.Version).ToArray());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public async Task GetPackageAsync_CachesUntilCleared()
     {
         var metadata = new FakeMetadataResource(_ => [Metadata("13.0.3")]);
@@ -336,7 +355,10 @@ public class ProtocolNuGetSourceTests
             CancellationToken token)
         {
             Calls++;
-            return Task.FromResult(entries(packageIdentifier));
+            var entriesForPackage = entries(packageIdentifier);
+            return Task.FromResult(includePrerelease
+                ? entriesForPackage
+                : entriesForPackage.Where(metadata => !metadata.Identity.Version.IsPrerelease));
         }
 
         public override Task<IPackageSearchMetadata?> GetMetadataAsync(
