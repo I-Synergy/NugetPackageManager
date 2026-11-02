@@ -1,0 +1,36 @@
+// Composition root for the sidecar. No logic here: register handler groups, then run the server.
+//
+// Launched by the extension host as:  dotnet <extensionPath>/dist/core/MyExtension.Core.dll
+// stdin/stdout carry protocol frames; stderr is forwarded to the extension's output channel.
+
+using MyExtension.Core;
+using MyExtension.Core.Adapters;
+using MyExtension.Core.Domain;
+using MyExtension.Core.Protocol;
+
+using var sources = new HttpSourceProvider();
+
+var handlers = new Dictionary<string, RpcHandler>(StringComparer.Ordinal);
+
+void Add(IReadOnlyDictionary<string, RpcHandler> group)
+{
+    foreach (var (name, handler) in group)
+    {
+        handlers[name] = handler;
+    }
+}
+
+Add(new RemoteApiHandlers(sources).Create());          // wave B — remote API
+Add(new ProjectHandlers(new WorkspaceModelService()).Create()); // wave C — project model
+Add(new DependencyHandlers(sources).Create());         // wave D — semantics
+Add(new DiagnosticHandlers().Create());                // wave E — captured output
+Add(new ToolchainHandlers().Create());                 // wave F — SDK / global.json
+
+using var server = new NdjsonServer(Console.In, Console.Out, Console.Error, handlers);
+return await server.RunAsync(CancellationToken.None).ConfigureAwait(false);
+
+// Notes
+// - One instance per handler group when it holds a cache that should survive across requests
+//   (the project model does; a stateless parser group does not).
+// - Never write to Console.Out outside NdjsonServer. Use Console.Error for diagnostics.
+// - Keep this file free of branching; anything conditional belongs in a handler.

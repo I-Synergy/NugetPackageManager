@@ -12,6 +12,8 @@ import type {
   GetPackageResponse,
   GetPackageDetailsRequest,
   GetPackageDetailsResponse,
+  GetPackageFrameworksRequest,
+  GetPackageFrameworksResponse,
   UpdateProjectRequest,
   UpdateProjectResponse,
   GetConfigurationResponse,
@@ -1609,16 +1611,51 @@ async function searchAcrossSourcesAsync(
   });
 
   const results = await Promise.all(promises);
-  const allPackages: Package[] = [];
-  const seenIds = new Set<string>();
+  const keptById = new Map<string, Package>();
   for (const result of results) {
     for (const pkg of result.data) {
-      if (seenIds.has(pkg.Id)) continue;
-      seenIds.add(pkg.Id);
-      allPackages.push(pkg);
+      const kept = keptById.get(pkg.Id);
+      if (!kept) {
+        keptById.set(pkg.Id, pkg);
+        continue;
+      }
+
+      // The first feed to answer keeps the row; a later one only lends popularity
+      // data when the kept copy has none. Versions and description stay put.
+      if (kept.TotalDownloads === null) {
+        MergePopularityDownloadCounts(kept, pkg);
+      }
     }
   }
-  return allPackages;
+  return [...keptById.values()];
+}
+
+/**
+ * Copies popularity metadata from `donor` onto `target` in place, without touching the
+ * identity of the row: versions keep their list, and only their per-version counts are
+ * filled where the donor knows a version the target already has.
+ *
+ * Returns false when the donor publishes no total, i.e. it has nothing to lend.
+ */
+function MergePopularityDownloadCounts(target: Package, donor: Package): boolean {
+  if (donor.TotalDownloads === null) return false;
+
+  target.TotalDownloads = donor.TotalDownloads;
+  target.Verified = donor.Verified;
+
+  const donorDownloads = new Map<string, number | null>();
+  for (const version of donor.Versions) {
+    donorDownloads.set(version.Version.toLowerCase(), version.Downloads ?? null);
+  }
+
+  for (const version of target.Versions) {
+    const downloads = donorDownloads.get(version.Version.toLowerCase());
+    if (downloads !== undefined && downloads !== null) {
+      version.Downloads = downloads;
+    }
+  }
+
+  return true;
 }
 
 async function fetchPackagesFromUrlAsync(
@@ -1646,17 +1683,55 @@ async function fetchPackageFromAnySourceAsync(
   const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
   const sources = await NuGetConfigResolver.GetSourcesAndDecodePasswordsAsync(workspaceRoots);
 
-  for (const source of sources) {
+  let primary: GetPackageResponse | undefined;
+  let primaryIndex = -1;
+
+  for (const [index, source] of sources.entries()) {
     try {
       const result = await fetchPackageFromSourceAsync(source.Url, request, signal);
-      if (result.ok) return result;
-      Logger.warn(`getPackage: ${request.Id} not in ${source.Url}, trying next`);
+      if (!result.ok) {
+        Logger.warn(`getPackage: ${request.Id} not in ${source.Url}, trying next`);
+        continue;
+      }
+
+      // A feed that publishes popularity data is the whole answer; the source badge
+      // and version list stay its own.
+      if (result.value.Package.TotalDownloads !== null) return result;
+      primary = result.value;
+      primaryIndex = index;
+      break;
     } catch {
       Logger.warn(`getPackage: ${request.Id} not in ${source.Url}, trying next`);
     }
   }
 
-  return fail("Failed to fetch package from any source");
+  if (primary === undefined) {
+    return fail("Failed to fetch package from any source");
+  }
+
+  // The serving feed has no download data (an offline folder feed, for example):
+  // another configured feed that knows the package lends its popularity counts.
+  await mergePopularityFromRemainingSourcesAsync(primary, sources, primaryIndex + 1, request, signal);
+  return ok(primary);
+}
+
+async function mergePopularityFromRemainingSourcesAsync(
+  primary: GetPackageResponse,
+  sources: Array<{ Url: string }>,
+  startIndex: number,
+  request: GetPackageRequest,
+  signal?: AbortSignal
+): Promise<void> {
+  for (const source of sources.slice(startIndex)) {
+    try {
+      const donor = await fetchPackageFromSourceAsync(source.Url, request, signal);
+      if (donor.ok && MergePopularityDownloadCounts(primary.Package, donor.value.Package)) {
+        return;
+      }
+    } catch {
+      Logger.warn(`getPackage: ${request.Id} has no popularity data in ${source.Url}`);
+    }
+  }
 }
 
 async function fetchPackageFromSourceAsync(
@@ -2605,6 +2680,22 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         const message = err instanceof Error ? err.message : String(err);
         Logger.error(`getPackageDetails: Failed for ${request.Id} ${request.Version}`, err);
         return fail(`Failed to fetch package details: ${message}`);
+      }
+    },
+
+    async getPackageFrameworksAsync(request: GetPackageFrameworksRequest, signal?: AbortSignal): Promise<Result<GetPackageFrameworksResponse>> {
+      if (!request.Url) return fail("SourceUrl is empty");
+      if (!request.Id) return fail("Package id is empty");
+      if (!request.Version) return fail("Package version is empty");
+
+      try {
+        const api = await nugetApiFactory.GetSourceApiAsync(request.Url);
+        const frameworks = await api.GetPackageFrameworksAsync(request.Id, request.Version, signal);
+        return ok({ Groups: frameworks.data.Groups });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        Logger.error(`getPackageFrameworks: Failed for ${request.Id} ${request.Version}`, err);
+        return fail(`Failed to fetch supported frameworks: ${message}`);
       }
     },
 

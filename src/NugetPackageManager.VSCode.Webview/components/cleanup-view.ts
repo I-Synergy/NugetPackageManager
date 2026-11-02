@@ -29,6 +29,18 @@ export class CleanupView extends LitElement {
         overflow: hidden;
       }
 
+      .cleanup-body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding-bottom: 8px;
+      }
+
+      .cleanup-container .package-list {
+        flex: none;
+        overflow: visible;
+      }
+
       .stat-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -235,59 +247,61 @@ export class CleanupView extends LitElement {
           </div>
         </div>
 
-        <dependency-issues
-          .projectPaths=${this.projectPaths}
-          @dependency-count-changed=${async (e: CustomEvent<number>) => await this.onDependencyCountChangedAsync(e)}
-          @project-updated=${async () => {
-            await this.LoadCleanupReportAsync();
-            this.dispatchEvent(new CustomEvent("cleanup-completed", { bubbles: true, composed: true }));
-          }}
-        ></dependency-issues>
+        <div class="cleanup-body">
+          <dependency-issues
+            .projectPaths=${this.projectPaths}
+            @dependency-count-changed=${async (e: CustomEvent<number>) => await this.onDependencyCountChangedAsync(e)}
+            @project-updated=${async () => {
+              await this.LoadCleanupReportAsync();
+              this.dispatchEvent(new CustomEvent("cleanup-completed", { bubbles: true, composed: true }));
+            }}
+          ></dependency-issues>
 
-        ${report
-          ? html`<div class="stat-grid">
-              <div class="stat"><b>${report.PropsFiles.reduce((n, f) => n + f.Defined.length, 0)}</b><span>defined entries</span></div>
-              <div class="stat"><b>${report.Used.length}</b><span>used packages</span></div>
-              <div class="stat"><b>${unused.length}</b><span>unused packages</span></div>
-              <div class="stat"><b>${report.Missing.length}</b><span>missing definitions</span></div>
-            </div>`
-          : nothing}
+          ${report
+            ? html`<div class="stat-grid">
+                <div class="stat"><b>${report.PropsFiles.reduce((n, f) => n + f.Defined.length, 0)}</b><span>defined entries</span></div>
+                <div class="stat"><b>${report.Used.length}</b><span>used packages</span></div>
+                <div class="stat"><b>${unused.length}</b><span>unused packages</span></div>
+                <div class="stat"><b>${report.Missing.length}</b><span>missing definitions</span></div>
+              </div>`
+            : nothing}
 
-        ${this.isLoading
-          ? html`<div class="loading" role="status"><span class="spinner large"></span><span>Scanning package usage...</span></div>`
-          : nothing}
-        ${this.errorMessage
-          ? html`<div class="error" role="alert"><span class="codicon codicon-error"></span><div class="empty-title">Cleanup failed</div><div class="empty-hint">${this.errorMessage}</div></div>`
-          : nothing}
-        ${!this.isLoading && report && unused.length === 0
-          ? html`<div class="empty"><span class="codicon codicon-check"></span><div class="empty-title">No unused packages</div><div class="empty-hint">Every PackageVersion entry is referenced by at least one project.</div></div>`
-          : nothing}
+          ${this.isLoading
+            ? html`<div class="loading" role="status"><span class="spinner large"></span><span>Scanning package usage...</span></div>`
+            : nothing}
+          ${this.errorMessage
+            ? html`<div class="error" role="alert"><span class="codicon codicon-error"></span><div class="empty-title">Cleanup failed</div><div class="empty-hint">${this.errorMessage}</div></div>`
+            : nothing}
+          ${!this.isLoading && report && unused.length === 0
+            ? html`<div class="empty"><span class="codicon codicon-check"></span><div class="empty-title">No unused packages</div><div class="empty-hint">Every PackageVersion entry is referenced by at least one project.</div></div>`
+            : nothing}
 
-        ${!this.isLoading && propsWithUnused.length > 0
-          ? html`<div class="package-list">
-              ${propsWithUnused.map((file) => html`
-                <div class="group-header">
-                  ${this.fileName(file.Path)}
-                  <span class="group-count">${file.Unused.length}</span>
-                </div>
-                ${file.Unused.map((packageId) => html`
-                  <div class="unused-row">
-                    <span class="codicon codicon-package"></span>
-                    <span class="package-id" title=${packageId}>${packageId}</span>
-                    <span class="file-name" title=${file.Path}>${this.fileName(file.Path)}</span>
+          ${!this.isLoading && propsWithUnused.length > 0
+            ? html`<div class="package-list">
+                ${propsWithUnused.map((file) => html`
+                  <div class="group-header">
+                    ${this.fileName(file.Path)}
+                    <span class="group-count">${file.Unused.length}</span>
                   </div>
+                  ${file.Unused.map((packageId) => html`
+                    <div class="unused-row">
+                      <span class="codicon codicon-package"></span>
+                      <span class="package-id" title=${packageId}>${packageId}</span>
+                      <span class="file-name" title=${file.Path}>${this.fileName(file.Path)}</span>
+                    </div>
+                  `)}
                 `)}
-              `)}
-            </div>`
-          : nothing}
+              </div>`
+            : nothing}
 
-        ${report && report.Missing.length > 0
-          ? html`<div class="missing-card">
-              <div class="missing-title">Used but not defined (${report.Missing.length})</div>
-              ${report.Missing.join(", ")}
-              <div>These package references are not covered by Directory.Packages.props.</div>
-            </div>`
-          : nothing}
+          ${report && report.Missing.length > 0
+            ? html`<div class="missing-card">
+                <div class="missing-title">Used but not defined (${report.Missing.length})</div>
+                ${report.Missing.join(", ")}
+                <div>These package references are not covered by Directory.Packages.props.</div>
+              </div>`
+            : nothing}
+        </div>
       </div>
     `;
   }

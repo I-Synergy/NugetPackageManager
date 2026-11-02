@@ -4,7 +4,7 @@ Throughout this template, the following placeholders are used. Replace them when
 
 | Token | Replace With | Example |
 |-------|--------------|---------|
-| `{ApplicationName}` | Your application name | `BudgetTracker` |
+| `NugetPackageManager` | Your application name | `BudgetTracker` |
 | `{Domain}` | Domain/bounded context name | `Budgets`, `Goals`, `Debts` |
 | `{Entity}` | Entity name (PascalCase) | `Budget`, `Goal`, `Debt` |
 | `{Entities}` | Entity plural (PascalCase) — used for DbSet names | `Budgets`, `Goals`, `Debts` |
@@ -19,16 +19,16 @@ Throughout this template, the following placeholders are used. Replace them when
 
 ## Example Transformation
 
-- **Template:** `{ApplicationName}.Domain.{Domain}`
+- **Template:** `NugetPackageManager.Domain.{Domain}`
 - **Actual:** `BudgetTracker.Domain.Budgets`
 
 ## Namespace Examples
 
 ```csharp
 // Template format
-namespace {ApplicationName}.Domain.{Domain}.Features.{Entity}.Commands;
-namespace {ApplicationName}.Services.{Domain}.Endpoints;
-namespace {ApplicationName}.Entities.{Domain};
+namespace NugetPackageManager.Domain.{Domain}.Features.{Entity}.Commands;
+namespace NugetPackageManager.Services.{Domain}.Endpoints;
+namespace NugetPackageManager.Entities.{Domain};
 
 // Actual implementation
 namespace BudgetTracker.Domain.Budgets.Features.Budget.Commands;
@@ -40,8 +40,8 @@ namespace BudgetTracker.Entities.Budgets;
 
 ```
 // Template paths
-src/{ApplicationName}.Domain.{Domain}/Features/{Entity}/Commands/Create{Entity}Command.cs
-src/{ApplicationName}.Services.{Domain}/Endpoints/{Entity}Endpoints.cs
+src/NugetPackageManager.Domain.{Domain}/Features/{Entity}/Commands/Create{Entity}Command.cs
+src/NugetPackageManager.Services.{Domain}/Endpoints/{Entity}Endpoints.cs
 
 // Actual paths
 src/BudgetTracker.Domain.Budgets/Features/Budget/Commands/CreateBudgetCommand.cs

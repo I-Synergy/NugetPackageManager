@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Test project, one per source project: <SourceProject>.Tests.
+    MSTest is the standard (xUnit and NUnit are forbidden); Moq for isolation.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MyExtension.Core.Domain.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Moq" />
+    <PackageReference Include="MSTest.TestAdapter" />
+    <PackageReference Include="MSTest.TestFramework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MyExtension.Core.Domain\MyExtension.Core.Domain.csproj" />
+    <ProjectReference Include="..\MyExtension.TestUtilities\MyExtension.TestUtilities.csproj" />
+  </ItemGroup>
+
+</Project>

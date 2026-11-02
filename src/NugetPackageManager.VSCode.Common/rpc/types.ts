@@ -51,6 +51,12 @@ export type GetPackageDetailsRequest = SourceContext & {
   Version: string;
 };
 
+export type GetPackageFrameworksRequest = SourceContext & {
+  /** Package id and exact version whose assets decide the supported frameworks. */
+  Id: string;
+  Version: string;
+};
+
 export type GetOutdatedPackagesRequest = CacheControl & {
   Prerelease: boolean;
   ProjectPaths?: string[];
@@ -232,6 +238,11 @@ export type GetPackageResponse = {
 
 export type GetPackageDetailsResponse = {
   Package: PackageDetails;
+};
+
+export type GetPackageFrameworksResponse = {
+  /** One entry per product; empty when the package version declares no framework assets. */
+  Groups: PackageFrameworkGroup[];
 };
 
 export type GetOutdatedPackagesResponse = {
@@ -584,6 +595,7 @@ export interface HostAPI {
   getPackagesAsync(req: GetPackagesRequest, signal?: AbortSignal): Promise<Result<GetPackagesResponse>>;
   getPackageAsync(req: GetPackageRequest, signal?: AbortSignal): Promise<Result<GetPackageResponse>>;
   getPackageDetailsAsync(req: GetPackageDetailsRequest, signal?: AbortSignal): Promise<Result<GetPackageDetailsResponse>>;
+  getPackageFrameworksAsync(req: GetPackageFrameworksRequest, signal?: AbortSignal): Promise<Result<GetPackageFrameworksResponse>>;
   updateProjectAsync(req: UpdateProjectRequest, signal?: AbortSignal): Promise<Result<UpdateProjectResponse>>;
   getConfigurationAsync(): Promise<Result<GetConfigurationResponse>>;
   updateConfigurationAsync(req: UpdateConfigurationRequest): Promise<Result<void>>;

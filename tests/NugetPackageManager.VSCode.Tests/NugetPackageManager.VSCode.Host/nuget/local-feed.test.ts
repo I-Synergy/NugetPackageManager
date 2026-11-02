@@ -52,6 +52,21 @@ suite('LocalNuGetFeed', () => {
         assert.deepStrictEqual(all[0]!.Versions.map((v) => v.Version), ['1.0.0', '2.0.0-beta.1']);
     });
 
+    test('exposes a null download count for every version', async () => {
+        await writePackageAsync('Local.Downloads', '1.0.0');
+        await writePackageAsync('Local.Downloads', '2.0.0');
+
+        const feed = new LocalNuGetFeed(tempDir);
+        const packages = await feed.GetPackagesAsync('local', true, 0, 10);
+
+        assert.strictEqual(packages.length, 1);
+        // A folder feed publishes no download data: null rather than 0 or undefined.
+        assert.deepStrictEqual(
+            packages[0]!.Versions.map((version) => version.Downloads),
+            [null, null]
+        );
+    });
+
     test('reads nuspec dependencies from a package version', async () => {
         await writePackageAsync('Local.Dependency', '1.2.3');
         const feed = new LocalNuGetFeed(tempDir);

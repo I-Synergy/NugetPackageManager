@@ -3,9 +3,24 @@ import * as assert from 'assert';
 import * as registrations from '@/web/registrations';
 import { PackageDetailsComponent } from '@/web/components/package-details';
 import { PackageViewModel } from '@/web/types';
-import { ok } from '@/common/rpc/result';
-import type { GetPackageDetailsRequest, GetPackageDetailsResponse, HostAPI } from '@/common/rpc/types';
+import { ok, fail } from '@/common/rpc/result';
+import type {
+    GetPackageDetailsRequest,
+    GetPackageDetailsResponse,
+    GetPackageFrameworksRequest,
+    GetPackageFrameworksResponse,
+    HostAPI,
+} from '@/common/rpc/types';
 import type { Result } from '@/common/rpc/result';
+
+/** Poll until the reactive task has settled; jsdom has no real frame loop to await. */
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    while (!predicate()) {
+        if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
 
 
 /** A complete view model: the component renders every field, so a partial stub crashes. */
@@ -31,6 +46,7 @@ function testPackage(): PackageViewModel {
 suite('PackageDetails Component', () => {
     let packageDetails: PackageDetailsComponent;
     let getPackageDetailsStub: (req: GetPackageDetailsRequest) => Promise<Result<GetPackageDetailsResponse>>;
+    let getPackageFrameworksStub: (req: GetPackageFrameworksRequest) => Promise<Result<GetPackageFrameworksResponse>>;
     let originalHostApi: HostAPI;
 
     setup(() => {
@@ -39,10 +55,13 @@ suite('PackageDetails Component', () => {
 
         // Default stub returns null package
         getPackageDetailsStub = () => Promise.resolve(ok({ Package: null as unknown as PackageDetails }));
+        // Default: no frameworks (the tab is never opened unless a test says so).
+        getPackageFrameworksStub = () => Promise.resolve(ok({ Groups: [] }));
 
         // Mock hostApi at module level
         const mockHostApi = {
-            getPackageDetailsAsync: (req: GetPackageDetailsRequest) => getPackageDetailsStub(req)
+            getPackageDetailsAsync: (req: GetPackageDetailsRequest) => getPackageDetailsStub(req),
+            getPackageFrameworksAsync: (req: GetPackageFrameworksRequest) => getPackageFrameworksStub(req),
         } as unknown as HostAPI;
 
         Object.defineProperty(registrations, 'hostApi', {
@@ -322,5 +341,236 @@ suite('PackageDetails Component', () => {
         const noDeps = shadowRoot?.querySelector('.no-dependencies');
         assert.ok(noDeps, "No dependencies message should be visible");
         assert.ok(noDeps.textContent?.includes('No dependencies'));
+    });
+
+    /** Read the meta grid value that follows a label in the Description tab. */
+    function valueForLabel(label: string): string | undefined {
+        const labels = Array.from(packageDetails.shadowRoot?.querySelectorAll('.package-meta .label') ?? []);
+        const labelEl = labels.find((l) => l.textContent?.trim() === label);
+        return labelEl?.nextElementSibling?.textContent?.trim();
+    }
+
+    test('should show Total and Current version downloads and follow the selected version', async () => {
+        const viewModel = new PackageViewModel({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: 'A test package',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: 1122400000,
+            Verified: true,
+            InstalledVersion: '',
+            Version: '1.0.0',
+            Versions: [
+                { Version: '1.0.0', Downloads: 1500 },
+                { Version: '0.9.0', Downloads: 12 },
+            ],
+            Tags: [],
+        });
+
+        packageDetails.package = viewModel;
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'description';
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(valueForLabel('Total'), '1.1B');
+        assert.strictEqual(valueForLabel('Current version'), '1.5K');
+
+        // The version dropdown drives the Current version row, not the total.
+        packageDetails.selectedVersion = '0.9.0';
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(valueForLabel('Total'), '1.1B');
+        assert.strictEqual(valueForLabel('Current version'), '12');
+    });
+
+    test('should fall back to an em dash when a version has no download count', async () => {
+        const viewModel = new PackageViewModel({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: '',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: null,
+            Verified: null,
+            InstalledVersion: '',
+            Version: '1.0.0',
+            Versions: [{ Version: '1.0.0' }],
+            Tags: [],
+        });
+
+        packageDetails.package = viewModel;
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'description';
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(valueForLabel('Total'), '—');
+        assert.strictEqual(valueForLabel('Current version'), '—');
+    });
+
+    test('should load supported frameworks for the selected version and source', async () => {
+        let capturedRequest: GetPackageFrameworksRequest | undefined;
+        getPackageFrameworksStub = (req: GetPackageFrameworksRequest) => {
+            capturedRequest = req;
+            return Promise.resolve(ok({
+                Groups: [
+                    {
+                        Product: '.NET',
+                        Frameworks: [
+                            { Name: 'net8.0', IsComputed: false },
+                            { Name: 'net6.0', IsComputed: true },
+                        ],
+                    },
+                    {
+                        Product: '.NET Framework',
+                        Frameworks: [{ Name: 'net472', IsComputed: false }],
+                    },
+                ],
+            }));
+        };
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'frameworks';
+
+        await waitFor(() => packageDetails.frameworks !== undefined);
+        await packageDetails.updateComplete;
+
+        assert.deepStrictEqual(capturedRequest, {
+            Id: 'Contoso.Sdk',
+            Version: '1.0.0',
+            Url: 'https://source.url',
+        });
+
+        const shadowRoot = packageDetails.shadowRoot;
+        assert.ok(shadowRoot);
+
+        const products = Array.from(shadowRoot.querySelectorAll('.framework-product'))
+            .map((el) => el.textContent?.trim());
+        assert.deepStrictEqual(products, ['.NET', '.NET Framework']);
+
+        const badges = Array.from(shadowRoot.querySelectorAll('.tfm-badge'));
+        assert.strictEqual(badges.length, 3);
+        assert.strictEqual(badges[0]!.textContent?.trim(), 'net8.0');
+        // Declared assets are styled as declared; compatible-only ones are muted.
+        assert.strictEqual(badges[0]!.classList.contains('is-computed'), false);
+        assert.strictEqual(badges[1]!.textContent?.trim(), 'net6.0');
+        assert.strictEqual(badges[1]!.classList.contains('is-computed'), true);
+        assert.strictEqual(badges[2]!.textContent?.trim(), 'net472');
+        assert.strictEqual(badges[2]!.classList.contains('is-computed'), false);
+    });
+
+    test('should re-request frameworks when the selected version changes', async () => {
+        const requests: GetPackageFrameworksRequest[] = [];
+        getPackageFrameworksStub = (req: GetPackageFrameworksRequest) => {
+            requests.push(req);
+            return Promise.resolve(ok({
+                Groups: [{ Product: '.NET', Frameworks: [{ Name: `net-${req.Version}`, IsComputed: false }] }],
+            }));
+        };
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'frameworks';
+
+        await waitFor(() => requests.length === 1);
+        await packageDetails.updateComplete;
+
+        packageDetails.selectedVersion = '0.9.0';
+
+        await waitFor(() => requests.length === 2);
+        await waitFor(() => packageDetails.shadowRoot?.querySelector('.tfm-badge')?.textContent?.trim() === 'net-0.9.0');
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(requests[1]!.Version, '0.9.0');
+        const badge = packageDetails.shadowRoot?.querySelector('.tfm-badge');
+        assert.strictEqual(badge?.textContent?.trim(), 'net-0.9.0');
+    });
+
+    test('should show a spinner while the frameworks request is in flight', async () => {
+        let resolveFrameworks: ((value: Result<GetPackageFrameworksResponse>) => void) | undefined;
+        getPackageFrameworksStub = () => new Promise<Result<GetPackageFrameworksResponse>>((resolve) => {
+            resolveFrameworks = resolve;
+        });
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'frameworks';
+
+        await waitFor(() => packageDetails.frameworksLoading);
+        await packageDetails.updateComplete;
+
+        assert.ok(packageDetails.shadowRoot?.querySelector('.loader'), 'A spinner should be shown');
+
+        resolveFrameworks!(ok({ Groups: [] }));
+        await waitFor(() => !packageDetails.frameworksLoading);
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(packageDetails.shadowRoot?.querySelector('.loader'), null);
+    });
+
+    test('should show an error when the frameworks request fails', async () => {
+        let called = false;
+        getPackageFrameworksStub = () => {
+            called = true;
+            return Promise.resolve(fail<GetPackageFrameworksResponse>('feed exploded'));
+        };
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'frameworks';
+
+        await waitFor(() => called && !packageDetails.frameworksLoading);
+        await waitFor(() => packageDetails.shadowRoot?.querySelector('.error') != null);
+        await packageDetails.updateComplete;
+
+        const error = packageDetails.shadowRoot?.querySelector('.error');
+        assert.ok(error, 'An error should be shown');
+        assert.ok(error.textContent?.includes('Failed to load supported frameworks'));
+    });
+
+    test('should show an empty state when the package declares no frameworks', async () => {
+        getPackageFrameworksStub = () => Promise.resolve(ok({ Groups: [] }));
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+        packageDetails.activeTab = 'frameworks';
+
+        await waitFor(() => packageDetails.frameworks !== undefined);
+        await packageDetails.updateComplete;
+
+        const empty = packageDetails.shadowRoot?.querySelector('.no-dependencies');
+        assert.ok(empty, 'An empty state should be shown');
+        assert.ok(empty.textContent?.includes('No supported frameworks'));
+        assert.strictEqual(packageDetails.shadowRoot?.querySelectorAll('.tfm-badge').length, 0);
+    });
+
+    test('should not request frameworks until the tab is opened', async () => {
+        let called = false;
+        getPackageFrameworksStub = () => {
+            called = true;
+            return Promise.resolve(ok({ Groups: [] }));
+        };
+
+        packageDetails.package = testPackage();
+        packageDetails.source = 'https://source.url';
+        packageDetails.selectedVersion = '1.0.0';
+
+        await packageDetails.updateComplete;
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        assert.strictEqual(called, false, 'The frameworks request is lazy');
+        assert.ok(packageDetails.shadowRoot?.querySelector('.description-text'));
     });
 });

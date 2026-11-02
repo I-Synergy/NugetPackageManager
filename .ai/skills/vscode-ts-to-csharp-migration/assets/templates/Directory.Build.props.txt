@@ -1,0 +1,38 @@
+<Project>
+
+  <!--
+    Root build policy for every C# project in the repository. Do not repeat these settings in
+    individual .csproj files: the point is that one edit changes the policy everywhere.
+
+    `Fixtures` trees are test data the extension evaluates at runtime. They must keep their own
+    settings, so this file opts them out by path segment (both separators, Windows and Unix).
+  -->
+  <PropertyGroup>
+    <IsSidecarProject>true</IsSidecarProject>
+    <IsSidecarProject Condition="$([System.String]::Copy('$(MSBuildProjectFullPath)').Replace('\','/').Contains('/Fixtures/'))">false</IsSidecarProject>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsSidecarProject)' == 'true'">
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Rules enforced by the compiler, not by review. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+
+    <!-- Framework-dependent sidecar: one build serves every OS/arch, newest installed runtime runs it. -->
+    <RollForward>LatestMajor</RollForward>
+
+    <Deterministic>true</Deterministic>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- GenerateDocumentationFile is required for IDE0005 during build. CS1591 is disabled:
+         not every public member needs an XML comment. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

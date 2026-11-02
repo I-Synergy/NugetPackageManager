@@ -40,6 +40,7 @@
 - [Troubleshooting: SDK and Workload Errors](#troubleshooting-sdk-and-workload-errors)
 - [Contributing](#contributing)
 - [Architecture](#architecture)
+- [Performance and Memory](#performance-and-memory)
 - [Credits](#credits)
 - [License](#license)
 - [Standards Compatibility](#standards-compatibility)
@@ -73,7 +74,7 @@
 
 - Visual Studio Code **1.110** or later
 - A workspace containing `.csproj`, `.fsproj`, `.vbproj`, `.sln`, or `.slnx` files
-- **.NET SDK** installed and on `PATH` (for install / update / restore operations)
+- **.NET SDK** installed and on `PATH` (for install / update / restore operations, and to run the extension's .NET sidecar)
 
 ---
 
@@ -130,7 +131,7 @@ Search nuget.org (or any configured feed) and install packages into your project
 - **Source dropdown** — filter to a specific feed or search across all
 - **Prerelease toggle** — include pre-release versions in results
 - **Package list** (left pane) — click any row to load full details
-- **Detail panel** (right pane) — description, authors, download count, license, tags, version picker, and per-project install/uninstall buttons
+- **Detail panel** (right pane) — description with total and current-version downloads, authors, license, tags, dependency groups, a **Frameworks** tab listing declared and compatible target frameworks, version picker, and per-project install/uninstall buttons
 - **Project rows** — show the currently installed version per project; install, update to a specific version, or uninstall individually
 - **Spinner** — while an install or update runs, an animated spinner replaces the action button, making it clear which package is being processed
 - **Error recovery** — if the package feed fails to load, a retry button appears inline
@@ -732,6 +733,73 @@ tests/
 └── NugetPackageManager.TestUtilities/   # Shared C# test helpers (TestPaths, TemporaryDirectory)
     └── Fixtures/                        # MSBuild/CPM fixtures evaluated at runtime
 ```
+
+---
+
+## Performance and Memory
+
+The NuGet domain was moved out of the extension host into the .NET sidecar on purpose: the host
+keeps only what the VS Code API requires (activation, webview, commands, spawning, progress,
+cancellation), and everything that parses or resolves runs in C#. This section records what that
+trade measured, rather than asserting that "C# is faster".
+
+Both implementations were benchmarked against each other before the TypeScript code was deleted —
+`CpmResolver` (TypeScript, commit `389efd0`) versus `CpmPropsReader` (C#, commit `db15414`) — on
+identical inputs, with all 13 CPM fixtures producing identical output.
+
+### Reading `Directory.Packages.props`
+
+| Workload | TypeScript in the host | C# in the core | C# end-to-end (through the sidecar) |
+|---|---|---|---|
+| 1,000 packages / 128.5 KiB props file | 24.1 ms | 4.2 ms | **2.3 ms** |
+| Typical 3-package fixture | 0.160 ms | 0.094 ms | 0.25 ms |
+| Transient heap per parse (large file) | 922 KiB | 230 KiB host + 933 KiB core | — |
+| Retained memory per parsed map | ~127 KiB | ~1 KiB | — |
+
+### Sidecar footprint
+
+| State | Resident memory |
+|---|---|
+| Idle after start | 28.3 MiB |
+| After 50 reads of the large file | 51.1 MiB |
+| After a 200-read burst (peak / settled) | 59.8 MiB / ~50.5 MiB |
+| After 50 reads of a 3-package file | 45.6 MiB |
+
+The footprint plateaus rather than growing without bound, and it does **not** scale with the size
+of the props file — the cost is the .NET process plus per-request garbage, not the parsed document.
+
+### What this means in practice
+
+- **Large projects get faster.** Reading a 1,000-package props file is roughly 10× faster
+  end-to-end, and the extension host no longer builds DOM trees or blocks on the parse.
+- **Small projects are at parity.** A 3-package file takes 0.25 ms through the sidecar versus
+  0.16 ms in-process; the round trip is the floor, and no user can perceive the difference.
+- **Total allocation is unchanged.** About 1.1 MiB is allocated per parse in both designs. The port
+  moved the work between processes; it did not remove it.
+- **Memory went up, not down.** The extension gains a second process at ~28 MiB idle and
+  ~45–60 MiB under load, while the host pays ~4× less garbage per parse.
+- **The first call in a session pays the start.** The sidecar announces readiness in ~0.1 s, after
+  which calls are warm. It is stopped when the extension deactivates.
+- **Version resolution** (`ResolveVersions`, 1,000 packages × 2 frameworks) is 1.4× faster in C#
+  (18.7 ms vs 25.9 ms) but allocates substantially more per call (44.4 MiB vs 0.8 MiB); that
+  allocation is tracked as a follow-up.
+
+### Packaging
+
+The sidecar ships as a **framework-dependent .NET 8 build** (~4.4 MB, 21 files) and is launched with
+the `dotnet` already on `PATH`, so one VSIX serves every OS and architecture. `PublishReadyToRun`
+was measured at 2.5× the size with **no** startup gain (67 ms either way), and a trimmed,
+self-contained build does not start at all because the protocol relies on reflection-based
+`System.Text.Json`. Neither is shipped.
+
+### How these numbers were produced
+
+Three interleaved paired rounds of 5 warm-up plus 30 measured iterations, medians reported, on
+Windows 11 arm64 with Node.js 26.12.1 and .NET SDK 11.0.100-rc.3 (the core runs on runtime 8.0.33).
+The large workload is synthetic and deliberately larger than a typical `Directory.Packages.props`;
+the real fixture is reported alongside it for exactly that reason. These are single-machine
+relative measurements — treat the deltas as engineering evidence, not portable absolutes. The full
+report, including the parity comparison and method: [`.ai/completed/memory-cpm-ts-vs-cs.md`](.ai/completed/memory-cpm-ts-vs-cs.md).
 
 ---
 

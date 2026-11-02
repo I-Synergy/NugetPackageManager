@@ -46,4 +46,81 @@ suite('PackageViewModel', () => {
         assert.strictEqual(pkg.Verified, true);
         assert.strictEqual(pkg.Id, 'Contoso.Sdk');
     });
+
+    test('keeps the per-version download counts the feed published', () => {
+        const pkg = new PackageViewModel({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: '',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: 5000,
+            Verified: null,
+            InstalledVersion: '',
+            Version: '2.0.0',
+            Versions: [
+                { Version: '1.0.0', Downloads: 1234 },
+                { Version: '2.0.0', Downloads: null },
+                { Version: '3.0.0' },
+            ],
+            Tags: [],
+        });
+
+        assert.strictEqual(pkg.DownloadsForVersion('1.0.0'), 1234);
+        // Published-but-null and not-published-at-all both read as unknown, never 0.
+        assert.strictEqual(pkg.DownloadsForVersion('2.0.0'), null);
+        assert.strictEqual(pkg.DownloadsForVersion('3.0.0'), null);
+        assert.strictEqual(pkg.DownloadsForVersion('9.9.9'), null);
+        assert.strictEqual(pkg.DownloadsForVersion(''), null);
+        // The version list itself is unchanged for existing callers.
+        assert.deepStrictEqual(pkg.Versions, ['3.0.0', '2.0.0', '1.0.0']);
+    });
+
+    test('UpdatePackage replaces the version download lookup', () => {
+        const pkg = new PackageViewModel({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: '',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: null,
+            Verified: null,
+            InstalledVersion: '',
+            Version: '1.0.0',
+            Versions: [{ Version: '1.0.0', Downloads: 10 }],
+            Tags: [],
+        });
+
+        pkg.UpdatePackage({
+            Id: 'Contoso.Sdk',
+            Name: 'Contoso.Sdk',
+            Authors: [],
+            Description: '',
+            IconUrl: '',
+            LicenseUrl: '',
+            ProjectUrl: '',
+            Registration: '',
+            TotalDownloads: 99,
+            Verified: true,
+            InstalledVersion: '',
+            Version: '1.0.0',
+            Versions: [{ Version: '1.0.0', Downloads: 42 }],
+            Tags: [],
+        });
+
+        assert.strictEqual(pkg.DownloadsForVersion('1.0.0'), 42);
+    });
+
+    test('Empty has no version download counts', () => {
+        const pkg = PackageViewModel.Empty('Contoso.Sdk');
+
+        assert.strictEqual(pkg.VersionDownloads.size, 0);
+        assert.strictEqual(pkg.DownloadsForVersion('1.0.0'), null);
+    });
 });

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- feat: the Details panel reports **Total** and **Current version** downloads instead of a single figure. Per-version counts come from the NuGet search resource; when the feed serving a package publishes no download data (offline or folder feeds), another configured feed that knows the package lends its counts, and selecting a package from the **Updates** tab now uses that row's source, so the Details panel matches the row.
+- feat: the Details panel gains a **Frameworks** tab listing the target frameworks a package supports, grouped by product (`.NET`, `.NET Core`, `.NET Standard`, `.NET Framework`, …) and marking each as declared by the package or computed through compatibility — the same expansion nuget.org shows. The package is only downloaded when the tab is opened, and the result is cached per id and version.
 - feat: versions written as MSBuild properties (for example `<PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />`, or a non-CPM `PackageReference`) are resolved with MSBuild's object model instead of being read as literal text, so the Installed, Updates, Consolidate and Vulnerabilities tabs show the effective version. Updating such a package keeps the `$(...)` reference and rewrites the property definition in the file that declares it — including `Directory.Build.props` and imported `.props`/`.targets` files — and the snapshot/rollback set covers that file. Per-framework updates write a literal into that condition's line so other frameworks are not bumped.
 - fix: a package id that does not exist is now reported as `packageNotFound` instead of `sourceUnreachable` — the core mapped a 404 on the registration index to a feed failure, so the host's "package not found" message never appeared and the user saw an unreachable-source error for a typo.
 - fix: after a single-row update the Updates status line no longer repeats the count ("8 updates available · 8 updates available"); the suffix now says what changed ("Updated Newtonsoft.Json to 13.0.3") and the header keeps the count.
@@ -40,6 +42,7 @@
 - ci: scope SonarCloud automatic analysis to product paths (`.ai/**` skill templates and `docs/**` mockups excluded) and harden the workflows (`npm ci --ignore-scripts`, no `npx`, pinned release action).
 - refactor: release versions are now automatic and follow the AI-repo scheme — each push to `main` derives `YYYY.1MMdd.1HHmm` from the UTC build time, publishes with that version, and tags it without a `v` prefix. The manual release script and `RELEASE_NOTES.md` were removed.
 - docs: add CI, quality-gate, SonarCloud and Marketplace badges to `README.md`, and document the automatic release flow.
+- docs: `README.md` gains a **Performance and Memory** section recording the TypeScript-to-C# measurements — the read path is ~10× faster end-to-end on a 1,000-package `Directory.Packages.props` (2.3 ms vs 24.1 ms) and at parity on small files, per-parse allocation is unchanged (~1.1 MiB, now split between host and sidecar), the sidecar costs ~28 MiB idle and ~45–60 MiB under load, and the framework-dependent .NET build is the only packaging that stays one universal VSIX. Method, parity result and caveats included.
 
 ## 2.2.0 (2026-10-28)
 

@@ -19,6 +19,32 @@ type Package = {
 
 type PackageVersion = {
   Version: string;
+  /**
+   * Download count for this exact version when the feed publishes it (the search
+   * resource does, registration does not). Absent or null means unknown, never zero.
+   */
+  Downloads?: number | null;
+};
+
+type PackageFrameworkItem = {
+  /** Display name of the target framework, e.g. `net8.0` or `.NETStandard2.0`. */
+  Name: string;
+  /**
+   * False when the package itself ships assets for this framework; true when the
+   * framework is only supported through compatibility with another asset.
+   */
+  IsComputed: boolean;
+};
+
+type PackageFrameworkGroup = {
+  /** Product family the frameworks belong to, e.g. `.NET`, `.NET Framework`. */
+  Product: string;
+  Frameworks: Array<PackageFrameworkItem>;
+};
+
+type PackageFrameworks = {
+  /** Empty for a package version with no framework assets. */
+  Groups: Array<PackageFrameworkGroup>;
 };
 
 type PackageDetails = {

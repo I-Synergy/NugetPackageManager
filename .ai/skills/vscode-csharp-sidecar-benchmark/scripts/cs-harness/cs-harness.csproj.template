@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Copy to `cs-harness.csproj`, then replace __PROJECT_REF__ with the absolute path of the product
+    project that owns the parse/resolve entry points. Nothing inside the repo needs to change.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Lets a net8.0 harness run on a newer installed runtime. Record which runtime actually ran. -->
+    <RollForward>LatestMajor</RollForward>
+    <AssemblyName>cs-harness</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="__PROJECT_REF__" />
+  </ItemGroup>
+</Project>

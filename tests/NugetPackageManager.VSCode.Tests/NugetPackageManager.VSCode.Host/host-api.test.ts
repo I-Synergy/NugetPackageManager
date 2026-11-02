@@ -478,6 +478,252 @@ suite('HostAPI Tests', () => {
     });
 
     // ----------------------------------------------------------------
+    // getPackage — cross-source popularity fallback
+    // ----------------------------------------------------------------
+    suite('getPackage across sources', () => {
+        const OFFLINE_URL = 'https://offline.example/v3/index.json';
+        const NUGET_URL = 'https://api.nuget.org/v3/index.json';
+
+        /**
+         * The copy served by the offline feed in the report: the package, but no
+         * SearchQueryService, so no popularity data and only the one version it has.
+         */
+        function offlinePackage(): Package {
+            return {
+                Id: 'Coverlet.Collector',
+                Name: 'Coverlet.Collector',
+                Authors: ['Coverlet'],
+                Description: 'Served by the offline feed',
+                IconUrl: '',
+                LicenseUrl: '',
+                ProjectUrl: '',
+                Registration: '',
+                TotalDownloads: null,
+                Verified: null,
+                InstalledVersion: '6.0.0',
+                Version: '6.0.0',
+                Versions: [{ Version: '6.0.0', Downloads: null }, { Version: '6.0.1' }],
+                Tags: [],
+            };
+        }
+
+        /** The nuget.org copy: popularity data, and a version the offline feed lacks. */
+        function nugetPackage(): Package {
+            return {
+                Id: 'Coverlet.Collector',
+                Name: 'Coverlet.Collector',
+                Authors: ['Coverlet'],
+                Description: 'Served by nuget.org',
+                IconUrl: '',
+                LicenseUrl: '',
+                ProjectUrl: '',
+                Registration: '',
+                TotalDownloads: 1122400000,
+                Verified: true,
+                InstalledVersion: '',
+                Version: '7.0.0',
+                Versions: [
+                    { Version: '6.0.0', Downloads: 100 },
+                    { Version: '6.0.1', Downloads: 200 },
+                    { Version: '7.0.0', Downloads: 300 },
+                ],
+                Tags: [],
+            };
+        }
+
+        function stubSources(
+            packages: Record<string, () => Package | undefined>
+        ): { offline: sinon.SinonStub; nuget: sinon.SinonStub } {
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
+                { Name: 'Microsoft Visual Studio Offline Packages', Url: OFFLINE_URL },
+                { Name: 'nuget.org', Url: NUGET_URL },
+            ]);
+
+            const makeGetPackage = (url: string): sinon.SinonStub =>
+                sandbox.stub().callsFake(async () => {
+                    const data = packages[url]?.();
+                    return data
+                        ? { data, isError: false, errorMessage: undefined }
+                        : { data: undefined, isError: true, errorMessage: "Package couldn't be found" };
+                });
+            const offline = makeGetPackage(OFFLINE_URL);
+            const nuget = makeGetPackage(NUGET_URL);
+
+            // The configured order decides which feed answers first.
+            const factory = sandbox.stub(nugetApiFactory, 'GetSourceApiAsync');
+            factory.onCall(0).resolves(
+                { GetPackageAsync: offline } as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+            factory.onCall(1).resolves(
+                { GetPackageAsync: nuget } as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+
+            return { offline, nuget };
+        }
+
+        test('merges popularity from a later feed but keeps the serving source and versions', async () => {
+            stubSources({ [OFFLINE_URL]: offlinePackage, [NUGET_URL]: nugetPackage });
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Coverlet.Collector',
+                Prerelease: false,
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.SourceUrl, OFFLINE_URL, 'the source badge stays the serving feed');
+
+            const pkg = result.value.Package;
+            assert.strictEqual(pkg.Description, 'Served by the offline feed');
+            assert.deepStrictEqual(pkg.Versions.map((version) => version.Version), ['6.0.0', '6.0.1']);
+            assert.strictEqual(pkg.TotalDownloads, 1122400000);
+            assert.strictEqual(pkg.Verified, true);
+            assert.strictEqual(pkg.Versions[0]!.Downloads, 100);
+            assert.strictEqual(pkg.Versions[1]!.Downloads, 200);
+        });
+
+        test('stops at the first feed that publishes popularity data', async () => {
+            const { nuget } = stubSources({ [OFFLINE_URL]: nugetPackage, [NUGET_URL]: offlinePackage });
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Coverlet.Collector',
+                Prerelease: false,
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.SourceUrl, OFFLINE_URL);
+            assert.strictEqual(result.value.Package.TotalDownloads, 1122400000);
+            assert.strictEqual(nuget.called, false, 'no second feed is contacted once popularity is known');
+        });
+
+        test('keeps the package with null popularity when no feed has any', async () => {
+            stubSources({ [OFFLINE_URL]: offlinePackage, [NUGET_URL]: offlinePackage });
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Coverlet.Collector',
+                Prerelease: false,
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.TotalDownloads, null);
+            assert.strictEqual(result.value.Package.Verified, null);
+        });
+
+        test('fails when no configured feed knows the package', async () => {
+            stubSources({});
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Coverlet.Collector',
+                Prerelease: false,
+            });
+
+            assert.ok(!result.ok);
+            assert.match(result.error, /any source/);
+        });
+
+        test('fills popularity for a duplicate search hit instead of dropping it', async () => {
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
+                { Name: 'Microsoft Visual Studio Offline Packages', Url: OFFLINE_URL },
+                { Name: 'nuget.org', Url: NUGET_URL },
+            ]);
+
+            const factory = sandbox.stub(nugetApiFactory, 'GetSourceApiAsync');
+            factory.onCall(0).resolves(
+                { GetPackagesAsync: async () => ({ data: [offlinePackage()] }) } as unknown as Awaited<
+                    ReturnType<typeof nugetApiFactory.GetSourceApiAsync>
+                >
+            );
+            factory.onCall(1).resolves(
+                { GetPackagesAsync: async () => ({ data: [nugetPackage()] }) } as unknown as Awaited<
+                    ReturnType<typeof nugetApiFactory.GetSourceApiAsync>
+                >
+            );
+
+            const result = await createHostAPI().getPackagesAsync({
+                Url: '',
+                Filter: 'coverlet',
+                Prerelease: false,
+                Skip: 0,
+                Take: 20,
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Packages.length, 1);
+
+            const row = result.value.Packages[0]!;
+            assert.strictEqual(row.Description, 'Served by the offline feed');
+            assert.deepStrictEqual(row.Versions.map((version) => version.Version), ['6.0.0', '6.0.1']);
+            assert.strictEqual(row.TotalDownloads, 1122400000);
+            assert.strictEqual(row.Versions[0]!.Downloads, 100);
+        });
+    });
+
+    // ----------------------------------------------------------------
+    // getPackageFrameworks
+    // ----------------------------------------------------------------
+    suite('getPackageFrameworks', () => {
+        test('passes the id, version and source through and returns the groups', async () => {
+            const groups: PackageFrameworkGroup[] = [{
+                Product: '.NET',
+                Frameworks: [
+                    { Name: 'net8.0', IsComputed: false },
+                    { Name: 'net9.0', IsComputed: true },
+                ],
+            }];
+            const getFrameworks = sandbox.stub().resolves({ data: { Groups: groups } });
+            const factory = sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                { GetPackageFrameworksAsync: getFrameworks } as unknown as Awaited<
+                    ReturnType<typeof nugetApiFactory.GetSourceApiAsync>
+                >
+            );
+
+            const result = await createHostAPI().getPackageFrameworksAsync({
+                Url: 'https://api.nuget.org/v3/index.json',
+                Id: 'Serilog',
+                Version: '4.0.0',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.deepStrictEqual(result.value.Groups, groups);
+            assert.ok(factory.calledOnceWith('https://api.nuget.org/v3/index.json'));
+            assert.ok(getFrameworks.calledOnceWith('Serilog', '4.0.0'));
+        });
+
+        test('requires a source url', async () => {
+            const result = await createHostAPI().getPackageFrameworksAsync({
+                Url: '',
+                Id: 'Serilog',
+                Version: '4.0.0',
+            });
+
+            assert.ok(!result.ok);
+            assert.match(result.error, /SourceUrl/);
+        });
+
+        test('reports a source failure instead of an empty list', async () => {
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                {
+                    GetPackageFrameworksAsync: sandbox.stub().rejects(new Error('package not found')),
+                } as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+
+            const result = await createHostAPI().getPackageFrameworksAsync({
+                Url: 'file:///ws/local-feed',
+                Id: 'Local.Test',
+                Version: '1.0.0',
+            });
+
+            assert.ok(!result.ok);
+            assert.match(result.error, /package not found/);
+        });
+    });
+
+    // ----------------------------------------------------------------
     // getOutdatedPackages
     // ----------------------------------------------------------------
     suite('getOutdatedPackages', () => {

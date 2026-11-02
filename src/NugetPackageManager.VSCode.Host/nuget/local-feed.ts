@@ -128,7 +128,8 @@ export default class LocalNuGetFeed {
         Verified: null,
         InstalledVersion: "",
         Version: latest.metadata.Version,
-        Versions: allowed.map((entry) => ({ Version: entry.metadata.Version })),
+        // A folder feed publishes no download data, so the honest value is null.
+        Versions: allowed.map((entry) => ({ Version: entry.metadata.Version, Downloads: null })),
         Tags: first.Tags,
       });
     }

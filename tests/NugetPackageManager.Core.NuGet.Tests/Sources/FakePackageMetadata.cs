@@ -11,6 +11,8 @@ namespace NugetPackageManager.Core.NuGet.Tests.Sources;
 /// <summary>One <see cref="IPackageSearchMetadata"/> with only the fields the mapper reads set.</summary>
 internal sealed class FakePackageMetadata : IPackageSearchMetadata
 {
+    private IReadOnlyList<VersionInfo>? versions;
+
     public required PackageIdentity Identity { get; init; }
 
     public string Authors { get; init; } = string.Empty;
@@ -32,7 +34,17 @@ internal sealed class FakePackageMetadata : IPackageSearchMetadata
     public IEnumerable<PackageDependencyGroup> DependencySets { get; init; } = [];
 
     public Task<IEnumerable<VersionInfo>> GetVersionsAsync() =>
-        Task.FromResult<IEnumerable<VersionInfo>>([new VersionInfo(Identity.Version)]);
+        Task.FromResult<IEnumerable<VersionInfo>>(Versions);
+
+    /// <summary>
+    /// The version list the resource reports. Defaults to this single version, carrying the
+    /// package's download count the way the real search resource does.
+    /// </summary>
+    public IReadOnlyList<VersionInfo> Versions
+    {
+        get => versions ?? [new VersionInfo(Identity.Version, DownloadCount)];
+        init => versions = value;
+    }
 
     public string? Title => Identity.Id;
 

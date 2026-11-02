@@ -576,6 +576,12 @@ export class PackagesView extends LitElement {
 
     const existing = this.projectsPackages.find((p) => p.Id === packageId);
     if (existing) {
+      // A child row (Updates) reports the feed it read. The installed copy may have been
+      // enriched by whichever configured feed answered first — often one without
+      // popularity data — so refresh from the row's own source before showing it.
+      if (sourceUrl && (existing.SourceUrl !== sourceUrl || existing.TotalDownloads == null)) {
+        await this.RefreshInstalledPackageFromSourceAsync(existing, sourceUrl);
+      }
       await this.SelectPackageAsync(existing);
       return;
     }
@@ -589,6 +595,34 @@ export class PackagesView extends LitElement {
     const pkg = PackageViewModel.Empty(packageId);
     if (sourceUrl) pkg.SourceUrl = sourceUrl;
     await this.SelectPackageAsync(pkg);
+  }
+
+  /**
+   * Re-read metadata for an installed package from the source a child row came from.
+   * `InstalledVersion` is what the projects panel keys off, so it survives the refresh.
+   * A failed fetch leaves the package exactly as it was: showing stale metadata is better
+   * than an empty Details panel for a package the project definitely uses.
+   */
+  private async RefreshInstalledPackageFromSourceAsync(
+    installed: PackageViewModel,
+    sourceUrl: string
+  ): Promise<void> {
+    const request: Parameters<typeof hostApi.getPackageAsync>[0] = {
+      Id: installed.Id,
+      Url: sourceUrl,
+      Prerelease: this.filters.Prerelease,
+    };
+    const source = configuration.Configuration?.Sources.find((s) => s.Url === sourceUrl);
+    if (source?.Name !== undefined) request.SourceName = source.Name;
+    if (source?.PasswordScriptPath !== undefined) request.PasswordScriptPath = source.PasswordScriptPath;
+
+    const result = await hostApi.getPackageAsync(request);
+    if (!result.ok || !result.value.Package) return;
+
+    const installedVersion = installed.InstalledVersion;
+    installed.UpdatePackage(result.value.Package, result.value.SourceUrl || sourceUrl);
+    installed.InstalledVersion = installedVersion;
+    installed.Status = "Detailed";
   }
 
   async setSearchQueryAsync(query: string): Promise<void> {

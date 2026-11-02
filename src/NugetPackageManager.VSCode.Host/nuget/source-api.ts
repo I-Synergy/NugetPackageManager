@@ -24,6 +24,10 @@ export type GetPackageDetailsResponse = {
   data: PackageDetails;
 };
 
+export type GetPackageFrameworksResponse = {
+  data: PackageFrameworks;
+};
+
 export interface INuGetSourceApi {
   GetPackagesAsync(
     filter: string,
@@ -44,6 +48,16 @@ export interface INuGetSourceApi {
     version: string,
     signal?: AbortSignal
   ): Promise<GetPackageDetailsResponse>;
+
+  /**
+   * Frameworks one package version supports, grouped by product. Read from the
+   * package's own assets, so it needs the `.nupkg` rather than only its metadata.
+   */
+  GetPackageFrameworksAsync(
+    packageId: string,
+    version: string,
+    signal?: AbortSignal
+  ): Promise<GetPackageFrameworksResponse>;
 
   GetVulnerabilitiesAsync(signal?: AbortSignal): Promise<Map<string, VulnerabilityEntry[]>>;
 

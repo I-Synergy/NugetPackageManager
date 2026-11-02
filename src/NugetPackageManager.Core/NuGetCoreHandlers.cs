@@ -33,6 +33,7 @@ public sealed class NuGetCoreHandlers
             ["getPackages"] = HandleGetPackagesAsync,
             ["getPackage"] = HandleGetPackageAsync,
             ["getPackageDetails"] = HandleGetPackageDetailsAsync,
+            ["getPackageFrameworks"] = HandleGetPackageFrameworksAsync,
             ["clearPackageCache"] = HandleClearPackageCacheAsync,
             ["clearVulnerabilityCache"] = HandleClearVulnerabilityCacheAsync,
         };
@@ -86,6 +87,28 @@ public sealed class NuGetCoreHandlers
         return await GuardAsync(() => sources
             .GetSource(source)
             .GetPackageDetailsAsync(id, version, cancellationToken)).ConfigureAwait(false);
+    }
+
+    private async Task<object?> HandleGetPackageFrameworksAsync(
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var source = ReadSource(parameters);
+        var id = ReadString(parameters, "id");
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+        }
+
+        var version = ReadString(parameters, "version");
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            throw new RpcException(Constants.InvalidParams, "'version' is required.");
+        }
+
+        return await GuardAsync(() => sources
+            .GetSource(source)
+            .GetPackageFrameworksAsync(id, version, cancellationToken)).ConfigureAwait(false);
     }
 
     private Task<object?> HandleClearPackageCacheAsync(JsonElement parameters, CancellationToken cancellationToken)

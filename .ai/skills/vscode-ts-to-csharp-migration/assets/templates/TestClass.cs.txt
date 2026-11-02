@@ -1,0 +1,43 @@
+// File: tests/MyExtension.Core.Domain.Tests/<Area>/<Type>Tests.cs
+// Traces: none — legacy mode, this slice declares no acceptance criteria.
+//
+// One or two lines: what this suite pins, and where the TypeScript twin used to live.
+
+using MyExtension.Core.Domain;
+
+namespace MyExtension.Core.Domain.Tests;
+
+[TestClass]
+public sealed class MyTypeTests
+{
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Method_Scenario_ExpectedResult()
+    {
+        // Arrange
+        var subject = new MyType();
+
+        // Act
+        var result = subject.DoWork();
+
+        // Assert
+        Assert.AreEqual(expected, result);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task Method_AsyncScenario_ExpectedResult()
+    {
+        // Arrange
+        var subject = new MyType();
+
+        // Act
+        var result = await subject.DoWorkAsync(CancellationToken.None);
+
+        // Assert
+        Assert.IsTrue(result);
+    }
+
+    // Fixtures come from the shared utilities, never from the current directory:
+    // var props = await File.ReadAllTextAsync(TestPaths.Fixture("cpm/single-group.props"));
+}

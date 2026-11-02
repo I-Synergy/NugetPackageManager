@@ -29,7 +29,7 @@ internal static class PackageMetadataMapper
 
     public static Package ToPackage(
         IPackageSearchMetadata metadata,
-        IReadOnlyList<NuGetVersion> versions,
+        IReadOnlyList<PackageVersionRef> versions,
         long? totalDownloads,
         bool? verified)
     {
@@ -51,7 +51,7 @@ internal static class PackageMetadataMapper
             Verified = verified,
             InstalledVersion = string.Empty,
             Version = metadata.Identity.Version.ToNormalizedString(),
-            Versions = [.. versions.Select(version => new PackageVersionRef(version.ToNormalizedString()))],
+            Versions = versions,
             Tags = SplitTags(metadata.Tags),
         };
     }

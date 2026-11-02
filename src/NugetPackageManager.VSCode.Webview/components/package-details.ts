@@ -1,13 +1,13 @@
 import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { Task, TaskStatus } from "@lit/task";
-import type { GetPackageDetailsRequest } from "@/common/rpc/types";
+import type { GetPackageDetailsRequest, GetPackageFrameworksRequest } from "@/common/rpc/types";
 import { PackageViewModel } from "../types";
 import codicon from "@/web/styles/codicon.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "../registrations";
 
-type DetailTab = "description" | "dependencies" | "versions";
+type DetailTab = "description" | "dependencies" | "frameworks" | "versions";
 
 @customElement("package-details")
 export class PackageDetailsComponent extends LitElement {
@@ -181,6 +181,50 @@ export class PackageDetailsComponent extends LitElement {
         background: var(--vscode-charts-green, #10b981);
         color: var(--vscode-editor-background);
       }
+
+      .frameworks {
+        font-size: 12px;
+        max-height: 300px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 4px;
+      }
+
+      .framework-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .framework-product {
+        font-weight: 600;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .framework-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      .tfm-badge {
+        font-size: 10px;
+        font-family: var(--vscode-editor-font-family);
+        padding: 1px 6px;
+        border-radius: 3px;
+        border: 1px solid var(--vscode-badge-background);
+        background: var(--vscode-badge-background);
+        color: var(--vscode-badge-foreground);
+      }
+
+      /* Computed frameworks are only compatible, not declared by the package. */
+      .tfm-badge.is-computed {
+        opacity: 0.55;
+        background: transparent;
+        color: var(--vscode-foreground);
+      }
     `,
   ];
 
@@ -191,6 +235,8 @@ export class PackageDetailsComponent extends LitElement {
 
   @state() packageDetailsLoading: boolean = false;
   @state() packageDetails: PackageDetails | undefined;
+  @state() frameworksLoading: boolean = false;
+  @state() frameworks: { key: string; data: PackageFrameworks } | undefined;
   @state() activeTab: DetailTab = "description";
 
   private readonly _detailsTask = new Task(this, {
@@ -218,10 +264,61 @@ export class PackageDetailsComponent extends LitElement {
     args: () => [this.package?.Name, this.selectedVersion, this.source, this.passwordScriptPath] as const,
   });
 
+  /**
+   * Supported frameworks need the package's assets, which means downloading it. That is
+   * expensive, so the request only fires once the tab is actually open (`tab` is part of
+   * the keys below) and only for the precise id/version/source currently on screen.
+   */
+  private readonly _frameworksTask = new Task(this, {
+    task: async ([packageId, version, source, passwordScriptPath, tab], { signal }) => {
+      if (tab !== "frameworks") return;
+      if (!packageId || !version || !source) return;
+      this.frameworksLoading = true;
+
+      try {
+        const request: GetPackageFrameworksRequest = {
+          Id: packageId,
+          Version: version,
+          Url: source,
+          ...(passwordScriptPath !== undefined && { PasswordScriptPath: passwordScriptPath }),
+        };
+
+        const result = await hostApi.getPackageFrameworksAsync(request, signal);
+        if (signal.aborted) return;
+
+        if (result.ok) {
+          this.frameworks = { key: this.frameworksKey(packageId, version, source), data: result.value };
+        } else {
+          // Surface the failure through the Task so the tab can offer a retry.
+          throw new Error(result.error);
+        }
+      } finally {
+        this.frameworksLoading = false;
+      }
+    },
+    args: () =>
+      [
+        this.package?.Name,
+        this.selectedVersion,
+        this.source,
+        this.passwordScriptPath,
+        this.activeTab,
+      ] as const,
+  });
+
+  private frameworksKey(packageId: string, version: string, source: string): string {
+    return `${packageId}\u0000${version}\u0000${source}`;
+  }
+
+  private currentFrameworksKey(): string {
+    return this.frameworksKey(this.package?.Name ?? "", this.selectedVersion, this.source);
+  }
+
   private formatDownloads(count: number | null): string {
     // The feed only publishes download counts on its search resource; registration-only
     // metadata leaves this unknown, and an em dash is honest where 0 would be a lie.
     if (count === null) return "—";
+    if (count >= 1_000_000_000) return `${(count / 1_000_000_000).toFixed(1)}B`;
     if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
     if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
     return count.toString();
@@ -247,8 +344,11 @@ export class PackageDetailsComponent extends LitElement {
             `
           : nothing}
 
-        <span class="label">Downloads</span>
+        <span class="label">Total</span>
         <span class="value">${this.formatDownloads(this.package.TotalDownloads)}</span>
+
+        <span class="label">Current version</span>
+        <span class="value">${this.formatDownloads(this.package.DownloadsForVersion(this.selectedVersion))}</span>
 
         ${this.package.LicenseUrl
           ? html`
@@ -323,6 +423,59 @@ export class PackageDetailsComponent extends LitElement {
     `;
   }
 
+  private renderFrameworksTab(): unknown {
+    if (this.frameworksLoading || this._frameworksTask.status === TaskStatus.PENDING) {
+      return html`<span class="spinner large loader"></span>`;
+    }
+
+    if (this._frameworksTask.status === TaskStatus.ERROR) {
+      return html`
+        <div class="error" role="alert">
+          <span class="codicon codicon-error"></span>
+          Failed to load supported frameworks — reopen the tab to retry
+        </div>
+      `;
+    }
+
+    const frameworks = this.frameworks;
+    const groups: PackageFrameworkGroup[] = frameworks?.key === this.currentFrameworksKey()
+      ? frameworks.data.Groups
+      : [];
+
+    if (groups.length === 0) {
+      return html`
+        <div class="no-dependencies">
+          <span class="codicon codicon-info"></span>
+          <span>No supported frameworks</span>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="frameworks" role="list" aria-label="Supported frameworks">
+        ${groups.map(
+          (group) => html`
+            <div class="framework-group" role="listitem" aria-label=${group.Product}>
+              <div class="framework-product">${group.Product}</div>
+              <div class="framework-chips">
+                ${group.Frameworks.map(
+                  (framework) => html`
+                    <span
+                      class="tfm-badge ${framework.IsComputed ? "is-computed" : ""}"
+                      title=${framework.IsComputed
+                        ? `${framework.Name} is supported through compatibility`
+                        : `${framework.Name} is declared by the package`}
+                    >${framework.Name}</span>
+                  `
+                )}
+              </div>
+            </div>
+          `
+        )}
+      </div>
+    `;
+  }
+
   private renderVersionsTab(): unknown {
     const versions = this.package?.Versions ?? [];
     const installedVersion = this.package?.InstalledVersion;
@@ -354,6 +507,8 @@ export class PackageDetailsComponent extends LitElement {
         return this.renderDescriptionTab();
       case "dependencies":
         return this.renderDependenciesTab();
+      case "frameworks":
+        return this.renderFrameworksTab();
       case "versions":
         return this.renderVersionsTab();
     }
@@ -377,6 +532,14 @@ export class PackageDetailsComponent extends LitElement {
           @click=${() => (this.activeTab = "dependencies")}
         >
           Dependencies
+        </button>
+        <button
+          class="detail-tab ${this.activeTab === "frameworks" ? "active" : ""}"
+          role="tab"
+          aria-selected=${this.activeTab === "frameworks"}
+          @click=${() => (this.activeTab = "frameworks")}
+        >
+          Frameworks
         </button>
         <button
           class="detail-tab ${this.activeTab === "versions" ? "active" : ""}"

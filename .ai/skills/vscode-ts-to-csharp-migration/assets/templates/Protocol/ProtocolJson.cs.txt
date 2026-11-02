@@ -1,0 +1,18 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace MyExtension.Core.Protocol;
+
+/// <summary>Serialization settings shared by every line on the wire.</summary>
+/// <remarks>
+/// <see cref="JsonSerializerDefaults.Web"/> gives camelCase names and case-insensitive reads —
+/// the same shape the TypeScript client sends and expects. Null members are omitted so the
+/// success and failure arms of <see cref="RpcResponse"/> do not carry each other's empty fields.
+/// </remarks>
+public static class ProtocolJson
+{
+    public static JsonSerializerOptions Options { get; } = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+}

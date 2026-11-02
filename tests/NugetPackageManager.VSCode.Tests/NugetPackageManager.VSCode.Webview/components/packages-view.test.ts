@@ -308,6 +308,109 @@ suite('PackagesView Component', () => {
         });
     });
 
+    suite('Child package selection', () => {
+        type ChildSelection = {
+            onChildPackageSelectedAsync(e: CustomEvent<{ packageId: string; sourceUrl?: string }>): Promise<void>;
+        };
+
+        const selectFromChildAsync = async (packageId: string, sourceUrl?: string): Promise<void> => {
+            const detail: { packageId: string; sourceUrl?: string } = { packageId };
+            if (sourceUrl !== undefined) detail.sourceUrl = sourceUrl;
+            await (packagesView as unknown as ChildSelection).onChildPackageSelectedAsync(
+                new CustomEvent('package-selected', { detail })
+            );
+        };
+
+        test('refetches the installed package from the row source and keeps it selected', async () => {
+            const installed = PackageViewModel.Empty('Contoso.Sdk');
+            installed.InstalledVersion = '6.0.0';
+            installed.SourceUrl = 'https://offline.feed/v3/index.json';
+            packagesView.projectsPackages = [installed];
+
+            (mockHostApi.getPackageAsync as sinon.SinonStub).resolves(
+                ok({
+                    Package: createMockPackage({
+                        Id: 'Contoso.Sdk',
+                        Name: 'Contoso.Sdk',
+                        TotalDownloads: 1122400000,
+                        Versions: [
+                            { Version: '9.0.1', Downloads: 500 },
+                            { Version: '6.0.0', Downloads: 10 },
+                        ],
+                    }),
+                    SourceUrl: 'https://private.nuget.org',
+                })
+            );
+
+            await selectFromChildAsync('Contoso.Sdk', 'https://private.nuget.org');
+
+            const stub = mockHostApi.getPackageAsync as sinon.SinonStub;
+            assert.ok(stub.calledOnce, 'the refetch replaces the first-feed metadata in one call');
+            const request = stub.firstCall.args[0];
+            assert.strictEqual(request.Id, 'Contoso.Sdk');
+            assert.strictEqual(request.Url, 'https://private.nuget.org');
+            assert.strictEqual(request.Prerelease, true);
+            // Credentials follow the row's source, not the Browse filter's source.
+            assert.strictEqual(request.SourceName, 'Private');
+            assert.strictEqual(request.PasswordScriptPath, '/script.ps1');
+
+            assert.strictEqual(installed.TotalDownloads, 1122400000);
+            assert.strictEqual(installed.DownloadsForVersion('6.0.0'), 10);
+            assert.strictEqual(installed.InstalledVersion, '6.0.0');
+            assert.strictEqual(installed.SourceUrl, 'https://private.nuget.org');
+            assert.strictEqual(installed.Status, 'Detailed');
+            assert.strictEqual(packagesView.selectedPackage, installed);
+            assert.strictEqual(installed.Selected, true);
+        });
+
+        test('does not refetch when the installed copy already came from the row source', async () => {
+            const installed = new PackageViewModel(createMockPackage({
+                Id: 'Contoso.Sdk',
+                Name: 'Contoso.Sdk',
+            }));
+            installed.InstalledVersion = '6.0.0';
+            installed.SourceUrl = 'https://api.nuget.org/v3/index.json';
+            installed.Status = 'Detailed';
+            packagesView.projectsPackages = [installed];
+
+            await selectFromChildAsync('Contoso.Sdk', 'https://api.nuget.org/v3/index.json');
+
+            assert.ok((mockHostApi.getPackageAsync as sinon.SinonStub).notCalled);
+            assert.strictEqual(packagesView.selectedPackage, installed);
+        });
+
+        test('a failed refetch keeps the existing package and still selects it', async () => {
+            const installed = PackageViewModel.Empty('Contoso.Sdk', 'Detailed');
+            installed.InstalledVersion = '6.0.0';
+            installed.SourceUrl = 'https://offline.feed/v3/index.json';
+            packagesView.projectsPackages = [installed];
+
+            (mockHostApi.getPackageAsync as sinon.SinonStub).resolves(fail('feed is down'));
+
+            await selectFromChildAsync('Contoso.Sdk', 'https://api.nuget.org/v3/index.json');
+
+            assert.ok((mockHostApi.getPackageAsync as sinon.SinonStub).calledOnce);
+            assert.strictEqual(installed.SourceUrl, 'https://offline.feed/v3/index.json');
+            assert.strictEqual(installed.InstalledVersion, '6.0.0');
+            assert.strictEqual(installed.TotalDownloads, null);
+            assert.strictEqual(packagesView.selectedPackage, installed);
+            assert.strictEqual(installed.Selected, true);
+        });
+
+        test('still selects packages that are not installed', async () => {
+            const browsePkg = new PackageViewModel(createMockPackage({
+                Id: 'Contoso.Sdk',
+                Name: 'Contoso.Sdk',
+            }));
+            packagesView.packages = [browsePkg];
+
+            await selectFromChildAsync('Contoso.Sdk', 'https://private.nuget.org');
+
+            assert.ok((mockHostApi.getPackageAsync as sinon.SinonStub).notCalled);
+            assert.strictEqual(packagesView.selectedPackage, browsePkg);
+        });
+    });
+
     suite('UpdatePackagesFilters', () => {
         test('should update filters', async () => {
             (mockHostApi.getPackagesAsync as sinon.SinonStub).resolves(ok({ Packages: [] }));

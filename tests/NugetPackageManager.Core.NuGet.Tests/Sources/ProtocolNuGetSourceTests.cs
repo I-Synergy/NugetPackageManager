@@ -1,6 +1,7 @@
 // File: tests/NugetPackageManager.Core.NuGet.Tests/Sources/ProtocolNuGetSourceTests.cs
 // Traces: issue #45 — Downloads/Verified come from the search resource, not registration.
 
+using System.IO.Compression;
 using NuGet.Common;
 using NuGet.Frameworks;
 using NuGet.Packaging;
@@ -65,7 +66,8 @@ public class ProtocolNuGetSourceTests
         using var source = new ProtocolNuGetSource(
             SourceUrl,
             _ => Task.FromResult<PackageSearchResource?>(new FakeSearchResource([])),
-            _ => Task.FromResult<PackageMetadataResource?>(null));
+            _ => Task.FromResult<PackageMetadataResource?>(null),
+            _ => Task.FromResult<DownloadResource?>(null));
 
         var error = await Assert.ThrowsExactlyAsync<NuGetSourceException>(
             () => source.GetPackageAsync("Newtonsoft.Json", prerelease: false, CancellationToken.None));
@@ -140,13 +142,155 @@ public class ProtocolNuGetSourceTests
         Assert.AreEqual("packageNotFound", error.Code);
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task SearchAsync_MapsTheDownloadCountOfEveryVersion()
+    {
+        var hit = Metadata("13.0.3", downloads: 300, versions:
+        [
+            new VersionInfo(NuGetVersion.Parse("12.0.1"), 111),
+            new VersionInfo(NuGetVersion.Parse("13.0.3"), 222),
+        ]);
+        using var source = CreateSource(searchHits: [hit]);
+
+        var packages = await source.SearchAsync("json", prerelease: false, 0, 20, CancellationToken.None);
+
+        var versions = packages[0].Versions;
+        Assert.AreEqual("12.0.1", versions[0].Version);
+        Assert.AreEqual(111L, versions[0].Downloads);
+        Assert.AreEqual("13.0.3", versions[1].Version);
+        Assert.AreEqual(222L, versions[1].Downloads);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageAsync_MergesVersionDownloadsFromTheSearchLookup()
+    {
+        // Registration supplies the version list; only the search hit knows the counts.
+        var popularity = Metadata("13.0.3", downloads: 500, versions:
+        [
+            new VersionInfo(NuGetVersion.Parse("12.0.1"), 5),
+            new VersionInfo(NuGetVersion.Parse("13.0.3"), 7),
+            new VersionInfo(NuGetVersion.Parse("14.0.0"), 9),
+        ]);
+        using var source = CreateSource(
+            registered: [Metadata("12.0.1"), Metadata("13.0.3")],
+            searchHits: [popularity]);
+
+        var package = await source.GetPackageAsync("Contoso.Sdk", prerelease: false, CancellationToken.None);
+
+        Assert.AreEqual(500L, package.TotalDownloads);
+        long?[] expected = [5, 7];
+        CollectionAssert.AreEqual(
+            expected,
+            package.Versions.Select(version => version.Downloads).ToArray());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageAsync_WithoutSearchSupport_LeavesVersionDownloadsUnknown()
+    {
+        using var source = CreateSource(registered: [Metadata("12.0.1"), Metadata("13.0.3")], searchThrows: true);
+
+        var package = await source.GetPackageAsync("Contoso.Sdk", prerelease: false, CancellationToken.None);
+
+        Assert.AreEqual(2, package.Versions.Count);
+        Assert.IsTrue(package.Versions.All(version => version.Downloads is null));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageFrameworksAsync_ExpandsTheDeclaredFramework()
+    {
+        using var source = CreateSource(downloadResource: Download(PackageDownload("lib/netstandard2.0/Contoso.Sdk.dll")));
+
+        var frameworks = await source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None);
+
+        var netStandard = frameworks.Groups.Single(group => group.Product == ".NET Standard");
+        var declared = netStandard.Frameworks.Single(item => item.Name == "netstandard2.0");
+        Assert.IsFalse(declared.IsComputed, "an asset the package ships is declared");
+
+        var net = frameworks.Groups.Single(group => group.Product == ".NET");
+        Assert.IsTrue(net.Frameworks.Any(item => item.Name == "net8.0" && item.IsComputed));
+        Assert.IsTrue(net.Frameworks.Any(item => item.Name == "net5.0" && item.IsComputed));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageFrameworksAsync_CachesPerVersion()
+    {
+        var download = PackageDownload("lib/netstandard2.0/Contoso.Sdk.dll");
+        using var source = CreateSource(downloadResource: Download(download));
+
+        await source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None);
+        await source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None);
+        Assert.AreEqual(1, download.Calls, "the second request should come from the cache");
+
+        source.ClearPackageCache("Contoso.Sdk");
+        await source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None);
+        Assert.AreEqual(2, download.Calls);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageFrameworksAsync_UnavailablePackage_ReportsPackageNotFound()
+    {
+        using var source = CreateSource(downloadResource: Download(new FakeDownloadResource(
+            _ => new DownloadResourceResult(DownloadResourceResultStatus.NotFound))));
+
+        var error = await Assert.ThrowsExactlyAsync<NuGetSourceException>(
+            () => source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None));
+
+        Assert.AreEqual("packageNotFound", error.Code);
+    }
+
     private static readonly string[] stableOnly = ["12.0.1"];
+
+    private const string Manifest = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <package>
+          <metadata>
+            <id>Contoso.Sdk</id>
+            <version>1.0.0</version>
+            <authors>Contoso</authors>
+            <description>A test package</description>
+          </metadata>
+        </package>
+        """;
+
+    private static Func<CancellationToken, Task<DownloadResource?>> Download(DownloadResource resource) =>
+        _ => Task.FromResult<DownloadResource?>(resource);
+
+    private static FakeDownloadResource PackageDownload(params string[] entries)
+    {
+        var bytes = PackageBytes(["Contoso.Sdk.nuspec", .. entries]);
+        return new FakeDownloadResource(_ => new DownloadResourceResult(
+            new PackageArchiveReader(new MemoryStream(bytes)),
+            SourceUrl));
+    }
+
+    private static byte[] PackageBytes(IEnumerable<string> entries)
+    {
+        using var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var entry in entries)
+            {
+                var zipEntry = archive.CreateEntry(entry);
+                using var writer = new StreamWriter(zipEntry.Open());
+                writer.Write(entry.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase) ? Manifest : entry);
+            }
+        }
+
+        return stream.ToArray();
+    }
 
     private static ProtocolNuGetSource CreateSource(
         IEnumerable<IPackageSearchMetadata>? registered = null,
         IEnumerable<IPackageSearchMetadata>? searchHits = null,
         bool searchThrows = false,
-        FakeMetadataResource? metadataResource = null)
+        FakeMetadataResource? metadataResource = null,
+        Func<CancellationToken, Task<DownloadResource?>>? downloadResource = null)
     {
         var entries = (registered ?? []).ToList();
         var metadata = metadataResource ?? new FakeMetadataResource(_ => entries);
@@ -156,14 +300,16 @@ public class ProtocolNuGetSourceTests
             _ => searchThrows
                 ? throw new NuGetSourceException("sourceUnreachable", "no search")
                 : Task.FromResult<PackageSearchResource?>(new FakeSearchResource(searchHits ?? [])),
-            _ => Task.FromResult<PackageMetadataResource?>(metadata));
+            _ => Task.FromResult<PackageMetadataResource?>(metadata),
+            downloadResource ?? (_ => Task.FromResult<DownloadResource?>(null)));
     }
 
     private static FakePackageMetadata Metadata(
         string version,
         long? downloads = null,
         bool verified = false,
-        IEnumerable<PackageDependencyGroup>? dependencySets = null) =>
+        IEnumerable<PackageDependencyGroup>? dependencySets = null,
+        IReadOnlyList<VersionInfo>? versions = null) =>
         new()
         {
             Identity = new PackageIdentity("Contoso.Sdk", NuGetVersion.Parse(version)),
@@ -173,6 +319,7 @@ public class ProtocolNuGetSourceTests
             DownloadCount = downloads,
             PrefixReserved = verified,
             DependencySets = dependencySets ?? [],
+            Versions = versions ?? [new VersionInfo(NuGetVersion.Parse(version), downloads)],
         };
 
     private sealed class FakeMetadataResource(Func<string, IEnumerable<IPackageSearchMetadata>> entries)
@@ -212,5 +359,22 @@ public class ProtocolNuGetSourceTests
             ILogger log,
             CancellationToken token) =>
             Task.FromResult(results);
+    }
+
+    private sealed class FakeDownloadResource(Func<PackageIdentity, DownloadResourceResult> result)
+        : DownloadResource
+    {
+        public int Calls { get; private set; }
+
+        public override Task<DownloadResourceResult> GetDownloadResourceResultAsync(
+            PackageIdentity identity,
+            PackageDownloadContext downloadContext,
+            string globalPackagesFolder,
+            ILogger logger,
+            CancellationToken token)
+        {
+            Calls++;
+            return Task.FromResult(result(identity));
+        }
     }
 }
