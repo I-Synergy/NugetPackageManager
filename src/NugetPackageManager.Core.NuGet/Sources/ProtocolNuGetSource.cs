@@ -23,6 +23,8 @@ namespace NugetPackageManager.Core.NuGet.Sources;
 /// </summary>
 public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
 {
+    private const string PackageNotFoundCode = "packageNotFound";
+
     private static readonly TimeSpan packageCacheTtl = TimeSpan.FromMinutes(5);
 
     private readonly string sourceUrl;
@@ -122,7 +124,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         var eligible = PackageMetadataMapper.Eligible(all, prerelease);
         if (eligible.Count == 0)
         {
-            throw new NuGetSourceException("packageNotFound", $"Package {id} was not found on {sourceUrl}.");
+            throw new NuGetSourceException(PackageNotFoundCode, $"Package {id} was not found on {sourceUrl}.");
         }
 
         var latest = eligible[^1];
@@ -172,7 +174,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
                 StringComparison.OrdinalIgnoreCase));
 
         return match is null
-            ? throw new NuGetSourceException("packageNotFound", $"Version {version} of {id} was not found on {sourceUrl}.")
+            ? throw new NuGetSourceException(PackageNotFoundCode, $"Version {version} of {id} was not found on {sourceUrl}.")
             : PackageMetadataMapper.ToDetails(match);
     }
 
@@ -204,7 +206,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         if (!NuGetVersion.TryParse(version, out var parsedVersion))
         {
             throw new NuGetSourceException(
-                "packageNotFound",
+                PackageNotFoundCode,
                 $"Version {version} of {id} is not a valid NuGet version.");
         }
 
@@ -221,7 +223,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         if (result.PackageReader is null)
         {
             throw new NuGetSourceException(
-                "packageNotFound",
+                PackageNotFoundCode,
                 $"Version {version} of {id} could not be downloaded from {sourceUrl}.");
         }
 
@@ -372,17 +374,11 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
 
     private static void AddFrameworks(List<string> declared, IEnumerable<FrameworkSpecificGroup> groups)
     {
-        foreach (var group in groups)
-        {
-            // Folder groups such as runtimes/ are keyed by RID, not a TFM; only a real
-            // framework belongs in the declaration list.
-            if (!group.TargetFramework.IsSpecificFramework)
-            {
-                continue;
-            }
-
-            declared.Add(group.TargetFramework.GetShortFolderName());
-        }
+        // Folder groups such as runtimes/ are keyed by RID, not a TFM; only a real
+        // framework belongs in the declaration list.
+        declared.AddRange(groups
+            .Where(group => group.TargetFramework.IsSpecificFramework)
+            .Select(group => group.TargetFramework.GetShortFolderName()));
     }
 
     private async Task<T> RequireAsync<T>(

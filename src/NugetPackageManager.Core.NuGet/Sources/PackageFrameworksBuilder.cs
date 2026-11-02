@@ -83,60 +83,67 @@ public static class PackageFrameworksBuilder
     {
         ArgumentNullException.ThrowIfNull(packageFrameworks);
 
-        var declared = new HashSet<NuGetFramework>(NuGetFrameworkFullComparer.Instance);
-        foreach (var framework in packageFrameworks)
-        {
-            if (!framework.IsUnsupported && !framework.IsPCL)
-            {
-                declared.Add(framework);
-            }
-        }
-
+        var declared = CollectDeclared(packageFrameworks);
         var supported = new Dictionary<NuGetFramework, bool>(NuGetFrameworkFullComparer.Instance);
 
         foreach (var packageFramework in declared)
         {
-            // nuget.org matches a platform-versioned asset (net8.0-windows10.0.19041.0) by its
-            // platform-agnostic form, then keeps the declared framework itself in the results.
-            var hasPlatformVersion = !string.IsNullOrEmpty(packageFramework.Platform)
-                && packageFramework.PlatformVersion != FrameworkConstants.EmptyVersion;
-
-            var normalized = hasPlatformVersion
-                ? new NuGetFramework(
-                    packageFramework.Framework,
-                    packageFramework.Version,
-                    packageFramework.Platform,
-                    FrameworkConstants.EmptyVersion)
-                : packageFramework;
-
-            if (!compatibilityMatrix.TryGetValue(normalized, out var compatible))
-            {
-                supported[packageFramework] = false;
-                continue;
-            }
-
-            if (hasPlatformVersion)
-            {
-                // The row was computed for the platform-agnostic form; swap in the declared one.
-                foreach (var framework in compatible)
-                {
-                    if (!framework.Equals(normalized))
-                    {
-                        Add(supported, framework, declared);
-                    }
-                }
-
-                supported[packageFramework] = false;
-            }
-            else
-            {
-                foreach (var framework in compatible)
-                {
-                    Add(supported, framework, declared);
-                }
-            }
+            AddSupported(declared, supported, packageFramework);
         }
 
+        return BuildGroups(supported);
+    }
+
+    private static HashSet<NuGetFramework> CollectDeclared(IEnumerable<NuGetFramework> packageFrameworks)
+    {
+        var declared = new HashSet<NuGetFramework>(NuGetFrameworkFullComparer.Instance);
+        declared.UnionWith(packageFrameworks.Where(framework =>
+            !framework.IsUnsupported && !framework.IsPCL));
+        return declared;
+    }
+
+    /// <summary>
+    /// Adds every known framework that can consume <paramref name="packageFramework"/>.
+    /// A platform-versioned asset is matched by its platform-agnostic twin, but the declared
+    /// framework itself is kept in the result.
+    /// </summary>
+    private static void AddSupported(
+        HashSet<NuGetFramework> declared,
+        Dictionary<NuGetFramework, bool> supported,
+        NuGetFramework packageFramework)
+    {
+        var hasPlatformVersion = !string.IsNullOrEmpty(packageFramework.Platform)
+            && packageFramework.PlatformVersion != FrameworkConstants.EmptyVersion;
+
+        var normalized = hasPlatformVersion
+            ? new NuGetFramework(
+                packageFramework.Framework,
+                packageFramework.Version,
+                packageFramework.Platform,
+                FrameworkConstants.EmptyVersion)
+            : packageFramework;
+
+        if (!compatibilityMatrix.TryGetValue(normalized, out var compatible))
+        {
+            supported[packageFramework] = false;
+            return;
+        }
+
+        // The row was computed for the platform-agnostic form; do not duplicate that twin.
+        foreach (var framework in compatible.Where(framework =>
+            !hasPlatformVersion || !framework.Equals(normalized)))
+        {
+            Add(supported, framework, declared);
+        }
+
+        if (hasPlatformVersion)
+        {
+            supported[packageFramework] = false;
+        }
+    }
+
+    private static PackageFrameworks BuildGroups(Dictionary<NuGetFramework, bool> supported)
+    {
         var groups = supported
             .GroupBy(pair => ProductName(pair.Key), StringComparer.Ordinal)
             .OrderBy(group => ProductOrder(group.Key))
@@ -245,49 +252,62 @@ public static class PackageFrameworksBuilder
 
         var folder = parts[0];
 
-        // tools/{tfm}/any/... describes a framework only for a tool package.
-        if (string.Equals(folder, "tools", StringComparison.OrdinalIgnoreCase))
+        if (FolderEquals(folder, "tools"))
         {
+            // tools/{tfm}/any/... describes a framework only for a tool package.
             return isToolPackage && parts.Length > 2 ? TryParseFramework(parts[1]) : null;
         }
 
-        // runtimes/{rid}/lib/{tfm}/... — the RID is not a framework; the asset folder is.
-        if (string.Equals(folder, "runtimes", StringComparison.OrdinalIgnoreCase))
+        if (FolderEquals(folder, "runtimes"))
         {
-            for (var index = 1; index < parts.Length - 2; index++)
-            {
-                if (runtimeAssetFolders.Contains(parts[index], StringComparer.OrdinalIgnoreCase)
-                    && TryParseFramework(parts[index + 1]) is { } runtimeFramework)
-                {
-                    return runtimeFramework;
-                }
-            }
-
-            return null;
+            return FrameworkFromRuntimesPath(parts);
         }
 
-        // contentFiles/{language}/{tfm}/... and content/{tfm}/... put the language first.
         if (contentFolders.Contains(folder, StringComparer.OrdinalIgnoreCase))
         {
-            for (var index = 1; index < parts.Length - 1; index++)
-            {
-                if (TryParseFramework(parts[index]) is { } contentFramework)
-                {
-                    return contentFramework;
-                }
-            }
-
-            return null;
+            return FrameworkFromContentPath(parts);
         }
 
+        // lib/{tfm}/x.dll, ref/{tfm}/x.dll, build/{tfm}/x.props, build/{id}.props (no TFM).
         if (!directFrameworkFolders.Contains(folder, StringComparer.OrdinalIgnoreCase))
         {
             return null;
         }
 
-        // lib/{tfm}/x.dll, ref/{tfm}/x.dll, build/{tfm}/x.props, build/{id}.props (no TFM).
         return parts.Length > 2 ? TryParseFramework(parts[1]) : null;
     }
+
+    /// <summary>runtimes/{rid}/lib/{tfm}/... — the RID is not a framework; the asset folder is.</summary>
+    private static NuGetFramework? FrameworkFromRuntimesPath(string[] parts)
+    {
+        for (var index = 1; index < parts.Length - 2; index++)
+        {
+            if (runtimeAssetFolders.Contains(parts[index], StringComparer.OrdinalIgnoreCase)
+                && TryParseFramework(parts[index + 1]) is { } framework)
+            {
+                return framework;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>contentFiles/{language}/{tfm}/... and content/{tfm}/... put the language first.</summary>
+    private static NuGetFramework? FrameworkFromContentPath(string[] parts)
+    {
+        for (var index = 1; index < parts.Length - 1; index++)
+        {
+            if (TryParseFramework(parts[index]) is { } framework)
+            {
+                return framework;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool FolderEquals(string folder, string expected) =>
+        string.Equals(folder, expected, StringComparison.OrdinalIgnoreCase);
 
     private static NuGetFramework? TryParseFramework(string? folder)
     {

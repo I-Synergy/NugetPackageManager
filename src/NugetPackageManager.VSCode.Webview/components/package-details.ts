@@ -437,8 +437,9 @@ export class PackageDetailsComponent extends LitElement {
       `;
     }
 
-    const groups: PackageFrameworkGroup[] = this.frameworks && this.frameworks.key === this.currentFrameworksKey()
-      ? this.frameworks.data.Groups
+    const frameworks = this.frameworks;
+    const groups: PackageFrameworkGroup[] = frameworks?.key === this.currentFrameworksKey()
+      ? frameworks.data.Groups
       : [];
 
     if (groups.length === 0) {
