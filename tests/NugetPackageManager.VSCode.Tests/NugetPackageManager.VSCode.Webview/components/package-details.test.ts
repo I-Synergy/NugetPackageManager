@@ -86,6 +86,44 @@ suite('PackageDetails Component', () => {
         });
     });
 
+    test('Description tab tolerates a package whose download count was omitted', async () => {
+        const pkg = testPackage();
+        // The sidecar omits nulls, so a feed without download counts sends no property at all.
+        pkg.TotalDownloads = undefined as unknown as null;
+        packageDetails.package = pkg;
+        packageDetails.activeTab = 'dependencies';
+        await packageDetails.updateComplete;
+
+        packageDetails.shadowRoot!.querySelectorAll<HTMLButtonElement>('.detail-tab')[0]!.click();
+        await packageDetails.updateComplete;
+
+        assert.strictEqual(packageDetails.activeTab, 'description');
+        assert.ok(
+            packageDetails.shadowRoot!.querySelector('.description-text'),
+            'Description content should render when TotalDownloads is undefined'
+        );
+    });
+
+    test('clicking the Description tab returns from another tab', async () => {
+        packageDetails.package = testPackage();
+        await packageDetails.updateComplete;
+
+        const tabs = packageDetails.shadowRoot!.querySelectorAll<HTMLButtonElement>('.detail-tab');
+        assert.strictEqual(tabs.length, 4);
+
+        tabs[1]!.click();
+        await packageDetails.updateComplete;
+        assert.strictEqual(packageDetails.activeTab, 'dependencies');
+
+        tabs[0]!.click();
+        await packageDetails.updateComplete;
+        assert.strictEqual(packageDetails.activeTab, 'description');
+        assert.ok(
+            packageDetails.shadowRoot!.querySelector('.description-text'),
+            'Description content should render after switching back'
+        );
+    });
+
     test('should render package info correctly', async () => {
         const pkg: Package = {
             Id: 'Test.Package',

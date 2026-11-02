@@ -4,6 +4,7 @@ import codicon from "@/web/styles/codicon.css";
 import { hostApi } from "@/web/registrations";
 import type { DotnetFailureInfo, RestoreConflictInfo } from "@/common/rpc/types";
 import { StripTrailingPunctuation } from "@/common/text";
+import { CopyToolchainDiagnosticsAsync } from "@/web/utilities/diagnostics";
 
 /**
  * Shows a failed package operation as cause + remedy instead of a wall of
@@ -221,23 +222,10 @@ ${failure.Detail}`;
   }
 
   private async onCopyDiagnosticsAsync(): Promise<void> {
-    const projectPaths = this.failure?.ProjectPath ? [this.failure.ProjectPath] : [];
-    const result = await hostApi.runToolchainDiagnosticsAsync({ ProjectPaths: projectPaths });
-    if (!result.ok) {
-      this.feedback = "Could not collect diagnostics.";
-      return;
-    }
-    const copied = await this.copyToClipboardAsync(result.value.Report);
-    this.feedback = copied ? "Diagnostics copied." : "Copy failed — see the output channel.";
-  }
-
-  private async copyToClipboardAsync(text: string): Promise<boolean> {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      return false;
-    }
+    this.feedback = await CopyToolchainDiagnosticsAsync(
+      this.failure?.ProjectPath ? [this.failure.ProjectPath] : [],
+      "Diagnostics copied."
+    );
   }
 
   override render(): unknown {

@@ -6,6 +6,7 @@ import debounce from "lodash/debounce";
 import { hostApi, configuration } from "@/web/registrations";
 import { runProjectUpdateJobAsync } from "@/web/jobs";
 import { buildFrameworkOptions, getFrameworkGroupKey, matchesFrameworkSelection } from "@/common/framework";
+import { IsPrereleaseVersion } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
@@ -213,6 +214,7 @@ export class PackagesView extends LitElement {
         #projects {
           display: flex;
           flex-direction: column;
+          min-height: 0;
 
           .packages-details-loader {
             align-self: center;
@@ -366,6 +368,8 @@ export class PackagesView extends LitElement {
           .projects-panel-container {
             overflow-y: auto;
             overflow-x: hidden;
+            flex: 1;
+            min-height: 0;
             padding: 4px 0 10px;
 
             .no-projects {
@@ -1102,7 +1106,7 @@ export class PackagesView extends LitElement {
   private get filteredInstalledPackages(): PackageViewModel[] {
     return this.projectsPackages.filter((pkg) => {
       const version = pkg.InstalledVersion;
-      const isPrerelease = version.includes("-");
+      const isPrerelease = IsPrereleaseVersion(version);
       if (!this.filters.Prerelease && isPrerelease) return false;
       if (this._installedFramework !== "" && this.installedFrameworkOptions.length > 0) {
         return matchesFrameworkSelection(this._installedFramework, pkg.CpmFramework);
@@ -1401,6 +1405,13 @@ export class PackagesView extends LitElement {
         ? html`<div class="package-action-error" role="alert">${this.removeError}</div>`
         : nothing}
       <div class="projects-panel-container">
+        <package-details
+          .package=${this.selectedPackage}
+          .source=${this.selectedPackage?.SourceUrl || this.filters.SourceUrl}
+          .passwordScriptPath=${this.CurrentSource?.PasswordScriptPath}
+          .selectedVersion=${this.selectedVersion}
+        ></package-details>
+        <div class="separator"></div>
         ${this.projects.length > 0
           ? this.filteredProjects.map(
               (project) => html`
@@ -1417,13 +1428,6 @@ export class PackagesView extends LitElement {
           : html`<div class="no-projects">
               <span class="codicon codicon-info"></span> No projects found
             </div>`}
-        <div class="separator"></div>
-        <package-details
-          .package=${this.selectedPackage}
-          .source=${this.selectedPackage?.SourceUrl || this.filters.SourceUrl}
-          .passwordScriptPath=${this.CurrentSource?.PasswordScriptPath}
-          .selectedVersion=${this.selectedVersion}
-        ></package-details>
       </div>
     `;
   }

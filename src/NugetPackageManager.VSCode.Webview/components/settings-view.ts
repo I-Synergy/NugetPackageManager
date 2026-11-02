@@ -7,6 +7,7 @@ import { scrollableBase } from "@/web/styles/base.css";
 import { hostApi, configuration, router } from "../registrations";
 import { SourceViewModel } from "../types";
 import type { ToolchainHealth } from "@/common/rpc/types";
+import { CopyToolchainDiagnosticsAsync } from "@/web/utilities/diagnostics";
 import "./sdk-select";
 
 @customElement("settings-view")
@@ -301,17 +302,7 @@ export class SettingsView extends LitElement {
   }
 
   private async copyDiagnosticsAsync(): Promise<void> {
-    const result = await hostApi.runToolchainDiagnosticsAsync({});
-    if (!result.ok) {
-      this.copyFeedback = "Could not collect diagnostics.";
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(result.value.Report);
-      this.copyFeedback = "Diagnostics copied (credentials redacted).";
-    } catch {
-      this.copyFeedback = "Copy failed — see the output channel.";
-    }
+    this.copyFeedback = await CopyToolchainDiagnosticsAsync([], "Diagnostics copied (credentials redacted).");
   }
 
   override render(): unknown {

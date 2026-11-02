@@ -6,7 +6,8 @@ import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
-import { VulnerablePackageViewModel } from "../types";
+import "./package-row";
+import { PackageViewModel, VulnerablePackageViewModel } from "../types";
 
 const severityColors: Record<number, string> = {
   3: "var(--vscode-charts-red, #f14c4c)",
@@ -42,62 +43,42 @@ export class VulnerabilitiesView extends LitElement {
           border-radius: var(--npm-radius, 10px);
           background: var(--npm-surface-raised, var(--vscode-editorWidget-background));
 
-          .row-header {
+          .severity-badge {
+            font-size: 10px;
+            font-weight: bold;
+            padding: 1px 6px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            white-space: nowrap;
+          }
+
+          .advisory-link {
+            font-size: 11px;
+            color: var(--vscode-textLink-foreground);
+            cursor: pointer;
+            text-decoration: none;
+            white-space: nowrap;
+          }
+
+          .tfm-list {
             display: flex;
-            align-items: center;
-            gap: 8px;
+            gap: 4px;
+            flex-wrap: wrap;
+          }
 
-            .severity-badge {
-              font-size: 10px;
-              font-weight: bold;
-              padding: 1px 6px;
-              border-radius: 3px;
-              text-transform: uppercase;
-              white-space: nowrap;
-            }
+          .transitive-badge {
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            color: var(--vscode-descriptionForeground);
+            border: 1px solid var(--vscode-panelSection-border);
+            border-radius: 999px;
+            padding: 2px 6px;
+          }
 
-            .package-name {
-              font-weight: bold;
-              font-size: 13px;
-              flex: 1;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              white-space: nowrap;
-              cursor: pointer;
-            }
-
-            .package-name:hover {
-              text-decoration: underline;
-            }
-
-            .advisory-link {
-              font-size: 11px;
-              color: var(--vscode-textLink-foreground);
-              cursor: pointer;
-              text-decoration: none;
-              white-space: nowrap;
-            }
-
-            .tfm-list {
-              display: flex;
-              gap: 4px;
-              flex-wrap: wrap;
-            }
-
-            .transitive-badge {
-              font-size: 9px;
-              font-weight: 700;
-              letter-spacing: 0.4px;
-              text-transform: uppercase;
-              color: var(--vscode-descriptionForeground);
-              border: 1px solid var(--vscode-panelSection-border);
-              border-radius: 999px;
-              padding: 2px 6px;
-            }
-
-            .advisory-link:hover {
-              text-decoration: underline;
-            }
+          .advisory-link:hover {
+            text-decoration: underline;
           }
 
           .vuln-details {
@@ -184,12 +165,29 @@ export class VulnerabilitiesView extends LitElement {
     await hostApi.openUrlAsync({ Url: url });
   }
 
+  private toPackageRowModel(pkg: VulnerablePackageViewModel): PackageViewModel {
+    const model = PackageViewModel.Empty(pkg.Id);
+    model.Name = pkg.Id;
+    return model;
+  }
+
   private renderPackageRow(pkg: VulnerablePackageViewModel): unknown {
     const color = this.getSeverityColor(pkg.Severity);
     return html`
       <div class="vuln-row">
-        <div class="row-header">
+        <package-row
+          .package=${this.toPackageRowModel(pkg)}
+          .embedded=${true}
+          .showIcon=${false}
+          .showDescription=${false}
+          .showMeta=${false}
+          .showVersion=${false}
+          .showAuthors=${false}
+          .selectable=${true}
+          @package-selected=${() => this.selectPackage(pkg.Id)}
+        >
           <span
+            slot="leading"
             class="severity-badge"
             role="img"
             aria-label="${pkg.SeverityLabel} severity"
@@ -197,14 +195,14 @@ export class VulnerabilitiesView extends LitElement {
           >
             ${pkg.SeverityLabel}
           </span>
-          <span class="package-name" @click=${() => this.selectPackage(pkg.Id)}>${pkg.Id}</span>
           ${pkg.IsTransitive
-            ? html`<span class="transitive-badge" title="Transitive dependency">transitive</span>`
+            ? html`<span slot="badges" class="transitive-badge" title="Transitive dependency">transitive</span>`
             : nothing}
-          <span class="tfm-list">
+          <span slot="badges" class="tfm-list">
             ${pkg.CpmFrameworks.map((tfm) => html`<span class="tfm-badge">${tfm}</span>`)}
           </span>
           <a
+            slot="actions"
             class="advisory-link"
             href=${pkg.AdvisoryUrl}
             role="link"
@@ -214,26 +212,26 @@ export class VulnerabilitiesView extends LitElement {
           >
             <span class="codicon codicon-link-external"></span> Advisory
           </a>
-        </div>
-        <div class="vuln-details">
-          <div class="detail-row">
-            <span class="label">Installed:</span>
-            <span class="value">${pkg.InstalledVersion}</span>
+          <div slot="details" class="vuln-details">
+            <div class="detail-row">
+              <span class="label">Installed:</span>
+              <span class="value">${pkg.InstalledVersion}</span>
+            </div>
+            <div class="detail-row">
+              <span class="label">Affected:</span>
+              <span class="value">${pkg.AffectedVersionRange}</span>
+            </div>
+            ${pkg.DependencyOf.length > 0
+              ? html`<div class="detail-row">
+                  <span class="label">Via:</span>
+                  <span class="value">${pkg.DependencyOf.join(", ")}</span>
+                </div>`
+              : nothing}
+            <div class="project-list">
+              ${pkg.Projects.map((p) => html`<span class="chip">${p.Name}</span>`)}
+            </div>
           </div>
-          <div class="detail-row">
-            <span class="label">Affected:</span>
-            <span class="value">${pkg.AffectedVersionRange}</span>
-          </div>
-          ${pkg.DependencyOf.length > 0
-            ? html`<div class="detail-row">
-                <span class="label">Via:</span>
-                <span class="value">${pkg.DependencyOf.join(", ")}</span>
-              </div>`
-            : nothing}
-          <div class="project-list">
-            ${pkg.Projects.map((p) => html`<span class="chip">${p.Name}</span>`)}
-          </div>
-        </div>
+        </package-row>
       </div>
     `;
   }

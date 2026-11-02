@@ -3,7 +3,8 @@ import { customElement, property, state } from "lit/decorators.js";
 import { Task, TaskStatus } from "@lit/task";
 import codicon from "@/web/styles/codicon.css";
 import { hostApi } from "@/web/registrations";
-import type { ToolchainHealth } from "@/common/rpc/types";
+import { CopyToolchainDiagnosticsAsync } from "@/web/utilities/diagnostics";
+import { RecommendedSdkVersion } from "@/web/utilities/toolchain";
 import "./sdk-select";
 
 /**
@@ -162,28 +163,8 @@ export class ToolchainBanner extends LitElement {
     this.feedback = "";
   }
 
-  /** The first pin that is not installed, for the "Install SDK" action. */
-  private recommendedVersion(health: ToolchainHealth): string {
-    const candidates = [health.PinnedSdkVersion].filter(
-      (version): version is string => Boolean(version)
-    );
-    return candidates.find(
-      (version) => !health.InstalledSdks.some((sdk) => sdk.Version === version)
-    ) ?? candidates[0] ?? "";
-  }
-
   private async onCopyDiagnosticsAsync(): Promise<void> {
-    const result = await hostApi.runToolchainDiagnosticsAsync({ ProjectPaths: this.projectPaths });
-    if (!result.ok) {
-      this.feedback = "Could not collect diagnostics.";
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(result.value.Report);
-      this.feedback = "Diagnostics copied.";
-    } catch {
-      this.feedback = "Copy failed — see the output channel.";
-    }
+    this.feedback = await CopyToolchainDiagnosticsAsync(this.projectPaths, "Diagnostics copied.");
   }
 
   override render(): unknown {
@@ -217,7 +198,7 @@ export class ToolchainBanner extends LitElement {
               .sdks=${health.InstalledSdks}
               .selected=${health.PinnedSdkVersion ?? ""}
               .projectPaths=${this.projectPaths}
-              .recommended=${this.recommendedVersion(health)}
+              .recommended=${RecommendedSdkVersion(health)}
               @sdk-changed=${this.onRecheck}
             ></sdk-select>
             <button @click=${this.onOpenToolchain}>Open Toolchain</button>

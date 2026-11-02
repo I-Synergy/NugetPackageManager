@@ -5,6 +5,8 @@ import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
+import { CopyTextAsync, CopyToolchainDiagnosticsAsync } from "@/web/utilities/diagnostics";
+import { RecommendedSdkVersion } from "@/web/utilities/toolchain";
 import type {
   RunWorkloadCommandResponse,
   ToolchainHealth,
@@ -262,27 +264,17 @@ export class ToolchainView extends LitElement {
       return `Rename-Item -LiteralPath "${fullPath}" "${name}.bak"`;
     });
     const script = ["# Run in an elevated PowerShell, then press Re-check", ...commands].join("\n");
-    try {
-      await navigator.clipboard.writeText(script);
-      this.cleanupFeedback = "Cleanup command copied.";
-    } catch {
-      this.cleanupFeedback = "Copy failed — see the output channel.";
-    }
+    this.cleanupFeedback = (await CopyTextAsync(script))
+      ? "Cleanup command copied."
+      : "Copy failed — see the output channel.";
     this.requestUpdate();
   }
 
   private async onCopyDiagnosticsAsync(): Promise<void> {
-    const result = await hostApi.runToolchainDiagnosticsAsync({ ProjectPaths: this.projectPaths });
-    if (!result.ok) {
-      this.copyFeedback = "Could not collect diagnostics.";
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(result.value.Report);
-      this.copyFeedback = "Diagnostics copied (credentials redacted).";
-    } catch {
-      this.copyFeedback = "Copy failed — see the output channel.";
-    }
+    this.copyFeedback = await CopyToolchainDiagnosticsAsync(
+      this.projectPaths,
+      "Diagnostics copied (credentials redacted)."
+    );
   }
 
   private onRecheck(): void {
@@ -339,16 +331,6 @@ export class ToolchainView extends LitElement {
     this.workloadFeedback = result.value.NeedsElevation
       ? `dotnet workload ${action} needs administrator rights. Run it in an elevated terminal, then Re-check.`
       : `dotnet workload ${action} failed (exit ${result.value.ExitCode ?? "unknown"}).`;
-  }
-
-  /** The first pin that is not installed, for the "Install SDK" action. */
-  private recommendedVersion(health: ToolchainHealth): string {
-    const candidates = [health.PinnedSdkVersion].filter(
-      (version): version is string => Boolean(version)
-    );
-    return candidates.find(
-      (version) => !health.InstalledSdks.some((sdk) => sdk.Version === version)
-    ) ?? candidates[0] ?? "";
   }
 
   private renderIssue(issue: ToolchainIssue, index: number): unknown {
@@ -562,7 +544,7 @@ export class ToolchainView extends LitElement {
           .sdks=${health.InstalledSdks}
           .selected=${health.PinnedSdkVersion ?? ""}
           .projectPaths=${this.projectPaths}
-          .recommended=${this.recommendedVersion(health)}
+          .recommended=${RecommendedSdkVersion(health)}
           @sdk-changed=${this.onRecheck}
         ></sdk-select>
       </div>

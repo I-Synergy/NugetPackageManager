@@ -5,12 +5,13 @@ import { Task, TaskStatus } from "@lit/task";
 import codicon from "@/web/styles/codicon.css";
 import type { DropdownOption } from "./dropdown";
 import "./dropdown";
+import "./package-row";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
 import { runConsolidateJobAsync } from "@/web/jobs";
 import { buildFrameworkOptions, getBaseTargetFramework, getFrameworkGroupKey, matchesFrameworkSelection } from "@/common/framework";
-import { InconsistentPackageViewModel } from "../types";
+import { InconsistentPackageViewModel, PackageViewModel } from "../types";
 
 @customElement("consolidate-view")
 export class ConsolidateView extends LitElement {
@@ -43,41 +44,21 @@ export class ConsolidateView extends LitElement {
             opacity: 0.6;
           }
 
-          .row-header {
+          .cpm-badge {
+            font-size: 10px;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background-color: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+          }
+
+          .row-actions {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 4px;
 
-            .package-name {
-              font-weight: bold;
-              font-size: 13px;
-              flex: 1;
-              overflow: hidden;
-              text-overflow: ellipsis;
-              white-space: nowrap;
-              cursor: pointer;
-            }
-
-            .package-name:hover {
-              text-decoration: underline;
-            }
-
-            .cpm-badge {
-              font-size: 10px;
-              padding: 1px 4px;
-              border-radius: 3px;
-              background-color: var(--vscode-badge-background);
-              color: var(--vscode-badge-foreground);
-            }
-
-            .row-actions {
-              display: flex;
-              align-items: center;
-              gap: 4px;
-
-              .version-dropdown {
-                min-width: 100px;
-              }
+            .version-dropdown {
+              min-width: 100px;
             }
           }
 
@@ -313,16 +294,31 @@ export class ConsolidateView extends LitElement {
     }
   }
 
+  private toPackageRowModel(pkg: InconsistentPackageViewModel): PackageViewModel {
+    const model = PackageViewModel.Empty(pkg.Id);
+    model.Name = pkg.Id;
+    return model;
+  }
+
   private renderPackageRow(pkg: InconsistentPackageViewModel): unknown {
     return html`
       <div class="inconsistent-row ${pkg.IsConsolidating ? "consolidating" : ""}">
-        <div class="row-header">
-          <span class="package-name" @click=${() => this.selectPackage(pkg.Id)}>${pkg.Id}</span>
-          ${pkg.CpmManaged ? html`<span class="cpm-badge">CPM</span>` : nothing}
+        <package-row
+          .package=${this.toPackageRowModel(pkg)}
+          .embedded=${true}
+          .showIcon=${false}
+          .showDescription=${false}
+          .showMeta=${false}
+          .showVersion=${false}
+          .showAuthors=${false}
+          .selectable=${true}
+          @package-selected=${() => this.selectPackage(pkg.Id)}
+        >
+          ${pkg.CpmManaged ? html`<span slot="badges" class="cpm-badge">CPM</span>` : nothing}
           ${pkg.Versions[0]?.CpmFramework
-            ? html`<span class="tfm-badge">${getBaseTargetFramework(pkg.Versions[0].CpmFramework)}</span>`
+            ? html`<span slot="badges" class="tfm-badge">${getBaseTargetFramework(pkg.Versions[0].CpmFramework)}</span>`
             : nothing}
-          <div class="row-actions">
+          <div slot="actions" class="row-actions">
             ${pkg.IsConsolidating
               ? html`
                   <span class="spinner medium"></span>
@@ -352,20 +348,20 @@ export class ConsolidateView extends LitElement {
                   </button>
                 `}
           </div>
-        </div>
-        <div class="version-details">
-          ${pkg.Versions.map(
-            (v) => html`
-              <div class="version-row">
-                <span class="version">${v.Version}</span>
-                ${v.CpmFramework && !this.selectedFramework
-                  ? html`<span class="tfm-badge">${getBaseTargetFramework(v.CpmFramework)}</span>`
-                  : nothing}
-                <span class="projects">${v.Projects.map((p) => p.Name).join(", ")}</span>
-              </div>
-            `
-          )}
-        </div>
+          <div slot="details" class="version-details">
+            ${pkg.Versions.map(
+              (v) => html`
+                <div class="version-row">
+                  <span class="version">${v.Version}</span>
+                  ${v.CpmFramework && !this.selectedFramework
+                    ? html`<span class="tfm-badge">${getBaseTargetFramework(v.CpmFramework)}</span>`
+                    : nothing}
+                  <span class="projects">${v.Projects.map((p) => p.Name).join(", ")}</span>
+                </div>
+              `
+            )}
+          </div>
+        </package-row>
       </div>
     `;
   }
