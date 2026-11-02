@@ -64,6 +64,7 @@ export class PackageViewModel {
     this.InstalledVersion = model.InstalledVersion;
     this.Versions = model.Versions?.map((x) => x.Version).reverse() ?? [];
     this.VersionDownloads = PackageViewModel.BuildVersionDownloads(model.Versions);
+    this.SourceUrl = model.SourceUrl ?? "";
     this._tags = model.Tags;
     this.Model = model;
     this.Status = status;

@@ -474,6 +474,39 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Packages.length, 1);
             assert.strictEqual(result.value.Packages[0]!.Id, 'Newtonsoft.Json');
+            assert.strictEqual(result.value.Packages[0]!.SourceUrl, 'https://api.nuget.org/v3/index.json');
+        });
+
+        test('tags each search result with the source that returned it', async () => {
+            const sources = [
+                { Name: 'one', Url: 'https://one.example/v3/index.json' },
+                { Name: 'two', Url: 'https://two.example/v3/index.json' },
+            ];
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves(sources);
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').callsFake(async (url: string) => ({
+                GetPackagesAsync: async () => ({
+                    data: [{
+                        Id: url.includes('one') ? 'One.Pkg' : 'Two.Pkg',
+                        Name: url.includes('one') ? 'One.Pkg' : 'Two.Pkg',
+                        Version: '1.0.0',
+                    }],
+                }),
+            }) as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>);
+
+            const api = createHostAPI();
+            const result = await api.getPackagesAsync({
+                Url: '',
+                Filter: 'pkg',
+                Prerelease: false,
+                Skip: 0,
+                Take: 20,
+            });
+
+            assert.ok(result.ok);
+            const byId = new Map(result.value.Packages.map((pkg) => [pkg.Id, pkg.SourceUrl]));
+            assert.strictEqual(byId.get('One.Pkg'), sources[0]!.Url);
+            assert.strictEqual(byId.get('Two.Pkg'), sources[1]!.Url);
         });
     });
 
@@ -1486,6 +1519,41 @@ suite('HostAPI Tests', () => {
                 scope: 'unconditional',
                 workspaceRoots: [workspaceDir],
             }]);
+        });
+
+        test('treats an already-absent PackageReference as a successful uninstall', async () => {
+            // The dependency analysis reads project.assets.json, which can still list a
+            // reference that is no longer in the .csproj. `dotnet remove package` reports
+            // "does not contain any PackageReference"; the uninstall goal is already met.
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            fs.writeFileSync(projectPath, '<Project Sdk="Microsoft.NET.Sdk"></Project>');
+            stubProjectParsing(() => ({
+                Name: 'App',
+                Path: projectPath,
+                CpmEnabled: false,
+                Packages: [],
+            } as unknown as Project));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(null);
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').callsFake(
+                async (_command: string, args: string[]) => {
+                    if (args[0] === 'remove') {
+                        throw new DotnetError(
+                            'dotnet exited with code 1',
+                            "error: Project 'App.csproj' does not contain any PackageReference 'Sentry' to Remove."
+                        );
+                    }
+                }
+            );
+
+            const api = createHostAPI();
+            const result = await api.updateProjectAsync({
+                ProjectPath: projectPath,
+                PackageId: 'Sentry',
+                Version: '5.0.0',
+                Type: 'UNINSTALL',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
         });
 
         test('updateCentralVersions restores a property file when its restore fails', async () => {

@@ -137,6 +137,21 @@ export class DependencyIssues extends LitElement {
         margin-top: 8px;
       }
 
+      .bulk-action {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+      }
+
+      .bulk-action .codicon {
+        font-size: 12px;
+      }
+
+      .progress {
+        margin-top: 4px;
+      }
+
       .feedback {
         color: var(--vscode-descriptionForeground);
         font-size: 0.9em;
@@ -154,6 +169,7 @@ export class DependencyIssues extends LitElement {
   @state() private restoring: string[] = [];
   @state() private restoreError = "";
   @state() private busy = false;
+  @state() private removeProgress: { Done: number; Total: number } | null = null;
   @state() private feedback = "";
   @state() private reloadToken = 0;
   /** The automatic restore runs once per mounted section, never in a loop. */
@@ -298,6 +314,9 @@ export class DependencyIssues extends LitElement {
     if (!confirm.ok || !confirm.value.Confirmed) return;
 
     this.busy = true;
+    this.removeProgress = { Done: 0, Total: removable.length };
+    this.feedback = "";
+    this.requestUpdate();
     let removed = 0;
     for (const issue of removable) {
       const result = await runProjectUpdateJobAsync({
@@ -316,9 +335,12 @@ export class DependencyIssues extends LitElement {
         (candidate) =>
           !(candidate.PackageId === issue.PackageId && candidate.ProjectPath === issue.ProjectPath)
       );
+      this.removeProgress = { Done: removed, Total: removable.length };
       this.reportCount();
+      this.requestUpdate();
     }
     this.busy = false;
+    this.removeProgress = null;
     if (removed > 0) {
       this.feedback = `Removed ${removed} redundant reference${removed === 1 ? "" : "s"}.`;
       this.dispatchEvent(new CustomEvent("project-updated", { bubbles: true, composed: true }));
@@ -398,6 +420,15 @@ export class DependencyIssues extends LitElement {
     `;
   }
 
+  private renderBulkActionLabel(removable: number): unknown {
+    if (!this.removeProgress) {
+      return `Remove all non-pinned (${removable})`;
+    }
+
+    return html`<span class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></span>
+      Removing ${this.removeProgress.Done}/${this.removeProgress.Total}…`;
+  }
+
   private renderHeader(removable: number, pinned: number): unknown {
     const count = this.issues.length;
     const noun = count === 1 ? "direct reference also arrives" : "direct references also arrive";
@@ -411,17 +442,24 @@ export class DependencyIssues extends LitElement {
           <span class="spacer"></span>
           <span class="count">${removable} removable${pinnedNote}</span>
         </button>
-        ${removable > 0
+        ${removable > 0 || this.removeProgress !== null
           ? html`
               <button
                 class="bulk-action"
                 ?disabled=${this.busy}
                 title="Remove every direct reference that does not pin a higher version"
                 @click=${async () => await this.removeAllAsync()}
-              >Remove all non-pinned (${removable})</button>
+              >
+                ${this.renderBulkActionLabel(removable)}
+              </button>
             `
           : nothing}
       </div>
+      ${this.removeProgress
+        ? html`<div class="feedback progress" role="status" aria-live="polite">
+            Removing redundant references: ${this.removeProgress.Done} of ${this.removeProgress.Total}…
+          </div>`
+        : nothing}
     `;
   }
 

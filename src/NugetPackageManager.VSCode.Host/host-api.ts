@@ -1594,13 +1594,19 @@ async function searchAcrossSourcesAsync(
   const promises = sources.map(async (source) => {
     try {
       const api = await nugetApiFactory.GetSourceApiAsync(source.Url);
-      return await api.GetPackagesAsync(
+      const result = await api.GetPackagesAsync(
         request.Filter,
         request.Prerelease,
         request.Skip,
         request.Take,
         signal
       );
+      // A search result is shown without a single selected source; carry the source that
+      // produced it so the Details panel can load dependencies.
+      for (const pkg of result.data) {
+        pkg.SourceUrl = source.Url;
+      }
+      return result;
     } catch (error) {
       Logger.error(`getPackages: Failed to fetch from ${source.Url}`, error);
       return { data: [] as Package[] };
@@ -1672,6 +1678,9 @@ async function fetchPackagesFromUrlAsync(
     request.Take,
     signal
   );
+  for (const pkg of packages.data) {
+    pkg.SourceUrl = url;
+  }
   Logger.info(`getPackages: Successfully fetched ${packages.data.length} packages`);
   return packages;
 }
@@ -3919,15 +3928,38 @@ async function applyConflictFixesAsync(
 async function executeRemovePackageAsync(packageId: string, projectPath: string, operationId?: string, signal?: AbortSignal): Promise<void> {
   StatusBarUtils.ShowText(`Removing package ${packageId}...`);
   const args = ["remove", projectPath.replace(/\\/g, "/"), "package", packageId];
-  await TaskExecutor.ExecuteCommandAsync(
-    "dotnet",
-    args,
-    operationId ?? `remove-${packageId}`,
-    signal,
-    undefined,
-    undefined,
-    CreateDotnetOptions(projectPath)
-  );
+  try {
+    await TaskExecutor.ExecuteCommandAsync(
+      "dotnet",
+      args,
+      operationId ?? `remove-${packageId}`,
+      signal,
+      undefined,
+      undefined,
+      CreateDotnetOptions(projectPath)
+    );
+  } catch (error) {
+    // The dependency analysis reads project.assets.json, which can still describe a reference
+    // that was already removed from the .csproj (or was declared in an imported file). The
+    // goal of an uninstall is for the package not to be a direct reference, so this is a
+    // successful no-op rather than a rollback-worthy failure.
+    if (isAlreadyRemovedError(error, packageId)) {
+      Logger.info(
+        `updateProject: ${packageId} is already absent from ${projectPath}; treating the uninstall as applied`
+      );
+      return;
+    }
+    throw error;
+  }
+}
+
+function isAlreadyRemovedError(error: unknown, packageId: string): boolean {
+  if (!(error instanceof DotnetError)) {
+    return false;
+  }
+
+  return /does not contain any PackageReference/i.test(error.output)
+    && error.output.toLowerCase().includes(packageId.toLowerCase());
 }
 
 async function executeAddPackageAsync(
