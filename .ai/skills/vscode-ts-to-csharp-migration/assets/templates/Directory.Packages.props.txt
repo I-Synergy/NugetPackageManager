@@ -1,0 +1,27 @@
+<Project>
+
+  <!--
+    Central package versions. Every PackageReference in the solution omits Version; the version
+    lives here. `Fixtures` trees opt out because they are inputs the extension evaluates, not
+    projects of this solution.
+  -->
+  <PropertyGroup>
+    <IsSidecarProject>true</IsSidecarProject>
+    <IsSidecarProject Condition="$([System.String]::Copy('$(MSBuildProjectFullPath)').Replace('\','/').Contains('/Fixtures/'))">false</IsSidecarProject>
+    <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' == 'true'">true</ManagePackageVersionsCentrally>
+    <ManagePackageVersionsCentrally Condition="'$(IsSidecarProject)' != 'true'">false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsSidecarProject)' == 'true'">
+    <!-- Product packages (one per third-party boundary; justify each in the PR). -->
+    <!-- <PackageVersion Include="SomeLibrary" Version="1.2.3" /> -->
+
+    <!-- Test stack: MSTest is the standard; xUnit and NUnit are forbidden. Moq for isolation. -->
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="Moq" Version="4.21.0" />
+    <PackageVersion Include="MSTest.TestAdapter" Version="4.5.2" />
+    <PackageVersion Include="MSTest.TestFramework" Version="4.5.2" />
+  </ItemGroup>
+
+</Project>

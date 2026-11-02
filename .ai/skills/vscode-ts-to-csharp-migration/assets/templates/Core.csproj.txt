@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Sidecar entry point. Composition only: Program.cs wires handler groups and runs the server.
+    Nullability, analyzers, warnings-as-errors and RollForward come from the root
+    Directory.Build.props — do not repeat them here.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MyExtension.Core</RootNamespace>
+    <!-- Published framework-dependent and launched as `dotnet MyExtension.Core.dll`:
+         one build for every OS/arch, no per-OS apphost binary in the VSIX. -->
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MyExtension.Common\MyExtension.Common.csproj" />
+    <ProjectReference Include="..\MyExtension.Core.Adapters\MyExtension.Core.Adapters.csproj" />
+    <ProjectReference Include="..\MyExtension.Core.Domain\MyExtension.Core.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

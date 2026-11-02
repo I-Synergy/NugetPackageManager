@@ -1,0 +1,150 @@
+// C# harness template: time, exact allocation, retained heap, peak working set.
+//
+// Usage: cs-harness <input-file> [bench|dump|idle]
+//
+// ADAPT (three places, all marked below):
+//   1. Parser.Parse(content) / Parser.Resolve(...) -> your product types
+//   2. the dump object shape -> the canonical shape your TS harness emits
+//   3. the resolution row fields
+//
+// Build: copy cs-harness.csproj.template to cs-harness.csproj, set __PROJECT_REF__, then
+//        dotnet build -c Release
+using System.Diagnostics;
+using System.Text.Json;
+
+const int Warmup = 5;
+const int Runs = 30;
+
+var file = args[0];
+var mode = args.Length > 1 ? args[1] : "bench";
+var content = File.ReadAllText(file);
+var tfms = new[] { "net10.0", "net10.0-windows" }; // ADAPT
+
+if (mode == "idle")
+{
+    var idle = Process.GetCurrentProcess();
+    idle.Refresh();
+    Console.Out.Write(JsonSerializer.Serialize(new { variant = "cs", idleRssBytes = idle.WorkingSet64 }));
+    return;
+}
+
+// ADAPT: parse.
+CpmPackageMap parsed = CpmPropsReader.Parse(content);
+
+if (mode == "dump")
+{
+    // ADAPT: must match ts-bench.mjs `toWire` exactly (same keys, same ordering).
+    var dump = new
+    {
+        map = new
+        {
+            unconditional = parsed.Unconditional
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .ToDictionary(pair => pair.Key, pair => pair.Value),
+            conditional = parsed.Conditional
+                .OrderBy(entry => entry.Framework, StringComparer.Ordinal)
+                .ThenBy(entry => entry.Condition, StringComparer.Ordinal)
+                .Select(entry => new
+                {
+                    condition = entry.Condition,
+                    framework = entry.Framework,
+                    versions = entry.Versions
+                        .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                        .ToDictionary(pair => pair.Key, pair => pair.Value),
+                    order = entry.Order,
+                })
+                .ToArray(),
+            hasConditionalGroups = parsed.HasConditionalGroups,
+        },
+    };
+    Console.Out.Write(JsonSerializer.Serialize(dump));
+    return;
+}
+
+var process = Process.GetCurrentProcess();
+
+object Phase(string label, Func<object?> operation)
+{
+    object? last = null;
+    for (var i = 0; i < Warmup; i++)
+    {
+        last = operation();
+    }
+
+    GC.KeepAlive(last);
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    GC.Collect();
+
+    var baseHeap = GC.GetTotalMemory(true);
+    var allocatedStart = GC.GetTotalAllocatedBytes(precise: true);
+    process.Refresh();
+    var baseRss = process.WorkingSet64;
+    var peakRss = baseRss;
+    var times = new List<double>(Runs);
+
+    for (var i = 0; i < Runs; i++)
+    {
+        var t0 = Stopwatch.GetTimestamp();
+        last = operation();
+        var t1 = Stopwatch.GetTimestamp();
+        times.Add((t1 - t0) * 1000.0 / Stopwatch.Frequency);
+
+        process.Refresh();
+        if (process.WorkingSet64 > peakRss)
+        {
+            peakRss = process.WorkingSet64;
+        }
+    }
+
+    var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedStart;
+    var beforeGcHeap = GC.GetTotalMemory(false);
+    GC.KeepAlive(last);
+    var retained = GC.GetTotalMemory(true) - baseHeap;
+    process.Refresh();
+
+    return new
+    {
+        label,
+        timesMs = times,
+        heapGrowthPerOpBytes = (beforeGcHeap - baseHeap) / Runs,
+        allocatedBytesPerOp = allocated / Runs,
+        peakRssBytes = peakRss,
+        retainedBytes = retained,
+    };
+}
+
+// ADAPT: resolve over the ids the input actually defines — never a fixed list.
+static string[] IdsOf(CpmPackageMap map)
+{
+    var ids = new List<string>(map.Unconditional.Keys);
+    var seen = new HashSet<string>(map.Unconditional.Keys, StringComparer.OrdinalIgnoreCase);
+    foreach (var entry in map.Conditional)
+    {
+        foreach (var id in entry.Versions.Keys)
+        {
+            if (seen.Add(id))
+            {
+                ids.Add(id);
+            }
+        }
+    }
+
+    return [.. ids];
+}
+
+var resolveIds = IdsOf(parsed);
+var parsePhase = Phase("parse", () => CpmPropsReader.Parse(content));
+var resolvePhase = Phase("resolve", () => CpmPropsReader.ResolveVersions(parsed, resolveIds, tfms));
+GC.KeepAlive(parsed);
+
+Console.Out.Write(
+    JsonSerializer.Serialize(new
+    {
+        variant = "cs",
+        file,
+        runs = Runs,
+        parse = parsePhase,
+        resolve = resolvePhase,
+    })
+);

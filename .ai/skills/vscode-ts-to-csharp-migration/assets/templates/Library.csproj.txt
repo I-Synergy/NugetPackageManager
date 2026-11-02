@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Domain library. Nullability, analyzers, warnings-as-errors and RollForward come from the root
+    Directory.Build.props — do not repeat them here.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MyExtension.Core.Domain</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Versions come from Directory.Packages.props: never put Version= on a PackageReference. -->
+    <!-- <PackageReference Include="SomeLibrary" /> -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MyExtension.Common\MyExtension.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Only what the tests need to see as internal. One entry per test project. -->
+    <InternalsVisibleTo Include="MyExtension.Core.Domain.Tests" />
+  </ItemGroup>
+
+</Project>
