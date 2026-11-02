@@ -144,6 +144,23 @@ suite('ConsolidateView', () => {
         assert.strictEqual(view.packages.length, 1);
         assert.strictEqual(view.packages[0]!.Versions[0]!.CpmCondition, net11.Versions[0]!.CpmCondition);
     });
+    test('renders each card through <package-row> with the CPM badge slotted', () => {
+        const pkg = packageModel('', 'net8.0');
+        view.packages = [pkg];
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+
+        assert.ok(host.querySelector('package-row'), 'the card uses <package-row>');
+        const cpmBadge = host.querySelector('.cpm-badge');
+        assert.ok(cpmBadge, 'the CPM badge is rendered');
+        assert.strictEqual(cpmBadge!.getAttribute('slot'), 'badges');
+        // The framework badge moves into the same badges slot.
+        assert.strictEqual(host.querySelectorAll('package-row [slot="badges"]').length, 2);
+        // No legacy standalone header markup remains.
+        assert.strictEqual(host.querySelector('.package-name'), null);
+    });
+
     test('cancels a running consolidation from the card action', async () => {
         let running = true;
         const cancelled: string[] = [];

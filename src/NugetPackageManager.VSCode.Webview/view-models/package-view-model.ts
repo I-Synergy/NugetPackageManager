@@ -58,7 +58,7 @@ export class PackageViewModel {
     this.IconUrl = model.IconUrl;
     this.LicenseUrl = model.LicenseUrl;
     this.ProjectUrl = model.ProjectUrl;
-    this.TotalDownloads = model.TotalDownloads;
+    this.TotalDownloads = model.TotalDownloads ?? null;
     this.Verified = model.Verified;
     this.Version = model.Version;
     this.InstalledVersion = model.InstalledVersion;
@@ -97,7 +97,7 @@ export class PackageViewModel {
     this.IconUrl = model.IconUrl;
     this.LicenseUrl = model.LicenseUrl;
     this.ProjectUrl = model.ProjectUrl;
-    this.TotalDownloads = model.TotalDownloads;
+    this.TotalDownloads = model.TotalDownloads ?? null;
     this.Verified = model.Verified;
     if (model.Version != "") this.Version = model.Version;
     this.Versions = model.Versions?.map((x) => x.Version).reverse() ?? [];

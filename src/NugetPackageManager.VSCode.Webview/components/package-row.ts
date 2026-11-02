@@ -2,6 +2,7 @@ import { LitElement, css, html, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { PackageViewModel } from "../types";
 import { getBaseTargetFramework } from "@/common/framework";
+import { FormatDownloads } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 
@@ -156,6 +157,14 @@ const styles = css`
       color: var(--vscode-charts-blue, #3794ff);
     }
 
+    .name-selectable {
+      cursor: pointer;
+    }
+
+    .name-selectable:hover {
+      text-decoration: underline;
+    }
+
     .update-version {
       display: flex;
       align-items: center;
@@ -189,6 +198,12 @@ export class PackageRow extends LitElement {
   @property({ type: Object }) package!: PackageViewModel;
   @property({ type: Number }) revision: number = 0;
   @property({ type: Boolean }) embedded: boolean = false;
+  @property({ type: Boolean }) showIcon: boolean = true;
+  @property({ type: Boolean }) showDescription: boolean = true;
+  @property({ type: Boolean }) showMeta: boolean = true;
+  @property({ type: Boolean }) showVersion: boolean = true;
+  @property({ type: Boolean }) showAuthors: boolean = true;
+  @property({ type: Boolean }) selectable: boolean = false;
   @state() iconUrl: string | null = null;
 
   get resolvedIconUrl(): string {
@@ -202,11 +217,13 @@ export class PackageRow extends LitElement {
     this.iconUrl = DEFAULT_ICON_URL;
   }
 
-  private formatDownloads(count: number | null): string {
-    if (count === null) return "—";
-    if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-    if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
-    return count.toString();
+  private onNameClick(): void {
+    if (!this.selectable) return;
+    this.dispatchEvent(new CustomEvent("package-selected", {
+      detail: { packageId: this.package.Id },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   private renderVersionContent() {
@@ -246,6 +263,62 @@ export class PackageRow extends LitElement {
     `;
   }
 
+  private renderNameLine(): unknown {
+    return html`
+      <div class="name-line">
+        <span class="name ${this.selectable ? "name-selectable" : ""}" @click=${() => this.onNameClick()}>${this.package.Name}</span>
+        ${this.package.Verified
+          ? html`<span class="codicon codicon-verified-filled verified-badge" title="Verified owner"></span>`
+          : nothing}
+        ${this.package.CpmFramework
+          ? html`<span class="tfm-badge" title="Framework-scoped version">${getBaseTargetFramework(this.package.CpmFramework)}</span>`
+          : nothing}
+        <slot name="badges"></slot>
+        ${this.showAuthors && this.package.Authors
+          ? html`<span class="authors">by ${this.package.Authors}</span>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderIcon(): unknown {
+    return this.showIcon
+      ? html`<img
+          class="icon"
+          alt=""
+          src=${this.resolvedIconUrl}
+          @error=${() => this.onIconError()}
+        />`
+      : nothing;
+  }
+
+  private renderVersion(): unknown {
+    return this.showVersion
+      ? html`<div class="package-version">${this.renderVersionContent()}</div>`
+      : nothing;
+  }
+
+  private renderDescription(): unknown {
+    return this.showDescription && this.package.Description
+      ? html`<div class="description">${this.package.Description}</div>`
+      : nothing;
+  }
+
+  private renderMeta(): unknown {
+    if (!this.showMeta || (this.package.TotalDownloads ?? 0) <= 0) {
+      return nothing;
+    }
+
+    return html`
+      <div class="meta-line">
+        <span class="downloads">
+          <span class="codicon codicon-cloud-download"></span>
+          ${FormatDownloads(this.package.TotalDownloads)}
+        </span>
+      </div>
+    `;
+  }
+
   override render() {
     if (!this.package) {
       return nothing;
@@ -264,41 +337,17 @@ export class PackageRow extends LitElement {
           }
         }}
       >
-        <img
-          class="icon"
-          alt=""
-          src=${this.resolvedIconUrl}
-          @error=${() => this.onIconError()}
-        />
+        <slot name="leading"></slot>
+        ${this.renderIcon()}
         <div class="package-content">
           <div class="package-header">
-            <div class="name-line">
-              <span class="name">${this.package.Name}</span>
-              ${this.package.Verified
-                ? html`<span class="codicon codicon-verified-filled verified-badge" title="Verified owner"></span>`
-                : nothing}
-              ${this.package.CpmFramework
-                ? html`<span class="tfm-badge" title="Framework-scoped version">${getBaseTargetFramework(this.package.CpmFramework)}</span>`
-                : nothing}
-              ${this.package.Authors
-                ? html`<span class="authors">by ${this.package.Authors}</span>`
-                : nothing}
-            </div>
-            <div class="package-version">${this.renderVersionContent()}</div>
+            ${this.renderNameLine()}
+            ${this.renderVersion()}
+            <slot name="actions"></slot>
           </div>
-          ${this.package.Description
-            ? html`<div class="description">${this.package.Description}</div>`
-            : nothing}
-          ${(this.package.TotalDownloads ?? 0) > 0
-            ? html`
-                <div class="meta-line">
-                  <span class="downloads">
-                    <span class="codicon codicon-cloud-download"></span>
-                    ${this.formatDownloads(this.package.TotalDownloads)}
-                  </span>
-                </div>
-              `
-            : nothing}
+          ${this.renderDescription()}
+          ${this.renderMeta()}
+          <slot name="details"></slot>
         </div>
       </div>
     `;

@@ -3,6 +3,7 @@ import { customElement, property, state } from "lit/decorators.js";
 import { Task, TaskStatus } from "@lit/task";
 import type { GetPackageDetailsRequest, GetPackageFrameworksRequest } from "@/common/rpc/types";
 import { PackageViewModel } from "../types";
+import { FormatDownloads, IsPrereleaseVersion } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "../registrations";
@@ -314,16 +315,6 @@ export class PackageDetailsComponent extends LitElement {
     return this.frameworksKey(this.package?.Name ?? "", this.selectedVersion, this.source);
   }
 
-  private formatDownloads(count: number | null): string {
-    // The feed only publishes download counts on its search resource; registration-only
-    // metadata leaves this unknown, and an em dash is honest where 0 would be a lie.
-    if (count === null) return "—";
-    if (count >= 1_000_000_000) return `${(count / 1_000_000_000).toFixed(1)}B`;
-    if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-    if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
-    return count.toString();
-  }
-
   private async openUrlAsync(url: string): Promise<void> {
     await hostApi.openUrlAsync({ Url: url });
   }
@@ -345,10 +336,10 @@ export class PackageDetailsComponent extends LitElement {
           : nothing}
 
         <span class="label">Total</span>
-        <span class="value">${this.formatDownloads(this.package.TotalDownloads)}</span>
+        <span class="value">${FormatDownloads(this.package.TotalDownloads)}</span>
 
         <span class="label">Current version</span>
-        <span class="value">${this.formatDownloads(this.package.DownloadsForVersion(this.selectedVersion))}</span>
+        <span class="value">${FormatDownloads(this.package.DownloadsForVersion(this.selectedVersion))}</span>
 
         ${this.package.LicenseUrl
           ? html`
@@ -486,7 +477,7 @@ export class PackageDetailsComponent extends LitElement {
     return html`
       <div class="versions-list" role="list" aria-label="Package versions">
         ${versions.map((v) => {
-          const isPrerelease = v.includes("-");
+          const isPrerelease = IsPrereleaseVersion(v);
           const isInstalled = v === installedVersion;
           const isCurrent = v === this.selectedVersion;
 
