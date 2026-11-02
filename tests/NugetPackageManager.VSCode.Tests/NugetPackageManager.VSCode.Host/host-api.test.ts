@@ -1488,6 +1488,41 @@ suite('HostAPI Tests', () => {
             }]);
         });
 
+        test('treats an already-absent PackageReference as a successful uninstall', async () => {
+            // The dependency analysis reads project.assets.json, which can still list a
+            // reference that is no longer in the .csproj. `dotnet remove package` reports
+            // "does not contain any PackageReference"; the uninstall goal is already met.
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            fs.writeFileSync(projectPath, '<Project Sdk="Microsoft.NET.Sdk"></Project>');
+            stubProjectParsing(() => ({
+                Name: 'App',
+                Path: projectPath,
+                CpmEnabled: false,
+                Packages: [],
+            } as unknown as Project));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(null);
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').callsFake(
+                async (_command: string, args: string[]) => {
+                    if (args[0] === 'remove') {
+                        throw new DotnetError(
+                            'dotnet exited with code 1',
+                            "error: Project 'App.csproj' does not contain any PackageReference 'Sentry' to Remove."
+                        );
+                    }
+                }
+            );
+
+            const api = createHostAPI();
+            const result = await api.updateProjectAsync({
+                ProjectPath: projectPath,
+                PackageId: 'Sentry',
+                Version: '5.0.0',
+                Type: 'UNINSTALL',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+        });
+
         test('updateCentralVersions restores a property file when its restore fails', async () => {
             const projectPath = path.join(workspaceDir, 'App.csproj');
             const propsPath = path.join(workspaceDir, 'Directory.Packages.props');
