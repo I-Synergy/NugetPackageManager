@@ -247,6 +247,44 @@ suite('DependencyIssues Component', () => {
         element.remove();
     });
 
+    test('shows progress while removing all non-pinned references', async () => {
+        let release: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        (mockHostApi.getJobAsync as unknown) = async () => {
+            await gate;
+            return ok({
+                Kind: 'projectUpdate',
+                State: 'completed',
+                Stage: 'Completed',
+                Percent: 100,
+                Response: {
+                    Project: { Name: 'App', Path: 'd:/ws/App.csproj', Packages: [], CpmEnabled: false },
+                    IsCpmEnabled: false,
+                },
+            });
+        };
+
+        const element = new DependencyIssues();
+        element.projectPaths = ['d:/ws/App.csproj'];
+        document.body.appendChild(element);
+        await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('transitively'));
+
+        const action = element.shadowRoot!.querySelector('.card-header .bulk-action') as HTMLButtonElement;
+        action.click();
+
+        await waitForAsync(() => (action.textContent ?? '').includes('Removing'));
+        assert.match(action.textContent ?? '', /Removing 0\/1/);
+        assert.ok(action.querySelector('.codicon-loading'), 'a spinner is shown while removing');
+        assert.strictEqual(action.disabled, true);
+        assert.match(element.shadowRoot!.textContent ?? '', /Removing redundant references: 0 of 1/);
+
+        release?.();
+        await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('Removed 1 redundant reference'));
+        element.remove();
+    });
+
     test('removing a redundant reference runs the uninstall job and notifies', async () => {
         const element = new DependencyIssues();
         element.projectPaths = ['d:/ws/App.csproj'];
