@@ -174,22 +174,13 @@ export class DependencyIssues extends LitElement {
       // looping.
       if (result.SkippedProjectPaths.length > 0 && !this.autoRestoreAttempted) {
         this.autoRestoreAttempted = true;
-        // One RPC can only wait ~2 minutes, so restore a bounded batch and let
-        // the retry action continue with the rest.
-        const batch = result.SkippedProjectPaths.slice(0, MAX_AUTO_RESTORE);
-        this.restoring = batch;
         this.restoreError = "";
-        this.requestUpdate();
 
-        const restored = await hostApi.restoreProjectsAsync(
-          { ProjectPaths: batch },
-          signal
-        );
-        this.restoring = [];
-        if (!restored.ok) {
-          this.restoreError = `Restoring ${batch.length} project(s) failed: ${restored.error}`;
+        const failure = await this.restoreSkippedAsync(result.SkippedProjectPaths);
+        if (failure) {
+          this.restoreError = failure;
         } else {
-          const again = await hostApi.getDependencyIssuesAsync({ ProjectPaths: projectPaths }, signal);
+          const again = await hostApi.getDependencyIssuesAsync({ ProjectPaths: projectPaths });
           if (again.ok) result = again.value;
         }
         this.requestUpdate();
@@ -220,14 +211,36 @@ export class DependencyIssues extends LitElement {
     return this.issues.filter((issue) => issue.Kind === "Redundant");
   }
 
+  /**
+   * Restores every skipped project, in bounded batches because one RPC can only wait
+   * about two minutes. Deliberately does **not** take an `AbortSignal`: a restore is a
+   * user-level operation, and tying it to the analysis task meant a parent re-render
+   * re-ran the task, aborted the signal, and cancelled the `dotnet restore` mid-flight.
+   */
+  private async restoreSkippedAsync(projectPaths: string[]): Promise<string | null> {
+    for (let index = 0; index < projectPaths.length; index += MAX_AUTO_RESTORE) {
+      const batch = projectPaths.slice(index, index + MAX_AUTO_RESTORE);
+      this.restoring = batch;
+      this.requestUpdate();
+
+      const restored = await hostApi.restoreProjectsAsync({ ProjectPaths: batch });
+      if (!restored.ok) {
+        this.restoring = [];
+        return `Restoring ${batch.length} project(s) failed: ${restored.error}`;
+      }
+    }
+
+    this.restoring = [];
+    this.requestUpdate();
+    return null;
+  }
+
   private async retryRestoreAsync(): Promise<void> {
     if (this.skippedPaths.length === 0) return;
-    this.restoring = this.skippedPaths;
     this.restoreError = "";
-    const restored = await hostApi.restoreProjectsAsync({ ProjectPaths: this.skippedPaths });
-    this.restoring = [];
-    if (!restored.ok) {
-      this.restoreError = `Restoring ${this.skippedPaths.length} project(s) failed: ${restored.error}`;
+    const failure = await this.restoreSkippedAsync(this.skippedPaths);
+    if (failure) {
+      this.restoreError = failure;
       return;
     }
     this.reloadToken += 1;

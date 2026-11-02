@@ -122,6 +122,7 @@ suite('DependencyIssues Component', () => {
     test('restores unrestored projects once, then analyses them', async () => {
         let calls = 0;
         const restored: string[][] = [];
+        const signals: Array<AbortSignal | undefined> = [];
         (mockHostApi.getDependencyIssuesAsync as unknown) = async () => {
             calls++;
             return ok(calls === 1
@@ -138,8 +139,12 @@ suite('DependencyIssues Component', () => {
                     SkippedProjectPaths: [],
                 });
         };
-        (mockHostApi.restoreProjectsAsync as unknown) = async (request: { ProjectPaths: string[] }) => {
+        (mockHostApi.restoreProjectsAsync as unknown) = async (
+            request: { ProjectPaths: string[] },
+            signal?: AbortSignal
+        ) => {
             restored.push(request.ProjectPaths);
+            signals.push(signal);
             return ok(undefined);
         };
 
@@ -149,8 +154,46 @@ suite('DependencyIssues Component', () => {
         await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('NodaTime'));
 
         assert.deepStrictEqual(restored, [['d:/ws/New.csproj']]);
+        assert.deepStrictEqual(signals, [undefined],
+            'the restore must not be tied to the analysis task signal');
         assert.strictEqual(calls, 2, 'analysis runs again after the restore');
         assert.match(element.shadowRoot!.textContent ?? '', /also arrives? transitively/);
+
+        element.remove();
+    });
+
+    test('restores every skipped project in bounded batches', async () => {
+        const skippedPaths = Array.from({ length: 25 }, (_, index) => `d:/ws/P${index}.csproj`);
+        const batches: string[][] = [];
+        let calls = 0;
+        (mockHostApi.getDependencyIssuesAsync as unknown) = async () => {
+            calls++;
+            return ok(calls === 1
+                ? {
+                    Issues: [],
+                    ProjectsScanned: 0,
+                    ProjectsSkipped: skippedPaths.length,
+                    SkippedProjectPaths: skippedPaths,
+                }
+                : {
+                    Issues: [redundant],
+                    ProjectsScanned: 1,
+                    ProjectsSkipped: 0,
+                    SkippedProjectPaths: [],
+                });
+        };
+        (mockHostApi.restoreProjectsAsync as unknown) = async (request: { ProjectPaths: string[] }) => {
+            batches.push(request.ProjectPaths);
+            return ok(undefined);
+        };
+
+        const element = new DependencyIssues();
+        element.projectPaths = ['d:/ws/App.csproj'];
+        document.body.appendChild(element);
+        await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('NodaTime'));
+
+        assert.deepStrictEqual(batches.map((batch) => batch.length), [20, 5]);
+        assert.deepStrictEqual(batches.flat(), skippedPaths, 'every skipped project is restored');
 
         element.remove();
     });
