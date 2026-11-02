@@ -197,6 +197,12 @@ export class DependencyIssues extends LitElement {
     },
   });
 
+  /** Re-runs the analysis, e.g. when the Cleanup tab is refreshed or re-opened. */
+  async ReloadAsync(): Promise<void> {
+    this.reloadToken += 1;
+    await this.updateComplete;
+  }
+
   private reportCount(): void {
     this.dispatchEvent(
       new CustomEvent<number>("dependency-count-changed", {

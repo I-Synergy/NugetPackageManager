@@ -15,6 +15,7 @@ import type { UpdatesView } from "./updates-view";
 import type { ConsolidateView } from "./consolidate-view";
 import type { VulnerabilitiesView } from "./vulnerabilities-view";
 import type { CleanupView } from "./cleanup-view";
+import type { ToolchainView } from "./toolchain-view";
 import type { DropdownOption } from "./dropdown";
 import "./dropdown";
 import "./toolchain-banner";
@@ -554,14 +555,19 @@ export class PackagesView extends LitElement {
     if (tab === this.activeTab) return;
     this.activeTab = tab;
     await this.updateComplete;
+    // Visiting a data tab must show the current workspace, not the cached scan
+    // from an earlier visit. Force the reload for the analysis tabs; Cleanup and
+    // Toolchain expose refresh methods that cover their nested sections too.
     if (tab === "updates") {
-      await (this.shadowRoot?.querySelector("updates-view") as UpdatesView | null)?.LoadOutdatedPackagesAsync();
+      await (this.shadowRoot?.querySelector("updates-view") as UpdatesView | null)?.LoadOutdatedPackagesAsync(true);
     } else if (tab === "consolidate") {
-      await (this.shadowRoot?.querySelector("consolidate-view") as ConsolidateView | null)?.LoadInconsistentPackagesAsync();
+      await (this.shadowRoot?.querySelector("consolidate-view") as ConsolidateView | null)?.LoadInconsistentPackagesAsync(true);
     } else if (tab === "cleanup") {
-      await (this.shadowRoot?.querySelector("cleanup-view") as CleanupView | null)?.LoadCleanupReportAsync();
+      await (this.shadowRoot?.querySelector("cleanup-view") as CleanupView | null)?.RefreshAsync();
     } else if (tab === "vulnerabilities") {
-      await (this.shadowRoot?.querySelector("vulnerabilities-view") as VulnerabilitiesView | null)?.LoadVulnerablePackagesAsync();
+      await (this.shadowRoot?.querySelector("vulnerabilities-view") as VulnerabilitiesView | null)?.LoadVulnerablePackagesAsync(true);
+    } else if (tab === "toolchain") {
+      await (this.shadowRoot?.querySelector("toolchain-view") as ToolchainView | null)?.RefreshAsync();
     }
   }
 

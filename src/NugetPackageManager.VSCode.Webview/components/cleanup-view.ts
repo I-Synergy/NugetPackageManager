@@ -7,6 +7,7 @@ import { hostApi } from "@/web/registrations";
 import { runCleanupJobAsync } from "@/web/jobs";
 import type { CleanupReport } from "@/common/rpc/types";
 import "./dependency-issues";
+import type { DependencyIssues } from "./dependency-issues";
 
 @customElement("cleanup-view")
 export class CleanupView extends LitElement {
@@ -142,6 +143,20 @@ export class CleanupView extends LitElement {
     }
   }
 
+  /**
+   * Refresh everything this tab shows: the unused-entry report **and** the
+   * transitive-duplicate analysis. The latter has its own async task, so a report
+   * reload alone used to leave the direct-reference list stale until the tab was
+   * remounted.
+   */
+  async RefreshAsync(): Promise<void> {
+    const issues = this.shadowRoot?.querySelector("dependency-issues") as DependencyIssues | null;
+    await Promise.all([
+      this.LoadCleanupReportAsync(),
+      issues?.ReloadAsync() ?? Promise.resolve(),
+    ]);
+  }
+
   /** The Cleanup badge covers unused props entries plus removable duplicates. */
   private reportCount(): void {
     this.dispatchEvent(new CustomEvent<number>("count-changed", {
@@ -234,7 +249,7 @@ export class CleanupView extends LitElement {
             </div>
           </div>
           <div class="list-actions">
-            <button class="ghost-btn" ?disabled=${this.isLoading || this.isRemoving} @click=${async () => await this.LoadCleanupReportAsync()}>
+            <button class="ghost-btn" ?disabled=${this.isLoading || this.isRemoving} @click=${async () => await this.RefreshAsync()}>
               Refresh
             </button>
             ${this.isRemoving
