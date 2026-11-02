@@ -119,6 +119,21 @@ suite('CleanupView Component', () => {
         assert.ok(view.shadowRoot?.textContent?.includes('Unused.Two'));
     });
 
+    test('keeps the header fixed and renders all content inside one scrollable body', async () => {
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const container = view.shadowRoot!.querySelector('.cleanup-container');
+        assert.ok(container, 'a cleanup container should render');
+        assert.ok(container!.firstElementChild?.classList.contains('list-header'), '.list-header is a direct child of the container');
+
+        const body = Array.from(container!.children).find((child) => child.classList.contains('cleanup-body'));
+        assert.ok(body, '.cleanup-body is a direct child of the container');
+        assert.ok(body!.querySelector('dependency-issues'), '.cleanup-body contains dependency-issues');
+        assert.strictEqual(body!.querySelectorAll('.unused-row').length, 2);
+        assert.strictEqual(body!.querySelector('.list-header'), null, '.list-header must stay outside .cleanup-body');
+    });
+
     test('removes unused packages and emits completion', async () => {
         await view.LoadCleanupReportAsync();
         await view.updateComplete;
