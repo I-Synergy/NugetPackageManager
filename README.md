@@ -208,7 +208,7 @@ Finds `PackageVersion` entries in `Directory.Packages.props` that no project ref
 
 **Transitive duplicates** are computed per target framework from `obj/project.assets.json`, with the chain that brings the package (`Parent -> … -> Package`):
 
-- **redundant** — removing the reference does not lower the resolved version → **Remove** / **Remove all safe** (confirmed, through the normal snapshot + restore + rollback job);
+- **redundant** — removing the reference does not lower the resolved version → **Remove** / **Remove all non-pinned** (confirmed, through the normal snapshot + restore + rollback job). The bulk action sits in the section header, so it is reachable without scrolling through the whole list;
 - **pinned — kept** — the direct reference raises the version above what the graph requires (security pins, framework alignment), so it is listed but never offered for removal.
 
 Opening Cleanup restores any project whose `project.assets.json` is missing or stale (shown as "Restoring N projects…"), then analyses the fresh graph; a failed restore is reported with **Restore again** instead of guessing. Only projects the extension manages are considered — when the workspace has a solution, its projects; otherwise the workspace projects minus `excludeGlobs` and hidden folders such as `.ai/tmp`, so vendored samples and cached trees are never restored or analysed. At most 20 projects are restored in one pass; the rest are reported and can be continued with **Restore again**.

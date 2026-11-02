@@ -35,11 +35,19 @@ export class DependencyIssues extends LitElement {
         padding: 8px 10px;
       }
 
+      .card-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
       .header {
         display: flex;
         align-items: center;
         gap: 6px;
-        width: 100%;
+        flex: 1;
+        min-width: 0;
+        width: auto;
         background: none;
         border: none;
         color: var(--vscode-foreground);
@@ -336,7 +344,7 @@ export class DependencyIssues extends LitElement {
       ${restoringCard}${errorCard}
       <div class="card">
         ${this.renderHeader(removable, pinned)}
-        ${this.renderBody(removable)}
+        ${this.renderBody()}
         ${this.renderFeedback()}
         ${this.renderSkippedNote()}
       </div>
@@ -377,32 +385,30 @@ export class DependencyIssues extends LitElement {
     const pinnedNote = pinned > 0 ? ` · ${pinned} pinned` : "";
     const chevron = this.expanded ? "codicon-chevron-down" : "codicon-chevron-right";
     return html`
-      <button class="header" aria-expanded=${this.expanded} @click=${() => { this.expanded = !this.expanded; }}>
-        <span class="codicon ${chevron}"></span>
-        <span>${count} ${noun} transitively</span>
-        <span class="spacer"></span>
-        <span class="count">${removable} removable${pinnedNote}</span>
-      </button>
-    `;
-  }
-
-  private renderBody(removable: number): unknown {
-    if (!this.expanded) return nothing;
-    return html`
-      ${this.issues.map((issue) => this.renderIssue(issue))}
-      ${this.renderRemoveAllAction(removable)}
-    `;
-  }
-
-  private renderRemoveAllAction(removable: number): unknown {
-    if (removable === 0) return nothing;
-    return html`
-      <div class="actions">
-        <button ?disabled=${this.busy} @click=${async () => await this.removeAllAsync()}>
-          Remove all safe references
+      <div class="card-header">
+        <button class="header" aria-expanded=${this.expanded} @click=${() => { this.expanded = !this.expanded; }}>
+          <span class="codicon ${chevron}"></span>
+          <span>${count} ${noun} transitively</span>
+          <span class="spacer"></span>
+          <span class="count">${removable} removable${pinnedNote}</span>
         </button>
+        ${removable > 0
+          ? html`
+              <button
+                class="bulk-action"
+                ?disabled=${this.busy}
+                title="Remove every direct reference that does not pin a higher version"
+                @click=${async () => await this.removeAllAsync()}
+              >Remove all non-pinned (${removable})</button>
+            `
+          : nothing}
       </div>
     `;
+  }
+
+  private renderBody(): unknown {
+    if (!this.expanded) return nothing;
+    return html`${this.issues.map((issue) => this.renderIssue(issue))}`;
   }
 
   private renderFeedback(): unknown {

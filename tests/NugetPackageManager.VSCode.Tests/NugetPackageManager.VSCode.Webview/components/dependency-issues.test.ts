@@ -181,6 +181,29 @@ suite('DependencyIssues Component', () => {
         element.remove();
     });
 
+    test('offers a remove-all action in the header for non-pinned references', async () => {
+        const element = new DependencyIssues();
+        element.projectPaths = ['d:/ws/App.csproj'];
+        document.body.appendChild(element);
+        await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('transitively'));
+
+        // The bulk action lives in the card header, so it is reachable without expanding
+        // the (possibly very long) issue list.
+        const action = element.shadowRoot!.querySelector('.card-header .bulk-action') as HTMLButtonElement;
+        assert.ok(action, 'the header should offer a remove-all action');
+        assert.match(action.textContent ?? '', /Remove all non-pinned \(1\)/);
+        assert.strictEqual(element.shadowRoot!.querySelectorAll('.issue').length, 0,
+            'the action is visible while the list is collapsed');
+
+        action.click();
+        await waitForAsync(() => updateRequests.length > 0);
+        await waitForAsync(() => (element.shadowRoot?.textContent ?? '').includes('Removed 1 redundant reference'));
+
+        assert.deepStrictEqual(updateRequests, [{ Type: 'UNINSTALL', PackageId: 'NodaTime' }],
+            'only the redundant reference is removed');
+        element.remove();
+    });
+
     test('removing a redundant reference runs the uninstall job and notifies', async () => {
         const element = new DependencyIssues();
         element.projectPaths = ['d:/ws/App.csproj'];

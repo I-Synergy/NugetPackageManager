@@ -19,6 +19,8 @@ export class CleanupView extends LitElement {
         display: flex;
         flex: 1;
         width: 100%;
+        min-height: 0;
+        overflow: hidden;
       }
 
       .cleanup-container {
@@ -26,6 +28,7 @@ export class CleanupView extends LitElement {
         flex-direction: column;
         width: 100%;
         height: 100%;
+        min-height: 0;
         overflow: hidden;
       }
 
