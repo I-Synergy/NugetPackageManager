@@ -1,6 +1,6 @@
-// File: {ApplicationName}.Services.{Domain}/Endpoints/v1/{Entity}Endpoints.cs
+// File: NugetPackageManager.Services.{Domain}/Endpoints/v1/{Entity}Endpoints.cs
 
-namespace {ApplicationName}.Services.{Domain}.Endpoints.v1;
+namespace NugetPackageManager.Services.{Domain}.Endpoints.v1;
 
 using Asp.Versioning;
 using Asp.Versioning.Builder;

@@ -34,10 +34,10 @@
 
 | Layer | Purpose | Example Projects |
 |-------|---------|------------------|
-| **Presentation** | User interface (Blazor, MAUI, etc.) | `{ApplicationName}.UI.Web`, `{ApplicationName}.App.Mobile` |
-| **Application** | API endpoints, orchestration | `{ApplicationName}.Services.{Domain}` |
-| **Domain** | Business logic, CQRS handlers | `{ApplicationName}.Domain.{Domain}` |
-| **Infrastructure** | Data access, external integrations | `{ApplicationName}.Data`, `{ApplicationName}.Entities.{Domain}` |
+| **Presentation** | User interface (Blazor, MAUI, etc.) | `NugetPackageManager.UI.Web`, `NugetPackageManager.App.Mobile` |
+| **Application** | API endpoints, orchestration | `NugetPackageManager.Services.{Domain}` |
+| **Domain** | Business logic, CQRS handlers | `NugetPackageManager.Domain.{Domain}` |
+| **Infrastructure** | Data access, external integrations | `NugetPackageManager.Data`, `NugetPackageManager.Entities.{Domain}` |
 
 ## CQRS Terms
 

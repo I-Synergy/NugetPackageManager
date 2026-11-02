@@ -40,6 +40,7 @@
 - ci: scope SonarCloud automatic analysis to product paths (`.ai/**` skill templates and `docs/**` mockups excluded) and harden the workflows (`npm ci --ignore-scripts`, no `npx`, pinned release action).
 - refactor: release versions are now automatic and follow the AI-repo scheme — each push to `main` derives `YYYY.1MMdd.1HHmm` from the UTC build time, publishes with that version, and tags it without a `v` prefix. The manual release script and `RELEASE_NOTES.md` were removed.
 - docs: add CI, quality-gate, SonarCloud and Marketplace badges to `README.md`, and document the automatic release flow.
+- docs: `README.md` gains a **Performance and Memory** section recording the TypeScript-to-C# measurements — the read path is ~10× faster end-to-end on a 1,000-package `Directory.Packages.props` (2.3 ms vs 24.1 ms) and at parity on small files, per-parse allocation is unchanged (~1.1 MiB, now split between host and sidecar), the sidecar costs ~28 MiB idle and ~45–60 MiB under load, and the framework-dependent .NET build is the only packaging that stays one universal VSIX. Method, parity result and caveats included.
 
 ## 2.2.0 (2026-10-28)
 

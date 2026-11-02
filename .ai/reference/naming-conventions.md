@@ -4,7 +4,7 @@
 
 | Element | Convention | Example |
 |---------|-----------|----------|
-| **Namespace** | `{ApplicationName}.{Layer}.{Domain}` | `BudgetTracker.Domain.Budgets` |
+| **Namespace** | `NugetPackageManager.{Layer}.{Domain}` | `BudgetTracker.Domain.Budgets` |
 | **Command** | `{Action}{Entity}Command` | `CreateBudgetCommand` |
 | **Query** | `Get{Entity}{Criteria}Query` | `GetBudgetByIdQuery` |
 | **Handler** | `{Action}{Entity}CommandHandler` / `Get{Entity}{Criteria}QueryHandler` | `CreateBudgetCommandHandler` |
@@ -23,19 +23,19 @@
 
 ```csharp
 // Domain layer
-{ApplicationName}.Domain.{Domain}
-{ApplicationName}.Domain.{Domain}.Features.{Entity}.Commands
-{ApplicationName}.Domain.{Domain}.Features.{Entity}.Queries
-{ApplicationName}.Domain.{Domain}.Features.{Entity}.Events
+NugetPackageManager.Domain.{Domain}
+NugetPackageManager.Domain.{Domain}.Features.{Entity}.Commands
+NugetPackageManager.Domain.{Domain}.Features.{Entity}.Queries
+NugetPackageManager.Domain.{Domain}.Features.{Entity}.Events
 
 // Application layer
-{ApplicationName}.Services.{Domain}
-{ApplicationName}.Services.{Domain}.Endpoints
+NugetPackageManager.Services.{Domain}
+NugetPackageManager.Services.{Domain}.Endpoints
 
 // Infrastructure layer
-{ApplicationName}.Entities.{Domain}
-{ApplicationName}.Models.{Domain}
-{ApplicationName}.Data
+NugetPackageManager.Entities.{Domain}
+NugetPackageManager.Models.{Domain}
+NugetPackageManager.Data
 
 // Examples
 BudgetTracker.Domain.Budgets

@@ -1,4 +1,8 @@
-# Business Domains (CUSTOMIZE THIS)
+# NugetPackageManager — Business Domains
+
+**Project:** NugetPackageManager
+**Intention:** [What this application does]
+
 
 **Instructions:** Document your project's business domains and entities.
 
@@ -97,12 +101,12 @@
 **Project Structure:**
 
 ```
-{ApplicationName}.Contracts.{Domain}/       # Service contracts, interfaces
-{ApplicationName}.Entities.{Domain}/        # EF Core entity classes
-{ApplicationName}.Models.{Domain}/          # DTOs, view models
-{ApplicationName}.Domain.{Domain}/          # CQRS handlers, domain logic
-{ApplicationName}.Services.{Domain}/        # API endpoints
-{ApplicationName}.ViewModels.{Domain}/      # MVVM ViewModels (if applicable)
+NugetPackageManager.Contracts.{Domain}/       # Service contracts, interfaces
+NugetPackageManager.Entities.{Domain}/        # EF Core entity classes
+NugetPackageManager.Models.{Domain}/          # DTOs, view models
+NugetPackageManager.Domain.{Domain}/          # CQRS handlers, domain logic
+NugetPackageManager.Services.{Domain}/        # API endpoints
+NugetPackageManager.ViewModels.{Domain}/      # MVVM ViewModels (if applicable)
 ```
 
 **Dependencies:**
