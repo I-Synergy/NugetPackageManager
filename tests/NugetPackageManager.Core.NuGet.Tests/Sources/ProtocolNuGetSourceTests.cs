@@ -236,6 +236,22 @@ public class ProtocolNuGetSourceTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public async Task GetPackageFrameworksAsync_PassesTheGlobalPackagesFolderToTheDownload()
+    {
+        // DownloadResource throws ArgumentNullException when globalPackagesFolder is null, which
+        // made every Frameworks tab fail with a generic download error.
+        var download = PackageDownload("lib/netstandard2.0/Contoso.Sdk.dll");
+        using var source = CreateSource(downloadResource: Download(download));
+
+        await source.GetPackageFrameworksAsync("Contoso.Sdk", "1.0.0", CancellationToken.None);
+
+        Assert.IsFalse(
+            string.IsNullOrWhiteSpace(download.GlobalPackagesFolder),
+            "DownloadResource requires a non-null global packages folder");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public async Task GetPackageFrameworksAsync_CachesPerVersion()
     {
         var download = PackageDownload("lib/netstandard2.0/Contoso.Sdk.dll");
@@ -388,6 +404,8 @@ public class ProtocolNuGetSourceTests
     {
         public int Calls { get; private set; }
 
+        public string? GlobalPackagesFolder { get; private set; }
+
         public override Task<DownloadResourceResult> GetDownloadResourceResultAsync(
             PackageIdentity identity,
             PackageDownloadContext downloadContext,
@@ -396,6 +414,7 @@ public class ProtocolNuGetSourceTests
             CancellationToken token)
         {
             Calls++;
+            GlobalPackagesFolder = globalPackagesFolder;
             return Task.FromResult(result(identity));
         }
     }

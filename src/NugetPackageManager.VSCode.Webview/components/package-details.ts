@@ -429,10 +429,13 @@ export class PackageDetailsComponent extends LitElement {
     }
 
     if (this._frameworksTask.status === TaskStatus.ERROR) {
+      const reason = this._frameworksTask.error instanceof Error
+        ? this._frameworksTask.error.message
+        : "";
       return html`
         <div class="error" role="alert">
           <span class="codicon codicon-error"></span>
-          Failed to load supported frameworks — reopen the tab to retry
+          Failed to load supported frameworks${reason ? `: ${reason}` : ""} — reopen the tab to retry
         </div>
       `;
     }

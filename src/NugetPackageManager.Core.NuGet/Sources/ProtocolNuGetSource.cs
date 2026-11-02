@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using NuGet.Common;
+using NuGet.Configuration;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
 using NuGet.Protocol.Core.Types;
@@ -215,7 +216,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
             .GetDownloadResourceResultAsync(
                 identity,
                 new PackageDownloadContext(CurrentCache()),
-                globalPackagesFolder: null,
+                globalPackagesFolder: ResolveGlobalPackagesFolder(),
                 NullLogger.Instance,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -379,6 +380,35 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         declared.AddRange(groups
             .Where(group => group.TargetFramework.IsSpecificFramework)
             .Select(group => group.TargetFramework.GetShortFolderName()));
+    }
+
+    /// <summary>
+    /// NuGet's download resource requires a non-null global packages folder even when the caller
+    /// only needs the package reader. Use the folder NuGet resolves so an already-restored package
+    /// is served from the local cache, with the environment/user default as a fallback.
+    /// </summary>
+    private static string ResolveGlobalPackagesFolder()
+    {
+        try
+        {
+            var folder = SettingsUtility.GetGlobalPackagesFolder(Settings.LoadDefaultSettings(root: null));
+            if (!string.IsNullOrWhiteSpace(folder))
+            {
+                return folder;
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Fall through to the environment/user default.
+        }
+
+        var fromEnvironment = Environment.GetEnvironmentVariable("NUGET_PACKAGES");
+        return !string.IsNullOrWhiteSpace(fromEnvironment)
+            ? fromEnvironment
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".nuget",
+                "packages");
     }
 
     private async Task<T> RequireAsync<T>(
