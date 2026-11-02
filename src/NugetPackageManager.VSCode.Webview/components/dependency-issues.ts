@@ -420,6 +420,15 @@ export class DependencyIssues extends LitElement {
     `;
   }
 
+  private renderBulkActionLabel(removable: number): unknown {
+    if (!this.removeProgress) {
+      return `Remove all non-pinned (${removable})`;
+    }
+
+    return html`<span class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></span>
+      Removing ${this.removeProgress.Done}/${this.removeProgress.Total}…`;
+  }
+
   private renderHeader(removable: number, pinned: number): unknown {
     const count = this.issues.length;
     const noun = count === 1 ? "direct reference also arrives" : "direct references also arrive";
@@ -441,10 +450,7 @@ export class DependencyIssues extends LitElement {
                 title="Remove every direct reference that does not pin a higher version"
                 @click=${async () => await this.removeAllAsync()}
               >
-                ${this.removeProgress
-                  ? html`<span class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></span>
-                      Removing ${this.removeProgress.Done}/${this.removeProgress.Total}…`
-                  : `Remove all non-pinned (${removable})`}
+                ${this.renderBulkActionLabel(removable)}
               </button>
             `
           : nothing}
