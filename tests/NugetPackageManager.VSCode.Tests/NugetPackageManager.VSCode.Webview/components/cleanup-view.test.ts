@@ -98,6 +98,43 @@ suite('CleanupView Component', () => {
         assert.ok(counts.includes(5), 'badge includes 2 unused + 3 duplicates');
     });
 
+    test('refresh reloads the report and the direct-reference analysis', async () => {
+        let reportCalls = 0;
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => {
+                    reportCalls++;
+                    return ok(report);
+                },
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [],
+                    ProjectsScanned: 0,
+                    ProjectsSkipped: 0,
+                    SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const issues = view.shadowRoot!.querySelector('dependency-issues') as unknown as {
+            reloadToken: number;
+        };
+        const tokenBefore = issues.reloadToken;
+
+        const refresh = [...(view.shadowRoot?.querySelectorAll('button') ?? [])]
+            .find((candidate) => candidate.textContent?.trim() === 'Refresh');
+        assert.ok(refresh, 'Refresh button should be present');
+        refresh.click();
+
+        await waitForAsync(() => reportCalls >= 2 && issues.reloadToken > tokenBefore, 2000);
+        assert.ok(reportCalls >= 2, 'the unused-entry report is reloaded');
+        assert.ok(issues.reloadToken > tokenBefore, 'the direct-reference analysis is reloaded');
+    });
+
     test('passes the scoped project list to the duplicate analysis', async () => {
         view.projectPaths = ['D:/ws/src/App/App.csproj'];
         await view.LoadCleanupReportAsync();

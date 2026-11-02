@@ -118,7 +118,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
             .ConfigureAwait(false);
 
         var all = await metadata
-            .GetMetadataAsync(id, prerelease, includeUnlisted: false, CurrentCache(), NullLogger.Instance, cancellationToken)
+            .GetMetadataAsync(id, includePrerelease: true, includeUnlisted: false, CurrentCache(), NullLogger.Instance, cancellationToken)
             .ConfigureAwait(false);
 
         var eligible = PackageMetadataMapper.Eligible(all, prerelease);

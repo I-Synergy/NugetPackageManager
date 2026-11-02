@@ -22,7 +22,8 @@ public static class AssetsGraph
         try
         {
             var directory = Path.GetDirectoryName(projectPath) ?? string.Empty;
-            var assetsPath = Path.Combine(directory, "obj", AssetsFileName);
+            var objDirectory = Path.Combine(directory, "obj");
+            var assetsPath = Path.Combine(objDirectory, AssetsFileName);
             var assetsInfo = new FileInfo(assetsPath);
             var projectInfo = new FileInfo(projectPath);
 
@@ -31,13 +32,23 @@ public static class AssetsGraph
                 return Skipped("project has not been restored");
             }
 
-            if (assetsInfo.LastWriteTimeUtc < projectInfo.LastWriteTimeUtc)
+            // `dotnet restore` is incremental: when the restore inputs are unchanged it updates
+            // `project.nuget.cache` but leaves `project.assets.json` untouched. Comparing only
+            // the assets timestamp therefore asked for a restore that could never change it.
+            var restoreTime = assetsInfo.LastWriteTimeUtc;
+            var cacheInfo = new FileInfo(Path.Combine(objDirectory, "project.nuget.cache"));
+            if (cacheInfo.Exists && cacheInfo.LastWriteTimeUtc > restoreTime)
+            {
+                restoreTime = cacheInfo.LastWriteTimeUtc;
+            }
+
+            if (restoreTime < projectInfo.LastWriteTimeUtc)
             {
                 return Skipped("assets are older than the project; restore first");
             }
 
             var propsInfo = new FileInfo(Path.Combine(directory, PropsFileName));
-            if (propsInfo.Exists && assetsInfo.LastWriteTimeUtc < propsInfo.LastWriteTimeUtc)
+            if (propsInfo.Exists && restoreTime < propsInfo.LastWriteTimeUtc)
             {
                 return Skipped("assets are older than Directory.Packages.props; restore first");
             }

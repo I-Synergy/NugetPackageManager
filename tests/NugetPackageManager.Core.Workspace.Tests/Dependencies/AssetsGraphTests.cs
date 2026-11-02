@@ -241,6 +241,41 @@ public class AssetsGraphTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public void AnalyzeProject_NoOpRestoreUsesTheFreshRestoreCache()
+    {
+        // `dotnet restore` is incremental: a no-op restore updates project.nuget.cache but
+        // leaves project.assets.json with its old timestamp. That must not keep the project in
+        // "restore again" forever.
+        var directory = Directory.CreateTempSubdirectory("assets-graph-");
+        try
+        {
+            var obj = Directory.CreateDirectory(Path.Combine(directory.FullName, "obj"));
+            var projectPath = Path.Combine(directory.FullName, "App.csproj");
+            var assetsPath = Path.Combine(obj.FullName, "project.assets.json");
+            var cachePath = Path.Combine(obj.FullName, "project.nuget.cache");
+            File.WriteAllText(projectPath, "<Project />");
+            File.WriteAllText(assetsPath, AssetsFor("1.0.0"));
+            File.WriteAllText(cachePath, "{}");
+            File.SetLastWriteTimeUtc(assetsPath, DateTime.UtcNow.AddMinutes(-5));
+            File.SetLastWriteTimeUtc(projectPath, DateTime.UtcNow.AddMinutes(-2));
+            File.SetLastWriteTimeUtc(cachePath, DateTime.UtcNow.AddMinutes(5));
+
+            // Act
+            var analysis = AssetsGraph.AnalyzeProject(projectPath);
+
+            // Assert
+            Assert.IsFalse(analysis.Skipped);
+            Assert.AreEqual(1, analysis.Issues.Count);
+            Assert.AreEqual("Lib", analysis.Issues[0].PackageId);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public void AnalyzeProject_FreshAssets_ReportsIssues()
     {
         // Arrange

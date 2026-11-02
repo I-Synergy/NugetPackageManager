@@ -291,6 +291,12 @@ export class ToolchainView extends LitElement {
     this.refreshToken += 1;
   }
 
+  /** Re-runs the toolchain probe, e.g. when the tab becomes active. */
+  async RefreshAsync(): Promise<void> {
+    this.onRecheck();
+    await this.updateComplete;
+  }
+
   private isWorkloadIssue(issue: ToolchainIssue): boolean {
     return issue.Kind === "WorkloadManifestConflict" || issue.Kind === "SdkResolutionFailure";
   }
