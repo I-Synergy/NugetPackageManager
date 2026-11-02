@@ -38,6 +38,11 @@ export class PackageViewModel {
   InstalledVersion: string;
   Version: string;
   Versions: Array<string>;
+  /**
+   * Downloads per exact version, keyed by the same strings as `Versions`. A version
+   * the feed did not publish a count for maps to `null`, never `0`.
+   */
+  VersionDownloads: Map<string, number | null>;
   Status: PackageViewModelStatus;
   Selected: boolean = false;
   SourceUrl: string = "";
@@ -58,9 +63,29 @@ export class PackageViewModel {
     this.Version = model.Version;
     this.InstalledVersion = model.InstalledVersion;
     this.Versions = model.Versions?.map((x) => x.Version).reverse() ?? [];
+    this.VersionDownloads = PackageViewModel.BuildVersionDownloads(model.Versions);
     this._tags = model.Tags;
     this.Model = model;
     this.Status = status;
+  }
+
+  /**
+   * Index the per-version counts the feed published. Versions the search resource
+   * never reported land here as `null` so the UI can tell "unknown" from "none".
+   */
+  private static BuildVersionDownloads(versions: PackageVersion[] | undefined): Map<string, number | null> {
+    const downloads = new Map<string, number | null>();
+    for (const entry of versions ?? []) {
+      if (!entry || typeof entry.Version !== "string") continue;
+      downloads.set(entry.Version, entry.Downloads ?? null);
+    }
+    return downloads;
+  }
+
+  /** Downloads of one exact version; `null` when the feed does not publish it. */
+  DownloadsForVersion(version: string): number | null {
+    if (!version) return null;
+    return this.VersionDownloads.get(version) ?? null;
   }
 
   UpdatePackage(model: Package, sourceUrl?: string) {
@@ -75,6 +100,7 @@ export class PackageViewModel {
     this.Verified = model.Verified;
     if (model.Version != "") this.Version = model.Version;
     this.Versions = model.Versions?.map((x) => x.Version).reverse() ?? [];
+    this.VersionDownloads = PackageViewModel.BuildVersionDownloads(model.Versions);
     this._tags = model.Tags;
     this.Model = model;
     if (sourceUrl) this.SourceUrl = sourceUrl;

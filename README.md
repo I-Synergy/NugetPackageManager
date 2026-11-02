@@ -131,7 +131,7 @@ Search nuget.org (or any configured feed) and install packages into your project
 - **Source dropdown** — filter to a specific feed or search across all
 - **Prerelease toggle** — include pre-release versions in results
 - **Package list** (left pane) — click any row to load full details
-- **Detail panel** (right pane) — description, authors, download count, license, tags, version picker, and per-project install/uninstall buttons
+- **Detail panel** (right pane) — description with total and current-version downloads, authors, license, tags, dependency groups, a **Frameworks** tab listing declared and compatible target frameworks, version picker, and per-project install/uninstall buttons
 - **Project rows** — show the currently installed version per project; install, update to a specific version, or uninstall individually
 - **Spinner** — while an install or update runs, an animated spinner replaces the action button, making it clear which package is being processed
 - **Error recovery** — if the package feed fails to load, a retry button appears inline

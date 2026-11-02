@@ -3,6 +3,7 @@ import coreProcess from "./core-process";
 import LocalNuGetFeed from "./local-feed";
 import type {
   GetPackageDetailsResponse,
+  GetPackageFrameworksResponse,
   GetPackageResponse,
   GetPackagesResponse,
   INuGetSourceApi,
@@ -77,6 +78,24 @@ export default class SidecarSourceApi implements INuGetSourceApi {
     }
 
     const data = await this.CallAsync<PackageDetails>("getPackageDetails", { id: packageId, version }, signal);
+    return { data };
+  }
+
+  /**
+   * Always goes through the core, local sources included: NuGet.Protocol's repository
+   * opens a folder feed's `.nupkg` the same way it opens a remote one, and a failure
+   * there is reported to the caller rather than turned into an empty list.
+   */
+  public async GetPackageFrameworksAsync(
+    packageId: string,
+    version: string,
+    signal?: AbortSignal
+  ): Promise<GetPackageFrameworksResponse> {
+    const data = await this.CallAsync<PackageFrameworks>(
+      "getPackageFrameworks",
+      { id: packageId, version },
+      signal
+    );
     return { data };
   }
 

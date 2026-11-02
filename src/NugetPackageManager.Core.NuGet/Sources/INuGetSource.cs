@@ -21,6 +21,15 @@ public interface INuGetSource
         string version,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Supported frameworks for one package version, declared and compatible (the nuget.org
+    /// Frameworks tab). Throws <c>packageNotFound</c> when the version cannot be obtained.
+    /// </summary>
+    Task<PackageFrameworks> GetPackageFrameworksAsync(
+        string id,
+        string version,
+        CancellationToken cancellationToken);
+
     /// <summary>Drops cached package metadata, for one id or (null) for everything.</summary>
     void ClearPackageCache(string? packageId = null);
 }
