@@ -211,6 +211,71 @@ suite('PackageRow Component', () => {
         assert.ok(arrow, 'Update arrow should be visible');
     });
 
+    test('renders the update arrow as a button naming the target version', async () => {
+        const pkg = createPackageViewModel({
+            InstalledVersion: '1.0.0',
+            Version: '1.2.3',
+            Status: 'Detailed'
+        });
+        packageRow.package = pkg;
+        packageRow.showInstalledVersion = true;
+
+        await packageRow.updateComplete;
+
+        const button = packageRow.shadowRoot?.querySelector('.update-indicator') as HTMLButtonElement | null;
+        assert.ok(button, 'the arrow should be a real button');
+        assert.strictEqual(button.tagName, 'BUTTON');
+        assert.strictEqual(button.getAttribute('aria-label'), 'Update Test.Package to 1.2.3');
+        assert.ok(button.getAttribute('title')?.includes('1.2.3'));
+        assert.ok(button.querySelector('.codicon-arrow-circle-up'), 'the button keeps the arrow glyph');
+    });
+
+    test('clicking the arrow requests an update and does not reach the row handler', async () => {
+        const pkg = createPackageViewModel({
+            InstalledVersion: '1.0.0',
+            Version: '1.2.3',
+            Status: 'Detailed'
+        });
+        packageRow.package = pkg;
+        packageRow.showInstalledVersion = true;
+
+        await packageRow.updateComplete;
+
+        const requested: PackageViewModel[] = [];
+        const rowClicks: Event[] = [];
+        packageRow.addEventListener('package-update-requested', (e) => {
+            requested.push((e as CustomEvent<{ package: PackageViewModel }>).detail.package);
+        });
+        // Mimics the Installed tab's row-level `@click` → SelectPackageAsync binding.
+        packageRow.addEventListener('click', (e) => rowClicks.push(e));
+
+        const button = packageRow.shadowRoot?.querySelector('.update-indicator') as HTMLButtonElement;
+        button.click();
+
+        assert.strictEqual(requested.length, 1, 'the arrow dispatches package-update-requested');
+        assert.strictEqual(requested[0], pkg);
+        assert.strictEqual(rowClicks.length, 0, 'the row click handler must not also fire');
+    });
+
+    test('renders a spinner instead of the update button while updating', async () => {
+        const pkg = createPackageViewModel({
+            InstalledVersion: '1.0.0',
+            Version: '1.2.3',
+            Status: 'Detailed'
+        });
+        packageRow.package = pkg;
+        packageRow.showInstalledVersion = true;
+        packageRow.updating = true;
+
+        await packageRow.updateComplete;
+
+        const shadowRoot = packageRow.shadowRoot;
+        assert.strictEqual(shadowRoot?.querySelector('.update-indicator'), null, 'no button while updating');
+        const spinner = shadowRoot?.querySelector('.spinner');
+        assert.ok(spinner, 'a spinner signals the in-flight update');
+        assert.strictEqual(spinner?.getAttribute('aria-label'), 'Updating Test.Package');
+    });
+
     test('should NOT show update arrow when versions match', async () => {
         const pkg = createPackageViewModel({
             InstalledVersion: '1.0.0',

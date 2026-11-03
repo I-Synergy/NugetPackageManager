@@ -144,6 +144,7 @@ Shows every package installed across all selected projects. Select a package to 
 - **Remove from all projects** — removes the package reference from every project in the solution, confirms the project list first, and restores once after the removals
 - **CPM cleanup** — when the last project reference is removed, the matching `PackageVersion` entry is deleted from `Directory.Packages.props` so no stale global reference remains
 - **Version changes** — install, update, or change a package version per project without leaving the package list
+- **Update from the row** — the up arrow next to a row's version updates the package to that version across every project that uses it (a framework-scoped row updates only its framework line)
 - **Framework filter** — collapses platform TFMs (windows, android, ios) to their base `.NET` line. **Shared** is a separate option, so unconditional versions are never mixed into a `.NET`-specific update run.
 
 

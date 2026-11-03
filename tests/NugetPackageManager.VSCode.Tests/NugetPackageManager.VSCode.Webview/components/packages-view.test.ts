@@ -50,6 +50,15 @@ function jobStatus(jobId: string): GetJobResponse {
             Response: { Packages: [] },
         };
     }
+    if (jobId === 'job-batch-update') {
+        return {
+            Kind: 'batchUpdate',
+            State: 'completed',
+            Stage: 'Completed',
+            Percent: 100,
+            Response: { Results: [] },
+        };
+    }
     return {
         Kind: 'workspaceScan',
         State: 'completed',
@@ -75,6 +84,8 @@ suite('PackagesView Component', () => {
             startWorkspaceScanAsync: sandbox.stub().resolves(ok({ JobId: 'job-workspace-scan' })),
             // The update count comes from the outdated scan job, not from the direct request.
             startOutdatedScanAsync: sandbox.stub().resolves(ok({ JobId: 'job-outdated-scan' })),
+            // An Installed row's up arrow writes through the batch update job.
+            startBatchUpdateAsync: sandbox.stub().resolves(ok({ JobId: 'job-batch-update' })),
             getJobAsync: sandbox.stub().callsFake(async ({ JobId }: { JobId: string }) => ok(jobStatus(JobId))),
             getVulnerablePackagesAsync: sandbox.stub().resolves(ok({ Packages: [] })),
             getOutdatedPackagesAsync: sandbox.stub().resolves(ok({ Packages: [] })),
@@ -936,21 +947,195 @@ suite('PackagesView Component', () => {
         });
     });
 
-    suite('Installed framework groups', () => {
-        function renderInstalledTab(): HTMLElement {
-            const template = (packagesView as unknown as { renderInstalledTab(): unknown }).renderInstalledTab();
-            const host = document.createElement('div');
-            render(template as TemplateResult, host);
-            return host;
+    /** Renders the Installed tab template into a detached host element. */
+    function renderInstalledTabTemplate(): HTMLElement {
+        const template = (packagesView as unknown as { renderInstalledTab(): unknown }).renderInstalledTab();
+        const host = document.createElement('div');
+        render(template as TemplateResult, host);
+        return host;
+    }
+
+    suite('Installed row update', () => {
+        type InstalledInternals = {
+            installedUpdateStatus: string;
+            installedUpdateError: string;
+            _connected: boolean;
+        };
+
+        const internals = (): InstalledInternals =>
+            packagesView as unknown as InstalledInternals;
+
+        const installedRow = (overrides: Partial<Package> = {}): PackageViewModel =>
+            new PackageViewModel(createMockPackage({
+                Id: 'Pkg.A',
+                Name: 'Pkg.A',
+                InstalledVersion: '1.0.0',
+                Version: '2.0.0',
+                ...overrides,
+            }));
+
+        function batchRequest(): {
+            Transactional?: boolean;
+            Updates: Array<{
+                PackageId: string;
+                Version: string;
+                ProjectPaths: string[];
+                CpmCondition?: string;
+                CpmTfm?: string;
+                Scope?: string;
+            }>;
+        } {
+            const stub = mockHostApi.startBatchUpdateAsync as sinon.SinonStub;
+            assert.ok(stub.calledOnce, 'the row click starts exactly one batch update job');
+            return stub.firstCall.args[0];
         }
 
+        function sorted(paths: string[]): string[] {
+            return [...paths].sort((a, b) => a.localeCompare(b));
+        }
+
+        /** A project package carrying conditional CPM resolutions for one TFM. */
+        function cpmProjectPackage(id: string, tfm: string, condition: string): ProjectPackage {
+            return {
+                Id: id,
+                Version: '1.0.0',
+                IsPinned: false,
+                VersionSource: 'central',
+                CpmResolutions: [{
+                    Tfm: tfm,
+                    Version: '1.0.0',
+                    Condition: condition,
+                    ConditionLabel: tfm,
+                    Matched: true,
+                }],
+            };
+        }
+
+        test('an unconditional row updates every project that has the package', async () => {
+            const projectA = new ProjectViewModel(createMockProject('A', [{ Id: 'Pkg.A', Version: '1.0.0' }]));
+            const projectB = new ProjectViewModel(createMockProject('B', [
+                { Id: 'Pkg.A', Version: '1.0.0' },
+                { Id: 'Unrelated', Version: '1.0.0' },
+            ]));
+            const projectC = new ProjectViewModel(createMockProject('C', [{ Id: 'Unrelated', Version: '1.0.0' }]));
+            packagesView.projects = [projectA, projectB, projectC];
+
+            await packagesView.UpdateInstalledPackageAsync(installedRow());
+
+            const request = batchRequest();
+            assert.strictEqual(request.Transactional, true, 'the write is one transaction');
+            assert.strictEqual(request.Updates.length, 1);
+            const entry = request.Updates[0]!;
+            assert.strictEqual(entry.PackageId, 'Pkg.A');
+            assert.strictEqual(entry.Version, '2.0.0', 'the arrow writes the version it advertises');
+            assert.strictEqual(entry.Scope, 'unconditional');
+            assert.deepStrictEqual(
+                sorted(entry.ProjectPaths),
+                sorted([projectA.Path, projectB.Path]),
+                'only the projects that carry the package are touched'
+            );
+            assert.strictEqual(internals().installedUpdateStatus, 'Updated Pkg.A to 2.0.0');
+            assert.strictEqual(internals().installedUpdateError, '');
+        });
+
+        test('a framework-scoped row sends its condition and only the projects resolving that TFM', async () => {
+            const net8Condition = "'$(TargetFramework)' == 'net8.0'";
+            const net9Condition = "'$(TargetFramework)' == 'net9.0'";
+            const projectA = new ProjectViewModel(createMockProject('A', [
+                cpmProjectPackage('Pkg.A', 'net8.0', net8Condition),
+            ]));
+            const projectB = new ProjectViewModel(createMockProject('B', [
+                cpmProjectPackage('Pkg.A', 'net9.0', net9Condition),
+            ]));
+            const projectC = new ProjectViewModel(createMockProject('C', [{ Id: 'Unrelated', Version: '1.0.0' }]));
+            packagesView.projects = [projectA, projectB, projectC];
+
+            const row = installedRow();
+            row.CpmFramework = 'net8.0';
+
+            await packagesView.UpdateInstalledPackageAsync(row);
+
+            const request = batchRequest();
+            assert.strictEqual(request.Updates.length, 1);
+            const entry = request.Updates[0]!;
+            assert.strictEqual(entry.Version, '2.0.0');
+            assert.strictEqual(entry.Scope, 'group');
+            assert.strictEqual(entry.CpmCondition, net8Condition);
+            assert.strictEqual(entry.CpmTfm, 'net8.0');
+            assert.deepStrictEqual(entry.ProjectPaths, [projectA.Path]);
+        });
+
+        test('a rolled-back response sets the error and reports no success', async () => {
+            packagesView.projects = [
+                new ProjectViewModel(createMockProject('A', [{ Id: 'Pkg.A', Version: '1.0.0' }])),
+            ];
+            (mockHostApi.getJobAsync as sinon.SinonStub).resolves(ok({
+                Kind: 'batchUpdate',
+                State: 'completed',
+                Stage: 'Completed',
+                Percent: 100,
+                Response: {
+                    Results: [{ PackageId: 'Pkg.A', Success: false, Error: 'restore failed' }],
+                    RolledBack: true,
+                    RestoreError: 'restore failed',
+                },
+            }));
+
+            await packagesView.UpdateInstalledPackageAsync(installedRow());
+
+            assert.strictEqual(internals().installedUpdateStatus, '', 'a rollback is never reported as success');
+            assert.ok(
+                internals().installedUpdateError.includes('rolled back'),
+                `expected a rollback error, got "${internals().installedUpdateError}"`
+            );
+            assert.ok(internals().installedUpdateError.includes('restore failed'));
+        });
+
+        test('success refreshes the workspace', async () => {
+            packagesView.projects = [
+                new ProjectViewModel(createMockProject('A', [{ Id: 'Pkg.A', Version: '1.0.0' }])),
+            ];
+            internals()._connected = true;
+            const reload = sandbox.stub(packagesView, 'LoadProjectsAsync').resolves();
+
+            await packagesView.UpdateInstalledPackageAsync(installedRow());
+
+            assert.ok(reload.calledOnce, 'a successful update reloads the workspace');
+        });
+
+        test('excludes a pinned project and keeps the unpinned ones', async () => {
+            const pinnedPackage: ProjectPackage = {
+                Id: 'Pkg.A',
+                Version: '1.0.0',
+                IsPinned: true,
+                VersionSource: 'project',
+            };
+            const pinnedProject = new ProjectViewModel(createMockProject('Pinned', [pinnedPackage]));
+            const freeProject = new ProjectViewModel(createMockProject('Free', [
+                { Id: 'Pkg.A', Version: '1.0.0' },
+            ]));
+            packagesView.projects = [pinnedProject, freeProject];
+
+            await packagesView.UpdateInstalledPackageAsync(installedRow());
+
+            const request = batchRequest();
+            assert.strictEqual(request.Updates.length, 1);
+            assert.deepStrictEqual(
+                request.Updates[0]!.ProjectPaths,
+                [freeProject.Path],
+                'a pinned [x.y.z] reference is left alone'
+            );
+        });
+    });
+
+    suite('Installed framework groups', () => {
         test('renders no group header when every installed package is in one framework line', () => {
             packagesView.projectsPackages = [
                 new PackageViewModel(createMockPackage({ Id: 'Pkg.A', Name: 'Pkg.A', InstalledVersion: '1.0.0' })),
                 new PackageViewModel(createMockPackage({ Id: 'Pkg.B', Name: 'Pkg.B', InstalledVersion: '1.0.0' })),
             ];
 
-            const host = renderInstalledTab();
+            const host = renderInstalledTabTemplate();
 
             assert.strictEqual(
                 host.querySelectorAll('.group-header').length,
