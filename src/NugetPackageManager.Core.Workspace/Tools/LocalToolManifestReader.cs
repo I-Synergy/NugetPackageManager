@@ -135,54 +135,75 @@ public static class LocalToolManifestReader
 
         foreach (var entry in toolsElement.EnumerateObject())
         {
-            var id = entry.Name;
+            ReadTool(entry, ids, commands, tools, problems);
+        }
+    }
 
-            if (string.IsNullOrWhiteSpace(id))
+    /// <summary>Reads one <c>tools</c> entry, recording what is wrong with it as a problem.</summary>
+    private static void ReadTool(
+        JsonProperty entry,
+        HashSet<string> ids,
+        Dictionary<string, string> commands,
+        List<LocalToolDefinition> tools,
+        List<string> problems)
+    {
+        var id = entry.Name;
+
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            problems.Add("The manifest declares a tool with an empty id.");
+            return;
+        }
+
+        if (!ids.Add(id))
+        {
+            problems.Add($"The manifest declares tool '{id}' more than once.");
+            return;
+        }
+
+        if (entry.Value.ValueKind != JsonValueKind.Object)
+        {
+            problems.Add($"Tool '{id}' is not a JSON object.");
+            return;
+        }
+
+        var version = ReadScalar(entry.Value, "version");
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            problems.Add($"Tool '{id}' has no `version`.");
+            version = string.Empty;
+        }
+
+        var toolCommands = ReadCommands(id, entry.Value, problems);
+        RecordCommands(id, toolCommands, commands, problems);
+
+        tools.Add(new LocalToolDefinition
+        {
+            Id = id,
+            Version = version,
+            Commands = toolCommands,
+            RollForward = ReadRollForward(id, entry.Value, problems),
+        });
+    }
+
+    /// <summary>Claims each command name for <paramref name="id"/>, reporting clashes in order.</summary>
+    private static void RecordCommands(
+        string id,
+        List<string> toolCommands,
+        Dictionary<string, string> commands,
+        List<string> problems)
+    {
+        foreach (var command in toolCommands)
+        {
+            if (commands.TryGetValue(command, out var owner))
             {
-                problems.Add("The manifest declares a tool with an empty id.");
+                problems.Add(owner == id
+                    ? $"Tool '{id}' declares command '{command}' more than once."
+                    : $"Command '{command}' is declared by both '{owner}' and '{id}'.");
                 continue;
             }
 
-            if (!ids.Add(id))
-            {
-                problems.Add($"The manifest declares tool '{id}' more than once.");
-                continue;
-            }
-
-            if (entry.Value.ValueKind != JsonValueKind.Object)
-            {
-                problems.Add($"Tool '{id}' is not a JSON object.");
-                continue;
-            }
-
-            var version = ReadScalar(entry.Value, "version");
-            if (string.IsNullOrWhiteSpace(version))
-            {
-                problems.Add($"Tool '{id}' has no `version`.");
-                version = string.Empty;
-            }
-
-            var toolCommands = ReadCommands(id, entry.Value, problems);
-            foreach (var command in toolCommands)
-            {
-                if (commands.TryGetValue(command, out var owner))
-                {
-                    problems.Add(owner == id
-                        ? $"Tool '{id}' declares command '{command}' more than once."
-                        : $"Command '{command}' is declared by both '{owner}' and '{id}'.");
-                    continue;
-                }
-
-                commands[command] = id;
-            }
-
-            tools.Add(new LocalToolDefinition
-            {
-                Id = id,
-                Version = version,
-                Commands = toolCommands,
-                RollForward = ReadRollForward(id, entry.Value, problems),
-            });
+            commands[command] = id;
         }
     }
 

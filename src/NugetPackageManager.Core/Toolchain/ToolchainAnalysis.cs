@@ -271,57 +271,76 @@ public static partial class ToolchainAnalysis
 
             if (manifest.Problems.Count > 0)
             {
-                issues.Add(new ToolchainIssueInfo
-                {
-                    Kind = LocalToolManifestInvalidKind,
-                    Summary =
-                        $"{manifest.ManifestPath} is not a usable tool manifest: {manifest.Problems[0]}",
-                    Hint =
-                        "Fix the manifest and run `dotnet tool restore` in that folder: every local tool command there fails until it parses.",
-                    Detail = string.Join("\n", manifest.Problems),
-                });
+                AddInvalidManifestIssue(manifest, issues);
             }
 
-            var missing = new List<string>();
-            foreach (var tool in manifest.Tools)
+            var missing = CollectMissingTools(manifest, notRestored);
+            if (missing.Count > 0)
             {
-                // Only a completed probe says anything: an unprobed tool is unknown, not missing.
-                if (tool.Restored != false || string.IsNullOrWhiteSpace(tool.Id))
-                {
-                    continue;
-                }
-
-                missing.Add($"{tool.Id} ({tool.Version})");
-
-                if (!notRestored.Contains(tool.Id, StringComparer.OrdinalIgnoreCase))
-                {
-                    notRestored.Add(tool.Id);
-                }
+                AddNotRestoredIssue(manifest, missing, issues);
             }
-
-            if (missing.Count == 0)
-            {
-                continue;
-            }
-
-            issues.Add(new ToolchainIssueInfo
-            {
-                Kind = LocalToolNotRestoredKind,
-                Summary =
-                    $"{missing.Count} local tool(s) in {manifest.ManifestPath} are not restored on this machine: " +
-                    $"{string.Join(", ", missing)}.",
-                Hint =
-                    "Run `dotnet tool restore` in that folder. This is a best-effort check of the global packages folder on this machine, not proof the tool runs on every platform.",
-                Detail =
-                    "`dotnet tool list --local` reads the manifest and does not prove the package was downloaded; " +
-                    "the probe looks for the package version in the global packages folder.",
-            });
         }
 
         return new LocalToolFindings(
             manifests.Count > 0 ? manifests : null,
             notRestored.Count > 0 ? notRestored : null,
             issues);
+    }
+
+    private static void AddInvalidManifestIssue(LocalToolProbe manifest, List<ToolchainIssueInfo> issues)
+    {
+        issues.Add(new ToolchainIssueInfo
+        {
+            Kind = LocalToolManifestInvalidKind,
+            Summary =
+                $"{manifest.ManifestPath} is not a usable tool manifest: {manifest.Problems[0]}",
+            Hint =
+                "Fix the manifest and run `dotnet tool restore` in that folder: every local tool command there fails until it parses.",
+            Detail = string.Join("\n", manifest.Problems),
+        });
+    }
+
+    /// <summary>The <c>id (version)</c> entries this manifest declares but the probe did not restore.</summary>
+    private static List<string> CollectMissingTools(LocalToolProbe manifest, List<string> notRestored)
+    {
+        var missing = new List<string>();
+
+        foreach (var tool in manifest.Tools)
+        {
+            // Only a completed probe says anything: an unprobed tool is unknown, not missing.
+            if (tool.Restored != false || string.IsNullOrWhiteSpace(tool.Id))
+            {
+                continue;
+            }
+
+            missing.Add($"{tool.Id} ({tool.Version})");
+
+            if (!notRestored.Contains(tool.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                notRestored.Add(tool.Id);
+            }
+        }
+
+        return missing;
+    }
+
+    private static void AddNotRestoredIssue(
+        LocalToolProbe manifest,
+        List<string> missing,
+        List<ToolchainIssueInfo> issues)
+    {
+        issues.Add(new ToolchainIssueInfo
+        {
+            Kind = LocalToolNotRestoredKind,
+            Summary =
+                $"{missing.Count} local tool(s) in {manifest.ManifestPath} are not restored on this machine: " +
+                $"{string.Join(", ", missing)}.",
+            Hint =
+                "Run `dotnet tool restore` in that folder. This is a best-effort check of the global packages folder on this machine, not proof the tool runs on every platform.",
+            Detail =
+                "`dotnet tool list --local` reads the manifest and does not prove the package was downloaded; " +
+                "the probe looks for the package version in the global packages folder.",
+        });
     }
 
     private const string LocalToolManifestInvalidKind = "LocalToolManifestInvalid";

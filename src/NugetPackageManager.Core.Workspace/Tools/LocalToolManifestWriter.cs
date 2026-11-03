@@ -222,39 +222,57 @@ public static class LocalToolManifestWriter
                 continue;
             }
 
-            if (tokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
+            if (TryReadContainerToken(tokenType, containers, ref pendingName))
             {
-                containers.Add(tokenType == JsonTokenType.StartObject ? pendingName : null);
-                pendingName = null;
                 continue;
             }
 
-            if (tokenType is JsonTokenType.EndObject or JsonTokenType.EndArray)
+            if (tokenType == JsonTokenType.String && IsToolVersion(containers, pendingName, toolId))
             {
-                if (containers.Count > 0)
-                {
-                    containers.RemoveAt(containers.Count - 1);
-                }
-
-                pendingName = null;
-                continue;
-            }
-
-            if (tokenType == JsonTokenType.String)
-            {
-                if (IsToolVersion(containers, pendingName, toolId))
-                {
-                    valueStart = (int)reader.TokenStartIndex;
-                    valueEnd = (int)reader.BytesConsumed;
-                    currentVersion = reader.GetString();
-                    return true;
-                }
+                valueStart = (int)reader.TokenStartIndex;
+                valueEnd = (int)reader.BytesConsumed;
+                currentVersion = reader.GetString();
+                return true;
             }
 
             pendingName = null;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Pushes or pops the container stack for a structure token, clearing the pending property
+    /// name either way. False for every other token, which the caller then inspects itself.
+    /// </summary>
+    private static bool TryReadContainerToken(
+        JsonTokenType tokenType,
+        List<string?> containers,
+        ref string? pendingName)
+    {
+        if (tokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
+        {
+            containers.Add(tokenType == JsonTokenType.StartObject ? pendingName : null);
+            pendingName = null;
+            return true;
+        }
+
+        if (tokenType is JsonTokenType.EndObject or JsonTokenType.EndArray)
+        {
+            PopContainer(containers);
+            pendingName = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void PopContainer(List<string?> containers)
+    {
+        if (containers.Count > 0)
+        {
+            containers.RemoveAt(containers.Count - 1);
+        }
     }
 
     /// <summary>
@@ -352,67 +370,99 @@ public static class LocalToolManifestWriter
 
         if (original.ValueKind == JsonValueKind.Object)
         {
-            var originalProperties = original.EnumerateObject().ToList();
-            var updatedProperties = updated.EnumerateObject().ToList();
-
-            if (originalProperties.Count != updatedProperties.Count)
-            {
-                throw Changed(path, manifestPath);
-            }
-
-            for (var index = 0; index < originalProperties.Count; index++)
-            {
-                var before = originalProperties[index];
-                var after = updatedProperties[index];
-
-                if (!string.Equals(before.Name, after.Name, StringComparison.Ordinal))
-                {
-                    throw Changed(path, manifestPath);
-                }
-
-                var childPath = $"{path}/{before.Name}";
-                if (string.Equals(childPath, $"/tools/{toolId}/version", StringComparison.Ordinal))
-                {
-                    if (after.Value.ValueKind != JsonValueKind.String
-                        || !string.Equals(after.Value.GetString(), version, StringComparison.Ordinal))
-                    {
-                        throw Changed(childPath, manifestPath);
-                    }
-
-                    continue;
-                }
-
-                Compare(before.Value, after.Value, childPath, toolId, version, manifestPath);
-            }
-
+            CompareObject(original, updated, path, toolId, version, manifestPath);
             return;
         }
 
         if (original.ValueKind == JsonValueKind.Array)
         {
-            var originalItems = original.EnumerateArray().ToList();
-            var updatedItems = updated.EnumerateArray().ToList();
-
-            if (originalItems.Count != updatedItems.Count)
-            {
-                throw Changed(path, manifestPath);
-            }
-
-            for (var index = 0; index < originalItems.Count; index++)
-            {
-                Compare(
-                    originalItems[index],
-                    updatedItems[index],
-                    $"{path}[{index.ToString(CultureInfo.InvariantCulture)}]",
-                    toolId,
-                    version,
-                    manifestPath);
-            }
-
+            CompareArray(original, updated, path, toolId, version, manifestPath);
             return;
         }
 
         if (!string.Equals(original.GetRawText(), updated.GetRawText(), StringComparison.Ordinal))
+        {
+            throw Changed(path, manifestPath);
+        }
+    }
+
+    private static void CompareObject(
+        JsonElement original,
+        JsonElement updated,
+        string path,
+        string toolId,
+        string version,
+        string manifestPath)
+    {
+        var originalProperties = original.EnumerateObject().ToList();
+        var updatedProperties = updated.EnumerateObject().ToList();
+
+        if (originalProperties.Count != updatedProperties.Count)
+        {
+            throw Changed(path, manifestPath);
+        }
+
+        for (var index = 0; index < originalProperties.Count; index++)
+        {
+            var before = originalProperties[index];
+            var after = updatedProperties[index];
+
+            if (!string.Equals(before.Name, after.Name, StringComparison.Ordinal))
+            {
+                throw Changed(path, manifestPath);
+            }
+
+            var childPath = $"{path}/{before.Name}";
+            if (IsTargetVersion(childPath, toolId))
+            {
+                AssertTargetVersion(after.Value, version, childPath, manifestPath);
+                continue;
+            }
+
+            Compare(before.Value, after.Value, childPath, toolId, version, manifestPath);
+        }
+    }
+
+    private static void CompareArray(
+        JsonElement original,
+        JsonElement updated,
+        string path,
+        string toolId,
+        string version,
+        string manifestPath)
+    {
+        var originalItems = original.EnumerateArray().ToList();
+        var updatedItems = updated.EnumerateArray().ToList();
+
+        if (originalItems.Count != updatedItems.Count)
+        {
+            throw Changed(path, manifestPath);
+        }
+
+        for (var index = 0; index < originalItems.Count; index++)
+        {
+            Compare(
+                originalItems[index],
+                updatedItems[index],
+                $"{path}[{index.ToString(CultureInfo.InvariantCulture)}]",
+                toolId,
+                version,
+                manifestPath);
+        }
+    }
+
+    /// <summary>True for the one path the edit is allowed to change: the tool's pinned version.</summary>
+    private static bool IsTargetVersion(string path, string toolId) =>
+        string.Equals(path, $"/tools/{toolId}/version", StringComparison.Ordinal);
+
+    private static void AssertTargetVersion(
+        JsonElement value,
+        string version,
+        string path,
+        string manifestPath)
+    {
+        if (value.ValueKind != JsonValueKind.String
+            || !string.Equals(value.GetString(), version, StringComparison.Ordinal))
         {
             throw Changed(path, manifestPath);
         }
