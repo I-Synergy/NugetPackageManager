@@ -8,6 +8,26 @@
 
 ---
 
+## Completed: Installed row update arrow (2026-11-03)
+
+User report (screenshot): the circled up arrow next to an installed package version did nothing —
+it was a decorative `<span>`, so clicking only selected the row. Plan:
+`.ai/plans/installed-row-update-button.md`; record:
+`.ai/completed/installed-row-update-button.md`.
+
+- `package-row` renders the arrow as a real button (`.update-indicator`, title/aria-label naming
+  the target version), swaps it for a spinner while `updating`, and dispatches
+  `package-update-requested` with `stopPropagation()` so selection does not also fire.
+- `packages-view.UpdateInstalledPackageAsync` resolves targets from the same project scope the
+  Installed list used (`selectedProjectPaths`, else all), groups framework-scoped rows by the
+  matching `CpmResolutions` condition (`CpmCondition` + `CpmTfm` + `Scope: group`) and shared rows
+  as `Scope: unconditional`, skips pinned `[x.y.z]` references, and runs one
+  `runBatchUpdateJobAsync({ Transactional: true })`. Success reloads the workspace and the child
+  tabs; failure, cancellation and rollback surface in a status line under the Installed header.
+- Verification: `npm run typecheck` and `npm run lint` clean, `npm test` 484 passing,
+  `npm run quality` 7/8 — only `C# build` fails on this machine's missing
+  `C:\Program Files (x86)\Microsoft SDKs\NuGetPackages\` source (NU1301), unrelated to the change.
+
 ## Completed: large-workspace scans (2026-11-03)
 
 Trigger: on the `aspire` workspace (1 solution, 463 projects) the sidecar stopped answering

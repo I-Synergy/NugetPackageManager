@@ -161,6 +161,27 @@ const styles = css`
       cursor: pointer;
     }
 
+    .update-indicator {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--vscode-charts-green, #10b981);
+      cursor: pointer;
+      line-height: 1;
+
+      &:hover {
+        color: var(--vscode-focusBorder);
+      }
+
+      &:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 1px;
+      }
+    }
+
     .name-selectable:hover {
       text-decoration: underline;
     }
@@ -204,6 +225,7 @@ export class PackageRow extends LitElement {
   @property({ type: Boolean }) showVersion: boolean = true;
   @property({ type: Boolean }) showAuthors: boolean = true;
   @property({ type: Boolean }) selectable: boolean = false;
+  @property({ type: Boolean }) updating: boolean = false;
   @state() iconUrl: string | null = null;
 
   get resolvedIconUrl(): string {
@@ -221,6 +243,17 @@ export class PackageRow extends LitElement {
     if (!this.selectable) return;
     this.dispatchEvent(new CustomEvent("package-selected", {
       detail: { packageId: this.package.Id },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
+  private onUpdateClick(e: Event): void {
+    // The row's own click selects the package; a click on the arrow must only update it.
+    e.stopPropagation();
+    if (this.updating) return;
+    this.dispatchEvent(new CustomEvent("package-update-requested", {
+      detail: { package: this.package },
       bubbles: true,
       composed: true,
     }));
@@ -246,6 +279,16 @@ export class PackageRow extends LitElement {
       this.package.Version !== this.package.InstalledVersion &&
       this.package.AllowsUpdate;
 
+    const updateIndicator = this.updating
+      ? html`<span class="spinner small" role="status" aria-label="Updating ${this.package.Id}"></span>`
+      : html`<button
+          class="icon-btn update-indicator"
+          type="button"
+          title="Update ${this.package.Id} to ${this.package.Version}"
+          aria-label="Update ${this.package.Id} to ${this.package.Version}"
+          @click=${(e: Event) => this.onUpdateClick(e)}
+        ><span class="codicon codicon-arrow-circle-up"></span></button>`;
+
     return html`
       ${this.package.InstalledVersion}
       ${this.package.Status === "MissingDetails"
@@ -257,9 +300,7 @@ export class PackageRow extends LitElement {
             title="Failed to fetch package information"
           ></span>`
         : nothing}
-      ${hasUpdate
-        ? html`<span class="codicon codicon-arrow-circle-up"></span>`
-        : nothing}
+      ${hasUpdate ? updateIndicator : nothing}
     `;
   }
 

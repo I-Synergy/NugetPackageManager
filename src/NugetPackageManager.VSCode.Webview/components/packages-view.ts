@@ -4,13 +4,14 @@ import { customElement, state } from "lit/decorators.js";
 import Split from "split.js";
 import debounce from "lodash/debounce";
 import { hostApi, configuration } from "@/web/registrations";
-import { runOutdatedScanJobAsync, runProjectUpdateJobAsync, runWorkspaceScanJobAsync } from "@/web/jobs";
+import { runBatchUpdateJobAsync, runOutdatedScanJobAsync, runProjectUpdateJobAsync, runWorkspaceScanJobAsync } from "@/web/jobs";
 import { buildFrameworkOptions, getFrameworkGroupKey, matchesFrameworkSelection, shouldShowFrameworkGroups } from "@/common/framework";
 import { IsPrereleaseVersion } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { PackageViewModel, ProjectViewModel } from "../types";
+import type { BatchUpdateRequest } from "@/common/rpc/types";
 import type { FilterEvent, SearchBar } from "./search-bar";
 import type { UpdatesView } from "./updates-view";
 import type { ConsolidateView } from "./consolidate-view";
@@ -198,6 +199,16 @@ export class PackagesView extends LitElement {
 
           .installed-packages {
             flex-direction: column;
+          }
+
+          .installed-update-status {
+            margin: 4px 8px 0;
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
+          }
+
+          .installed-update-error {
+            color: var(--vscode-errorForeground);
           }
 
           .packages-container {
@@ -428,6 +439,9 @@ export class PackagesView extends LitElement {
   @state() private _consolidateFrameworkOptions: Array<{ value: string; label: string }> = [];
   @state() private _consolidateFramework = "";
   @state() private removingPackage = false;
+  @state() private updatingInstalledKeys = new Set<string>();
+  @state() private installedUpdateStatus = "";
+  @state() private installedUpdateError = "";
   private _removeJobId = "";
   private _removeCancelled = false;
   @state() private removeError = "";
@@ -1185,6 +1199,121 @@ export class PackagesView extends LitElement {
     `;
   }
 
+  /** Row identity for the Installed tab: the framework line is part of the row key. */
+  private installedRowKey(pkg: PackageViewModel): string {
+    return `${pkg.Id}\0${pkg.CpmFramework}`;
+  }
+
+  /**
+   * Builds the batch entries for one Installed row. A framework-scoped row touches only the
+   * projects whose CPM resolution carries that TFM, grouped by the resolution's raw `Condition`
+   * (the host needs it to target one conditional group). A shared row touches the projects with
+   * an unconditional resolution — or with no CPM resolutions at all.
+   */
+  private buildInstalledUpdateEntries(pkg: PackageViewModel): BatchUpdateRequest["Updates"] {
+    const projectsToUse =
+      this.selectedProjectPaths.length > 0
+        ? this.projects.filter((p) => this.selectedProjectPaths.includes(p.Path))
+        : this.projects;
+
+    const groups = new Map<string, string[]>();
+    for (const project of projectsToUse) {
+      const installed = project.Packages.find((p) => p.Id === pkg.Id);
+      // A pinned `[x.y.z]` reference is deliberately left alone, matching the project-row update arrow.
+      if (!installed || installed.IsPinned) continue;
+      const resolutions = installed.CpmResolutions ?? [];
+      if (pkg.CpmFramework !== "") {
+        const resolution = resolutions.find((r) => r.Tfm === pkg.CpmFramework);
+        // A framework-scoped row must never fall through to an unconditional write.
+        if (!resolution || !resolution.Condition) continue;
+        const paths = groups.get(resolution.Condition) ?? [];
+        paths.push(project.Path);
+        groups.set(resolution.Condition, paths);
+      } else {
+        if (resolutions.length > 0 && !resolutions.some((r) => r.Tfm === "")) continue;
+        const paths = groups.get("") ?? [];
+        paths.push(project.Path);
+        groups.set("", paths);
+      }
+    }
+
+    if (pkg.CpmFramework !== "") {
+      return [...groups].map(([condition, projectPaths]) => ({
+        PackageId: pkg.Id,
+        Version: pkg.Version,
+        ProjectPaths: projectPaths,
+        CpmCondition: condition,
+        CpmTfm: pkg.CpmFramework,
+        Scope: "group" as const,
+      }));
+    }
+
+    return [...groups].map(([, projectPaths]) => ({
+      PackageId: pkg.Id,
+      Version: pkg.Version,
+      ProjectPaths: projectPaths,
+      Scope: "unconditional" as const,
+    }));
+  }
+
+  /**
+   * Updates one Installed row to the version its arrow advertises, across the projects that
+   * actually carry it. The whole write is one transactional host job: snapshot, restore and
+   * rollback come for free.
+   */
+  async UpdateInstalledPackageAsync(pkg: PackageViewModel): Promise<void> {
+    const key = this.installedRowKey(pkg);
+    if (this.updatingInstalledKeys.has(key) || !pkg.Version) return;
+    const Updates = this.buildInstalledUpdateEntries(pkg);
+    if (Updates.length === 0) return;
+
+    this.updatingInstalledKeys = new Set([...this.updatingInstalledKeys, key]);
+    this.installedUpdateError = "";
+    this.installedUpdateStatus = `Updating ${pkg.Id} to ${pkg.Version}…`;
+    try {
+      const result = await runBatchUpdateJobAsync({ Transactional: true, Updates });
+      if (!result.ok) {
+        this.installedUpdateStatus = "";
+        this.installedUpdateError = `Failed to update ${pkg.Id}: ${result.error}`;
+        return;
+      }
+      const response = result.value;
+      if (response.Cancelled) {
+        this.installedUpdateStatus = "";
+        this.installedUpdateError = `Update of ${pkg.Id} was cancelled — the versions already written were rolled back`;
+        return;
+      }
+      const failed = response.Results.find((r) => !r.Success);
+      if (response.RolledBack || failed) {
+        const reason = response.RestoreError ?? response.RollbackError ?? failed?.Error ?? "";
+        const suffix = reason ? `: ${reason}` : "";
+        this.installedUpdateStatus = "";
+        this.installedUpdateError = response.RolledBack
+          ? `Update of ${pkg.Id} was rolled back${suffix}`
+          : `Failed to update ${pkg.Id}${suffix}`;
+        return;
+      }
+      this.installedUpdateStatus = `Updated ${pkg.Id} to ${pkg.Version}`;
+      await this.onPackagesUpdatedAsync();
+    } finally {
+      const remaining = new Set(this.updatingInstalledKeys);
+      remaining.delete(key);
+      this.updatingInstalledKeys = remaining;
+      this.requestUpdate();
+    }
+  }
+
+  /** Compact result line under the Installed header: the error, else the last status. */
+  private renderInstalledUpdateStatus(): unknown {
+    if (this.installedUpdateError) {
+      return html`<div class="installed-update-status installed-update-error">${this.installedUpdateError}</div>`;
+    }
+    if (this.installedUpdateStatus) {
+      return html`<div class="installed-update-status">${this.installedUpdateStatus}</div>`;
+    }
+    return nothing;
+  }
+
   private renderInstalledTab(): unknown {
     const packages = this.filteredInstalledPackages;
     const groups = this.groupedInstalledPackages;
@@ -1206,6 +1335,7 @@ export class PackagesView extends LitElement {
             </button>
           </div>
         </div>
+        ${this.renderInstalledUpdateStatus()}
         ${packages.length === 0 && this.projectsPackages.length > 0
           ? html`
               <div class="empty">
@@ -1231,6 +1361,8 @@ export class PackagesView extends LitElement {
                       .showInstalledVersion=${true}
                       .package=${pkg}
                       .revision=${pkg.Revision}
+                      .updating=${this.updatingInstalledKeys.has(this.installedRowKey(pkg))}
+                      @package-update-requested=${async (e: CustomEvent<{ package: PackageViewModel }>) => await this.UpdateInstalledPackageAsync(e.detail.package)}
                       @click=${async () => await this.SelectPackageAsync(pkg)}
                     ></package-row>
                   `
