@@ -790,22 +790,28 @@ suite('UpdatesView', () => {
         assert.strictEqual(view.statusText, '');
     });
 
-    test('requests the cached scan before the live scan', async () => {
-        const requests: boolean[] = [];
+    test('requests the cached scan before the live job', async () => {
+        const cachedRequests: boolean[] = [];
+        const jobRequests: GetOutdatedPackagesRequest[] = [];
         Object.defineProperty(registrations, 'hostApi', {
             value: {
+                // Only the pre-paint cache read still uses the request/response call.
                 getOutdatedPackagesAsync: async (request: GetOutdatedPackagesRequest) => {
-                    requests.push(request.PreferCache === true);
+                    cachedRequests.push(request.PreferCache === true);
                     return ok({ Packages: [], FromCache: request.PreferCache === true });
                 },
-                startBatchUpdateAsync: async () => ok({ JobId: 'job-unused' }),
+                startOutdatedScanAsync: async (request: GetOutdatedPackagesRequest) => {
+                    jobRequests.push(request);
+                    return ok({ JobId: 'job-outdated' });
+                },
                 getJobAsync: async () => ok({
-                    Kind: 'batchUpdate',
+                    Kind: 'outdatedScan',
                     State: 'completed',
                     Stage: 'Completed',
                     Percent: 100,
-                    Response: { Results: [] },
+                    Response: { Packages: [] },
                 }),
+                startBatchUpdateAsync: async () => ok({ JobId: 'job-unused' }),
                 restoreProjectsAsync: async () => ok(undefined),
                 updateBadgeAsync: async () => ok(undefined),
                 getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
@@ -816,7 +822,145 @@ suite('UpdatesView', () => {
 
         await view.LoadOutdatedPackagesAsync();
 
-        assert.deepStrictEqual(requests, [true, false]);
+        assert.deepStrictEqual(cachedRequests, [true], 'the cached scan is read, not scanned');
+        assert.strictEqual(jobRequests.length, 1, 'the live scan runs as one job');
+        assert.strictEqual(jobRequests[0]!.PreferCache, undefined, 'the live job scans');
+    });
+
+    test('a forced load starts one job and the following update starts none', async () => {
+        const requests: GetOutdatedPackagesRequest[] = [];
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                startOutdatedScanAsync: async (request: GetOutdatedPackagesRequest) => {
+                    requests.push(request);
+                    return ok({ JobId: 'job-forced' });
+                },
+                getJobAsync: async () => ok({
+                    Kind: 'outdatedScan',
+                    State: 'completed',
+                    Stage: 'Completed',
+                    Percent: 100,
+                    Response: { Packages: [] },
+                }),
+                getOutdatedPackagesAsync: async () => ok({ Packages: [] }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        view.projectPaths = ['/ws/A.csproj'];
+        await view.LoadOutdatedPackagesAsync(true);
+        assert.strictEqual(requests.length, 1, 'a forced load is exactly one job');
+        assert.strictEqual(requests[0]!.ForceReload, true, 'the forced load bypasses the host cache');
+
+        // The host update that follows used to differ from the args the run started with, which
+        // aborted the in-flight request and started a second one.
+        document.body.appendChild(view);
+        try {
+            await view.updateComplete;
+            await view.updateComplete;
+            assert.strictEqual(view.hasUpdated, true, 'the update cycle that checks the task args really ran');
+            assert.strictEqual(requests.length, 1, 'a re-render must not restart the scan');
+        } finally {
+            document.body.removeChild(view);
+        }
+    });
+
+    test('renders no error card when the job was cancelled', async () => {
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                startOutdatedScanAsync: async () => ok({ JobId: 'job-cancelled' }),
+                getJobAsync: async () => ok({
+                    Kind: 'outdatedScan',
+                    State: 'cancelled',
+                    Stage: 'Cancelled',
+                    Percent: 0,
+                }),
+                getOutdatedPackagesAsync: async () => ok({ Packages: [] }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadOutdatedPackagesAsync(true);
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+        assert.doesNotMatch(host.textContent ?? '', /Failed to check for updates/);
+    });
+
+    test('polls the scan job and paints its stage into the existing banner', async () => {
+        let polls = 0;
+        const seenStages: string[] = [];
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                startOutdatedScanAsync: async () => ok({ JobId: 'job-progress' }),
+                getJobAsync: async () => {
+                    polls += 1;
+                    if (polls === 1) {
+                        return ok({
+                            Kind: 'outdatedScan',
+                            State: 'running',
+                            Stage: 'Parsing projects (1/2)…',
+                            Percent: 20,
+                        });
+                    }
+                    // The job's last progress has already reached the banner by the next poll.
+                    seenStages.push(view.scanProgress?.Stage ?? '');
+                    return ok({
+                        Kind: 'outdatedScan',
+                        State: 'completed',
+                        Stage: 'Completed',
+                        Percent: 100,
+                        Response: { Packages: [] },
+                    });
+                },
+                getOutdatedPackagesAsync: async () => ok({ Packages: [] }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadOutdatedPackagesAsync(true);
+
+        assert.ok(polls >= 2, 'the view polls the job until it settles');
+        assert.strictEqual(seenStages[0], 'Parsing projects (1/2)…');
+        assert.strictEqual(view.scanProgress, null, 'the banner is cleared once the scan is over');
+    });
+
+    test('renders the host message when the job really failed', async () => {
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                startOutdatedScanAsync: async () => ok({ JobId: 'job-failed' }),
+                getJobAsync: async () => ok({
+                    Kind: 'outdatedScan',
+                    State: 'failed',
+                    Stage: 'Failed',
+                    Percent: 30,
+                    Error: 'NuGet feed unreachable',
+                }),
+                getOutdatedPackagesAsync: async () => ok({ Packages: [] }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadOutdatedPackagesAsync(true);
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+        const alert = host.querySelector('[role="alert"]');
+        assert.ok(alert, 'a real failure keeps the alert card');
+        assert.match(alert!.textContent ?? '', /Failed to check for updates/);
+        assert.match(alert!.textContent ?? '', /NuGet feed unreachable/, 'the host message is kept for diagnosis');
     });
 
     test('emits the tree badge payload with the blocked count', () => {

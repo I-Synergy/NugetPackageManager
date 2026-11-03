@@ -307,13 +307,19 @@ export type GetConfigurationResponse = {
 // ============================================================
 
 /**
- * Long mutations (batch update, single package update, consolidate, cleanup)
- * run as host-side jobs so no client deadline governs how long a
- * snapshot/write/restore sequence may take. The webview starts a job, polls
- * `getJobAsync` for stage + percent, and reads the final response once the job
- * is no longer `running`.
+ * Long operations (batch update, single package update, consolidate, cleanup,
+ * the workspace scan and the outdated-package scan) run as host-side jobs so no
+ * client deadline governs how long a snapshot/parse/write/restore sequence may
+ * take. The webview starts a job, polls `getJobAsync` for stage + percent, and
+ * reads the final response once the job is no longer `running`.
  */
-export type JobKind = "batchUpdate" | "projectUpdate" | "consolidate" | "cleanup";
+export type JobKind =
+  | "batchUpdate"
+  | "projectUpdate"
+  | "consolidate"
+  | "cleanup"
+  | "workspaceScan"
+  | "outdatedScan";
 
 export type JobState = "running" | "completed" | "failed" | "cancelled";
 
@@ -342,7 +348,9 @@ export type GetJobResponse =
   | JobStatus<"batchUpdate", BatchUpdateResponse>
   | JobStatus<"projectUpdate", UpdateProjectResponse>
   | JobStatus<"consolidate", void>
-  | JobStatus<"cleanup", CleanupUnusedResponse>;
+  | JobStatus<"cleanup", CleanupUnusedResponse>
+  | JobStatus<"workspaceScan", GetProjectsResponse>
+  | JobStatus<"outdatedScan", GetOutdatedPackagesResponse>;
 
 // ============================================================
 // Wire Protocol (internal, over postMessage)
@@ -608,6 +616,8 @@ export interface HostAPI {
   startProjectUpdateAsync(req: UpdateProjectRequest): Promise<Result<StartJobResponse>>;
   startConsolidateAsync(req: ConsolidateRequest): Promise<Result<StartJobResponse>>;
   startCleanupAsync(req: CleanupUnusedRequest): Promise<Result<StartJobResponse>>;
+  startWorkspaceScanAsync(req: CacheControl): Promise<Result<StartJobResponse>>;
+  startOutdatedScanAsync(req: GetOutdatedPackagesRequest): Promise<Result<StartJobResponse>>;
   getJobAsync(req: JobRequest): Promise<Result<GetJobResponse>>;
   cancelJobAsync(req: JobRequest): Promise<Result<void>>;
   restoreProjectsAsync(req: RestoreProjectsRequest, signal?: AbortSignal): Promise<Result<void>>;

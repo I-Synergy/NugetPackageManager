@@ -3,7 +3,7 @@ import * as assert from 'assert';
 import * as sinon from 'sinon';
 import * as registrations from '@/web/registrations';
 import { ok, fail } from '@/common/rpc/result';
-import type { HostAPI } from '@/common/rpc/types';
+import type { GetJobResponse, HostAPI } from '@/common/rpc/types';
 import { PackagesView } from '@/web/components/packages-view';
 import { PackageViewModel, ProjectViewModel } from '@/web/types';
 
@@ -38,6 +38,26 @@ function createMockProject(name: string, packages: (ProjectPackage | { Id: strin
     };
 }
 
+/** The terminal status each mocked job reports, keyed by the id the view was handed. */
+function jobStatus(jobId: string): GetJobResponse {
+    if (jobId === 'job-outdated-scan') {
+        return {
+            Kind: 'outdatedScan',
+            State: 'completed',
+            Stage: 'Completed',
+            Percent: 100,
+            Response: { Packages: [] },
+        };
+    }
+    return {
+        Kind: 'workspaceScan',
+        State: 'completed',
+        Stage: 'Completed',
+        Percent: 100,
+        Response: { Projects: [] },
+    };
+}
+
 suite('PackagesView Component', () => {
     let packagesView: PackagesView;
     let sandbox: sinon.SinonSandbox;
@@ -50,6 +70,11 @@ suite('PackagesView Component', () => {
         mockHostApi = {
             getPackagesAsync: sandbox.stub().resolves(ok({ Packages: [] })),
             getProjectsAsync: sandbox.stub().resolves(ok({ Projects: [] })),
+            // The project tree loads through the workspace scan job, not through `getProjectsAsync`.
+            startWorkspaceScanAsync: sandbox.stub().resolves(ok({ JobId: 'job-workspace-scan' })),
+            // The update count comes from the outdated scan job, not from the direct request.
+            startOutdatedScanAsync: sandbox.stub().resolves(ok({ JobId: 'job-outdated-scan' })),
+            getJobAsync: sandbox.stub().callsFake(async ({ JobId }: { JobId: string }) => ok(jobStatus(JobId))),
             getVulnerablePackagesAsync: sandbox.stub().resolves(ok({ Packages: [] })),
             getOutdatedPackagesAsync: sandbox.stub().resolves(ok({ Packages: [] })),
             updateBadgeAsync: sandbox.stub().resolves(ok(undefined)),
@@ -208,13 +233,35 @@ suite('PackagesView Component', () => {
     });
 
     suite('LoadProjects', () => {
+        /**
+         * Programs the workspace scan job: the view starts it, then polls `getJobAsync` until it
+         * completes with `projects`.
+         */
+        function scanReturns(projects: Project[]): void {
+            (mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).resolves(
+                ok({ JobId: 'job-workspace-scan' })
+            );
+            (mockHostApi.getJobAsync as sinon.SinonStub).resolves(ok({
+                Kind: 'workspaceScan',
+                State: 'completed',
+                Stage: 'Completed',
+                Percent: 100,
+                Response: { Projects: projects },
+            }));
+        }
+
+        /** Reads the loading banner, which the view keeps private. */
+        function loadingMessage(): string {
+            return (packagesView as unknown as { projectsLoadingMessage: string }).projectsLoadingMessage;
+        }
+
         test('should call mediator with correct parameters', async () => {
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: [] }));
+            scanReturns([]);
 
             await packagesView.LoadProjectsAsync();
 
-            assert.ok((mockHostApi.getProjectsAsync as sinon.SinonStub).called);
-            const callArgs = (mockHostApi.getProjectsAsync as sinon.SinonStub).firstCall.args[0];
+            assert.ok((mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).called);
+            const callArgs = (mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).firstCall.args[0];
             assert.strictEqual(callArgs.ForceReload, false);
         });
 
@@ -224,7 +271,7 @@ suite('PackagesView Component', () => {
                 createMockProject('Project2', [{ Id: 'Pkg2', Version: '2.0.0' }])
             ];
 
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: mockProjects }));
+            scanReturns(mockProjects);
 
             await packagesView.LoadProjectsAsync();
 
@@ -234,12 +281,44 @@ suite('PackagesView Component', () => {
         });
 
         test('should pass ForceReload flag', async () => {
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: [] }));
+            scanReturns([]);
 
             await packagesView.LoadProjectsAsync(true);
 
-            const callArgs = (mockHostApi.getProjectsAsync as sinon.SinonStub).firstCall.args[0];
+            const callArgs = (mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).firstCall.args[0];
             assert.strictEqual(callArgs.ForceReload, true);
+        });
+
+        test('should show the scan stage while the projects load', async () => {
+            let polls = 0;
+            (mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).resolves(
+                ok({ JobId: 'job-workspace-scan' })
+            );
+            (mockHostApi.getJobAsync as sinon.SinonStub).callsFake(async () => {
+                polls += 1;
+                return polls === 1
+                    ? ok({
+                        Kind: 'workspaceScan',
+                        State: 'running',
+                        Stage: 'Parsing projects (2/5)…',
+                        Percent: 40,
+                    })
+                    : ok({
+                        Kind: 'workspaceScan',
+                        State: 'completed',
+                        Stage: 'Completed',
+                        Percent: 100,
+                        Response: { Projects: [] },
+                    });
+            });
+
+            const loading = packagesView.LoadProjectsAsync();
+            // The first poll is immediate; the next one waits for the poll interval.
+            await new Promise((resolve) => setTimeout(resolve, 50));
+
+            assert.strictEqual(loadingMessage(), 'Parsing projects (2/5)… — 40%');
+
+            await loading;
         });
     });
 
@@ -473,8 +552,15 @@ suite('PackagesView Component', () => {
             packagesView.updatesCount = 60;
 
             let releaseScan: ((value: unknown) => void) | undefined;
-            (mockHostApi.getOutdatedPackagesAsync as sinon.SinonStub)
+            (mockHostApi.startOutdatedScanAsync as sinon.SinonStub)
                 .returns(new Promise((resolve) => { releaseScan = resolve; }));
+            (mockHostApi.getJobAsync as sinon.SinonStub).callsFake(async () => ok({
+                Kind: 'outdatedScan',
+                State: 'completed',
+                Stage: 'Completed',
+                Percent: 100,
+                Response: { Packages: [{ Id: 'A' }, { Id: 'B' }] },
+            }));
 
             const pending = packagesView.UpdatePackagesFiltersAsync({
                 Prerelease: false,
@@ -487,41 +573,65 @@ suite('PackagesView Component', () => {
             assert.strictEqual(packagesView.updatesCount, null);
             assert.strictEqual(internals.updatesCountLoading, true);
 
-            releaseScan!(ok({ Packages: [{ Id: 'A' }, { Id: 'B' }] }));
+            releaseScan!(ok({ JobId: 'job-outdated-scan' }));
             await pending;
 
             assert.strictEqual(packagesView.updatesCount, 2);
             assert.strictEqual(internals.updatesCountLoading, false);
 
-            const scanRequest = (mockHostApi.getOutdatedPackagesAsync as sinon.SinonStub).firstCall.args[0];
+            const scanRequest = (mockHostApi.startOutdatedScanAsync as sinon.SinonStub).firstCall.args[0];
             assert.strictEqual(scanRequest.Prerelease, false);
             const badgeRequest = (mockHostApi.updateBadgeAsync as sinon.SinonStub).lastCall.args[0];
             assert.strictEqual(badgeRequest.Count, 2);
+        });
+
+        test('leaves the update count spinner off when the scan job is cancelled', async () => {
+            const internals = packagesView as unknown as {
+                _connected: boolean;
+                _allProjectPaths: string[];
+                updatesCountLoading: boolean;
+            };
+            internals._connected = true;
+            internals._allProjectPaths = ['/path/to/Project.csproj'];
+            packagesView.updatesCount = 60;
+            (packagesView as unknown as { updatesCountLoading: boolean }).updatesCountLoading = true;
+
+            (mockHostApi.getJobAsync as sinon.SinonStub).callsFake(async () => ok({
+                Kind: 'outdatedScan',
+                State: 'cancelled',
+                Stage: 'Cancelled',
+                Percent: 10,
+            }));
+
+            await (packagesView as unknown as { RefreshUpdateCountAsync(): Promise<void> })
+                .RefreshUpdateCountAsync();
+
+            assert.strictEqual(internals.updatesCountLoading, false, 'a cancel must not leave the spinner on');
+            assert.strictEqual(packagesView.updatesCount, 60, 'a cancelled scan keeps the previous count');
+            assert.ok((mockHostApi.updateBadgeAsync as sinon.SinonStub).notCalled);
         });
     });
 
     suite('ReloadInvoked', () => {
         test('should reload packages and projects', async () => {
             (mockHostApi.getPackagesAsync as sinon.SinonStub).resolves(ok({ Packages: [] }));
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: [] }));
 
             await packagesView.ReloadInvokedAsync();
 
             assert.ok((mockHostApi.getPackagesAsync as sinon.SinonStub).called);
-            assert.ok((mockHostApi.getProjectsAsync as sinon.SinonStub).called);
+            assert.ok((mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).called);
         });
 
         test('should pass forceReload flag', async () => {
             (mockHostApi.getPackagesAsync as sinon.SinonStub).resolves(ok({ Packages: [] }));
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: [] }));
 
             await packagesView.ReloadInvokedAsync(true);
 
             const getPackagesArgs = (mockHostApi.getPackagesAsync as sinon.SinonStub).firstCall.args[0];
             assert.strictEqual(getPackagesArgs.ForceReload, true);
 
-            const getProjectsArgs = (mockHostApi.getProjectsAsync as sinon.SinonStub).firstCall.args[0];
-            assert.strictEqual(getProjectsArgs.ForceReload, true);
+            const scanArgs = (mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).firstCall.args[0];
+            assert.strictEqual(scanArgs.ForceReload, true);
         });
     });
 
@@ -575,15 +685,13 @@ suite('PackagesView Component', () => {
 
     suite('OnProjectUpdated', () => {
         test('should reload all projects when CPM is enabled', async () => {
-            (mockHostApi.getProjectsAsync as sinon.SinonStub).resolves(ok({ Projects: [] }));
-
             const event = new CustomEvent('project-updated', {
                 detail: { isCpmEnabled: true }
             });
 
             await packagesView.OnProjectUpdatedAsync(event);
 
-            assert.ok((mockHostApi.getProjectsAsync as sinon.SinonStub).called);
+            assert.ok((mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).called);
         });
 
         test('should only refresh packages when CPM is not enabled', async () => {
@@ -604,8 +712,8 @@ suite('PackagesView Component', () => {
 
             await packagesView.OnProjectUpdatedAsync(event);
 
-            // Should call getPackage for installed packages, not getProjects
-            assert.ok((mockHostApi.getProjectsAsync as sinon.SinonStub).notCalled);
+            // Should call getPackage for installed packages, not rescan the workspace
+            assert.ok((mockHostApi.startWorkspaceScanAsync as sinon.SinonStub).notCalled);
         });
     });
 

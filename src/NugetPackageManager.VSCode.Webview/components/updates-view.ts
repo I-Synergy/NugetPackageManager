@@ -11,7 +11,8 @@ import { OutdatedPackageViewModel, PackageViewModel } from "../types";
 import type { GetOutdatedPackagesRequest, GetOutdatedPackagesResponse, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateConflict, DotnetFailureInfo } from "@/common/rpc/types";
 import { RangeLowerBound } from "@/common/package-range";
 import type { Result } from "@/common/rpc/result";
-import { runBatchUpdateJobAsync } from "@/web/jobs";
+import { CANCELLED_ERROR, isCancelledMessage } from "@/common/rpc/result";
+import { runBatchUpdateJobAsync, runOutdatedScanJobAsync } from "@/web/jobs";
 import "./package-row";
 import "./actionable-error";
 
@@ -403,6 +404,14 @@ export class UpdatesView extends LitElement {
   @property({ attribute: false }) availableFrameworks: Array<{ value: string; label: string }> = [];
 
   private _activeScanId: string = "";
+  /**
+   * The next run must bypass the host's cache.
+   *
+   * It travels through a field, not through the task's `args()`: `@lit/task` compares `args()`
+   * against the arguments a run started with and aborts the in-flight run when they differ, so a
+   * `forceReload` that lives in the args aborts every forced load on the next host update.
+   */
+  private _forceReloadNext = false;
   private _progressTimer: ReturnType<typeof setInterval> | undefined;
   private _progressPollInFlight = false;
   private _jobAbort: AbortController | undefined;
@@ -551,7 +560,11 @@ export class UpdatesView extends LitElement {
 
   private readonly _loadTask = new Task(this, {
 
-    task: async ([projectPaths, sourceUrl, prerelease, forceReload], { signal }) => {
+    task: async ([projectPaths, sourceUrl, prerelease], { signal }) => {
+      // Read and clear before the first await: a re-render during this run must not reset it for
+      // the run that is already in flight.
+      const forceReload = this._forceReloadNext;
+      this._forceReloadNext = false;
       const scanId = globalThis.crypto.randomUUID();
       this._activeScanId = scanId;
       this.scanProgress = {
@@ -562,11 +575,32 @@ export class UpdatesView extends LitElement {
       };
       this.startProgressPolling(scanId);
       try {
-        const result = await hostApi.getOutdatedPackagesAsync(
+        // The scan runs as a host job: a cold parse of a large repository (and the feed walk that
+        // follows) outgrows the RPC deadline, and a client deadline must never turn a healthy scan
+        // into "Failed to check for updates". `signal` only stops this view waiting.
+        const result = await runOutdatedScanJobAsync(
           this.buildRequest(projectPaths, sourceUrl, prerelease, forceReload, false, scanId),
-          signal
+          {
+            signal,
+            // The job's stage/percent feed the same banner the `ScanId` polling fills; the polling
+            // keeps the finer counts, so one banner is written, never two copies of the text.
+            onProgress: (progress) => {
+              if (this._activeScanId !== scanId) return;
+              this.scanProgress = {
+                Stage: progress.Stage,
+                Percent: progress.Percent,
+                Completed: this.scanProgress?.Completed ?? 0,
+                Total: this.scanProgress?.Total ?? 0,
+              };
+            },
+          }
         );
-        if (!result.ok) throw new Error("Failed to check for updates");
+        if (!result.ok) {
+          // A superseded run, a closed view or a cancelled job is not a scan failure: the host
+          // keeps scanning, and the next run paints its result.
+          if (isCancelledMessage(result.error)) throw new Error(CANCELLED_ERROR);
+          throw new Error(result.error);
+        }
         return result.value;
       } finally {
         if (this._activeScanId === scanId) {
@@ -577,7 +611,7 @@ export class UpdatesView extends LitElement {
         }
       }
     },
-    args: () => [this.projectPaths, this.sourceUrl, this.prerelease, false] as [string[], string, boolean, boolean],
+    args: () => [this.projectPaths, this.sourceUrl, this.prerelease] as [string[], string, boolean],
     onComplete: (response) => {
       this.applyScan(response, false);
     },
@@ -707,7 +741,8 @@ export class UpdatesView extends LitElement {
     }
 
     try {
-      await this._loadTask.run([this.projectPaths, this.sourceUrl, this.prerelease, forceReload]);
+      this._forceReloadNext = forceReload;
+      await this._loadTask.run();
     } catch (err) {
       this.isRefreshing = false;
       if (this.packages.length > 0) {
@@ -1403,12 +1438,22 @@ export class UpdatesView extends LitElement {
     `;
   }
 
+  private get loadErrorMessage(): string {
+    const error = this._loadTask.error;
+    if (error instanceof Error) return error.message;
+    return typeof error === "string" ? error : "";
+  }
+
   private renderError(): unknown {
     if (this._loadTask.status !== TaskStatus.ERROR) return nothing;
+    const message = this.loadErrorMessage;
+    // An aborted run is the view's own doing (a superseded request), not a failure to report.
+    if (isCancelledMessage(message)) return nothing;
     return html`
       <div class="error" role="alert">
         <span class="codicon codicon-error"></span>
-        Failed to check for updates
+        <div class="empty-title">Failed to check for updates</div>
+        ${message ? html`<div class="empty-hint">${message}</div>` : nothing}
       </div>
     `;
   }

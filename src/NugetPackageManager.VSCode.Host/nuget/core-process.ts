@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Logger } from "@/common/logger";
-import { CoreClient, CoreError } from "./core-client";
+import { CoreClient, CoreError, type CoreCallOptions } from "./core-client";
 
 /**
  * Owns the single C# core process for the extension host.
@@ -26,8 +26,13 @@ class CoreProcess {
     return this.dllPath !== undefined && fs.existsSync(this.dllPath);
   }
 
-  public async CallAsync<T>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
-    return this.GetClient().CallAsync<T>(method, params, signal);
+  public async CallAsync<T>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    options?: CoreCallOptions
+  ): Promise<T> {
+    return this.GetClient().CallAsync<T>(method, params, signal, options);
   }
 
   /** Fire-and-forget request whose failure is logged by the client. */

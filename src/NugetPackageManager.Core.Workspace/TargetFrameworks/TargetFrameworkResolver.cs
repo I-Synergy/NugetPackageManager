@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using NugetPackageManager.Common;
+using NugetPackageManager.Core.Workspace.Infrastructure;
 
 namespace NugetPackageManager.Core.Workspace.TargetFrameworks;
 
@@ -12,19 +13,30 @@ namespace NugetPackageManager.Core.Workspace.TargetFrameworks;
 /// Resolves the target frameworks a project actually builds for.
 ///
 /// Order matches the TypeScript resolver: a literal XML declaration first (cheap and
-/// unambiguous), then the restore record in <c>obj/project.assets.json</c>, then
-/// <c>dotnet msbuild -getProperty</c> (the only path that evaluates conditions), and finally a
-/// literal XML parse when evaluation fails.
+/// unambiguous), then the restore record in <c>obj/project.assets.json</c> (or Arcade's
+/// <c>artifacts/obj/&lt;name&gt;/project.assets.json</c>), then <c>dotnet msbuild -getProperty</c>
+/// (the only path that evaluates conditions), and finally a literal XML parse when evaluation
+/// fails.
 /// </summary>
-public sealed partial class TargetFrameworkResolver : IDisposable
+/// <param name="gate">
+/// The gate to wait on before spawning <c>dotnet msbuild</c>; <c>null</c> means
+/// <see cref="MsBuildProcessGate.Shared"/>.
+/// The caller keeps ownership, so this instance never disposes it.
+/// </param>
+public sealed partial class TargetFrameworkResolver(MsBuildProcessGate? gate = null) : IDisposable
 {
-    private const int MaxCacheEntries = 500;
+    // One entry per project (and per target framework, since the key carries it), so a bound of 500
+    // made a 500-project repository evict its own cache mid-scan and re-run `dotnet msbuild` for
+    // every project on the next pass. The bound only guards against unbounded growth; "clear when
+    // full" is kept because a large monorepo is the reason for a generous bound, not an LRU rewrite.
+    private const int MaxCacheEntries = 16384;
+    private const int MaxAssetSearchDepth = 8;
     private const string DotnetExecutableName = "dotnet";
     private static readonly TimeSpan evaluationTimeout = TimeSpan.FromSeconds(60);
     private static readonly string[] frameworkPropertyNames =
         [Constants.TargetFrameworks, Constants.TargetFramework];
 
-    private readonly SemaphoreSlim evaluationSlots = new(16, 16);
+    private readonly MsBuildProcessGate processGate = gate ?? MsBuildProcessGate.Shared;
     private readonly Dictionary<string, CacheEntry> cache = [];
     private readonly object cacheLock = new();
 
@@ -143,11 +155,65 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         }
     }
 
-    /// <summary>Frameworks recorded by the last restore, when the assets file is not stale.</summary>
+    /// <summary>
+    /// Frameworks recorded by the last restore, when the assets file is not stale.
+    ///
+    /// Two layouts are searched, in this order: the ordinary <c>&lt;projectDir&gt;/obj</c>, then —
+    /// walking up to <see cref="MaxAssetSearchDepth"/> ancestor directories — Arcade's
+    /// <c>&lt;repo&gt;/artifacts/obj/&lt;ProjectName&gt;/project.assets.json</c>. The first usable
+    /// file wins; a missing or stale candidate falls through to the next one.
+    /// </summary>
     internal static TargetFrameworkInfo? TryResolveFromAssets(string projectPath)
     {
-        var assetsPath = Path.Combine(Path.GetDirectoryName(projectPath) ?? ".", "obj", "project.assets.json");
+        foreach (var assetsPath in AssetCandidates(projectPath))
+        {
+            var info = TryReadAssets(assetsPath, projectPath);
+            if (info is not null)
+            {
+                return info;
+            }
+        }
 
+        return null;
+    }
+
+    /// <summary>
+    /// The assets files worth probing for <paramref name="projectPath"/>: the project's own
+    /// <c>obj</c> directory first, then one Arcade candidate per ancestor directory.
+    /// </summary>
+    private static IEnumerable<string> AssetCandidates(string projectPath)
+    {
+        var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath));
+        if (projectDirectory is null)
+        {
+            yield break;
+        }
+
+        yield return Path.Combine(projectDirectory, "obj", "project.assets.json");
+
+        // Arcade hoists every intermediate directory into `<repo>/artifacts/obj/<name>/`, so the
+        // restore record lives at the repository root instead of next to the project.
+        var projectName = Path.GetFileNameWithoutExtension(projectPath);
+        var ancestor = projectDirectory;
+        for (var depth = 0; depth < MaxAssetSearchDepth; depth++)
+        {
+            var parent = Path.GetDirectoryName(ancestor);
+            if (string.IsNullOrEmpty(parent) || parent == ancestor)
+            {
+                yield break;
+            }
+
+            ancestor = parent;
+            yield return Path.Combine(ancestor, "artifacts", "obj", projectName, "project.assets.json");
+        }
+    }
+
+    /// <summary>
+    /// Reads one assets file. Returns null when it is missing, older than the project file (a stale
+    /// restore record cannot be trusted) or unparseable.
+    /// </summary>
+    private static TargetFrameworkInfo? TryReadAssets(string assetsPath, string projectPath)
+    {
         try
         {
             if (!File.Exists(assetsPath)
@@ -234,40 +300,35 @@ public sealed partial class TargetFrameworkResolver : IDisposable
         string projectPath,
         CancellationToken cancellationToken)
     {
-        await evaluationSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        // The shared gate bounds the total number of `dotnet` processes, across both evaluators.
+        using var lease = await processGate.AcquireAsync(cancellationToken).ConfigureAwait(false);
+
+        var startInfo = new ProcessStartInfo
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = DotnetHost(),
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
-            };
+            FileName = DotnetHost(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
+        };
 
-            startInfo.ArgumentList.Add("msbuild");
-            startInfo.ArgumentList.Add(projectPath);
-            startInfo.ArgumentList.Add("-getProperty:TargetFrameworks");
-            startInfo.ArgumentList.Add("-getProperty:TargetFramework");
-            startInfo.ArgumentList.Add("-nologo");
+        startInfo.ArgumentList.Add("msbuild");
+        startInfo.ArgumentList.Add(projectPath);
+        startInfo.ArgumentList.Add("-getProperty:TargetFrameworks");
+        startInfo.ArgumentList.Add("-getProperty:TargetFramework");
+        startInfo.ArgumentList.Add("-nologo");
 
-            using var process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("dotnet could not be started.");
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("dotnet could not be started.");
 
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(evaluationTimeout);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(evaluationTimeout);
 
-            var output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+        var output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+        await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
 
-            return ParseFrameworks(output);
-        }
-        finally
-        {
-            evaluationSlots.Release();
-        }
+        return ParseFrameworks(output);
     }
 
     /// <summary>Reads the target frameworks from <c>-getProperty</c> output.</summary>
@@ -350,7 +411,15 @@ public sealed partial class TargetFrameworkResolver : IDisposable
             .Where(framework => framework.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)];
 
-    public void Dispose() => evaluationSlots.Dispose();
+    /// <summary>
+    /// Retained so existing callers can keep disposing the resolver. The MSBuild gate belongs to
+    /// the caller that injected it (or to the process, for <see cref="MsBuildProcessGate.Shared"/>),
+    /// so there is nothing here to release.
+    /// </summary>
+    public void Dispose()
+    {
+        // Intentionally empty: the gate is shared, never owned by this instance.
+    }
 
     private static string BuildCacheKey(string projectPath)
     {

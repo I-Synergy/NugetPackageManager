@@ -4,7 +4,7 @@ import { customElement, state } from "lit/decorators.js";
 import Split from "split.js";
 import debounce from "lodash/debounce";
 import { hostApi, configuration } from "@/web/registrations";
-import { runProjectUpdateJobAsync } from "@/web/jobs";
+import { runOutdatedScanJobAsync, runProjectUpdateJobAsync, runWorkspaceScanJobAsync } from "@/web/jobs";
 import { buildFrameworkOptions, getFrameworkGroupKey, matchesFrameworkSelection } from "@/common/framework";
 import { IsPrereleaseVersion } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
@@ -27,6 +27,8 @@ type TabId = "browse" | "installed" | "updates" | "consolidate" | "cleanup" | "v
 const PACKAGE_FETCH_TAKE = 50;
 const PACKAGE_CONTAINER_SCROLL_MARGIN = 196;
 const NUGET_ORG_PREFIX = "https://api.nuget.org";
+/** Shown until the workspace scan job reports its first stage. */
+const PROJECTS_LOADING_MESSAGE = "Discovering projects and resolving target frameworks…";
 
 @customElement("packages-view")
 export class PackagesView extends LitElement {
@@ -430,7 +432,7 @@ export class PackagesView extends LitElement {
   private _removeCancelled = false;
   @state() private removeError = "";
   @state() private projectsLoading = false;
-  @state() private projectsLoadingMessage = "Discovering projects and resolving target frameworks…";
+  @state() private projectsLoadingMessage = PROJECTS_LOADING_MESSAGE;
   private _refreshAc: AbortController | undefined;
   private _connected = false;
 
@@ -679,9 +681,13 @@ export class PackagesView extends LitElement {
       return;
     }
     const signal = this._refreshAc?.signal;
-    const result = await hostApi.getOutdatedPackagesAsync(
+    // The count comes from the same scan the Updates tab runs, so it goes through the job as well:
+    // on a large repository the scan outlives the RPC deadline, and a timed-out badge request used
+    // to be indistinguishable from a real failure. This view only needs the number, so an abort or
+    // a cancelled job just clears the spinner.
+    const result = await runOutdatedScanJobAsync(
       { ProjectPaths: paths, Prerelease: this.filters.Prerelease },
-      signal
+      signal ? { signal } : {}
     );
     if (!this._connected || signal?.aborted) {
       this.updatesCountLoading = false;
@@ -1034,9 +1040,21 @@ export class PackagesView extends LitElement {
     this._projectsAc = ac;
 
     this.projectsLoading = true;
-    this.projectsLoadingMessage = "Discovering projects and resolving target frameworks…";
+    this.projectsLoadingMessage = PROJECTS_LOADING_MESSAGE;
     try {
-      const result = await hostApi.getProjectsAsync({ ForceReload: forceReload }, ac.signal);
+      // The scan runs as a host job: a cold parse of a large repository has no business sitting
+      // behind an RPC deadline, and the job reports the core's own per-project progress.
+      const result = await runWorkspaceScanJobAsync(
+        { ForceReload: forceReload },
+        {
+          // Aborting only stops this view waiting - the host keeps parsing and caches the result.
+          signal: ac.signal,
+          onProgress: ({ Stage, Percent }) => {
+            if (this._projectsAc !== ac) return;
+            this.projectsLoadingMessage = Percent > 0 ? `${Stage} — ${Percent}%` : Stage;
+          },
+        }
+      );
 
       if (ac.signal.aborted) return;
 

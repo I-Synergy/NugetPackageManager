@@ -97,8 +97,21 @@ export class ConsolidateView extends LitElement {
   @property() selectedFramework: string = "";
   @property({ attribute: false }) projectPaths: string[] = [];
 
+  /**
+   * The next run must bypass the host's cache.
+   *
+   * It travels through a field, not through the task's `args()`: `@lit/task` aborts the in-flight
+   * run when `args()` differs from the arguments that run started with, so carrying `forceReload`
+   * in the args made every forced load abort itself on the next host update.
+   */
+  private _forceReloadNext = false;
+
   private readonly _loadTask = new Task(this, {
-    task: async ([projectPaths, forceReload], { signal }) => {
+    task: async ([projectPaths], { signal }) => {
+      // Read and clear before the first await: a re-render during this run must not reset it for
+      // the run that is already in flight.
+      const forceReload = this._forceReloadNext;
+      this._forceReloadNext = false;
       const req: Parameters<typeof hostApi.getInconsistentPackagesAsync>[0] = {};
       if (projectPaths.length > 0) req.ProjectPaths = projectPaths;
       if (forceReload) req.ForceReload = true;
@@ -106,7 +119,7 @@ export class ConsolidateView extends LitElement {
       if (!result.ok) throw new Error("Failed to check for inconsistencies");
       return (result.value.Packages ?? []).map((p) => new InconsistentPackageViewModel(p));
     },
-    args: () => [this.projectPaths, false] as [string[], boolean],
+    args: () => [this.projectPaths] as [string[]],
     onComplete: (packages) => {
       this.packages = packages;
       this.statusText = "";
@@ -164,7 +177,8 @@ export class ConsolidateView extends LitElement {
     this.packages = [];
     this.statusText = "";
     try {
-      await this._loadTask.run([this.projectPaths, forceReload]);
+      this._forceReloadNext = forceReload;
+      await this._loadTask.run();
     } catch (err) {
       // Avoid unhandled promise rejections; rely on TaskStatus.ERROR for rendering.
       console.error(err);

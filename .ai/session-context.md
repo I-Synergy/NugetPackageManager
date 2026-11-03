@@ -1,10 +1,120 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-11-01
+**Last Updated:** 2026-11-03
 **Project Version:** 2.2.0
-**Branch:** spike/blazor-wasm-webview
+**Branch:** main
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
+
+---
+
+## Completed: large-workspace scans (2026-11-03)
+
+Trigger: on the `aspire` workspace (1 solution, 463 projects) the sidecar stopped answering
+inside its 60 s per-RPC deadline — `getProjects` failed with
+`CoreError: The .NET sidecar did not answer request N in time`, and three
+`getOutdatedPackages` calls died on the same second. Plan and rationale:
+`.ai/plans/large-workspace-scan-performance.md`; finished record:
+`.ai/completed/large-workspace-scan-performance.md`.
+
+- **Host parse pipeline.** `utilities/project-parse-batch.ts` (`parseProjectsBatchedAsync`)
+  replaces every all-at-once `getProjects` call: sequential chunks sized from the previous
+  chunk's duration (target 15 s), halve-and-retry on `CoreError` code `timeout`, and a
+  single project that still times out is reported in `failedPaths` instead of failing the load.
+- **Core parallelism.** `WorkspaceModelService.GetProjectsAsync` parses distinct paths through
+  `Parallel.ForEachAsync` (default `Math.Clamp(ProcessorCount, 2, 16)`, configurable); the
+  old sequential loop is gone. `Infrastructure/MsBuildProcessGate.cs` is one process-wide
+  gate shared by `CpmEvaluator`, `TargetFrameworkResolver` and `CpmPropertyLocator`, so the
+  three spawn paths can no longer combine into 48 concurrent `dotnet msbuild` processes.
+- **Outdated single flight.** `utilities/outdated-scan-coordinator.ts` (module singleton
+  `outdatedScans`) keys on the scan cache key: the badge, `packages-view` and `updates-view`
+  attach to one run, progress fans out to every `ScanId`, a 5-minute per-key memo answers a
+  repeat call, and `ForceReload` starts a new generation. A caller abort detaches only that
+  caller.
+- **Workspace snapshot.** `utilities/workspace-snapshot.ts` (module singleton
+  `workspaceSnapshot`) holds one parsed workspace; the project tree, outdated scan,
+  inconsistencies, vulnerabilities, cleanup report and CPM prune all read it and filter by
+  path. Invalidated by `ForceReload`, by a debounced watcher on project/props/targets files
+  (ignoring `bin`/`obj`/`node_modules`/`.git`), and by every successful mutation.
+- **Contract unchanged** — no new RPC methods, no request/response change; all of this stays
+  host-side plus the core parse loop.
+
+Verification: `npm run quality` PASS (8/8); `npm test` 432 passing; `dotnet test` 303 passing
+(57 + 89 + 157); `npm run lint` clean.
+
+**Known follow-up.** Measure how many `dotnet msbuild` evaluations a cold aspire parse still
+performs. The gate bounds them, but CPM versions could be read from `obj/project.assets.json`
+(the target-framework resolver already does) and skip most of the spawns.
+
+## Completed: workspace parse as a job (2026-11-03)
+
+Phase 1 of the previous plan was superseded the same day: chunking was a transport workaround,
+not a fix. Plan: `.ai/plans/workspace-scan-job.md`; record: `.ai/completed/workspace-scan-job.md`.
+
+- **Protocol progress.** `NdjsonServer` accepts a second, context-aware handler map
+  (`ContextRpcHandler`, `Protocol/RpcContext.cs`); `getProjects` reports
+  `{"type":"progress","id":N,"stage":"Parsing projects (i/total)…","percent":…,"completed":…,"total":…}`
+  per finished project. Every other handler keeps its `RpcHandler` signature.
+- **`CoreClient`.** `CallAsync(method, params, signal?, { timeoutMs?, stallTimeoutMs?, onProgress? })`:
+  progress lines are routed to the caller without settling the call; the stall guard only applies
+  when progress was requested. `parseProjectsAsync` is therefore **one** call with a 15-minute cap
+  and a 120 s stall timeout. `project-parse-batch.ts` and its test are deleted.
+- **`workspaceScan` job.** `startWorkspaceScanAsync` → `{ JobId }` → `getJobAsync` (kind
+  `workspaceScan`), so the project tree has no client deadline and renders
+  `Parsing projects (N/M) — P%`. `getProjectsAsync` stays on `HostAPI` and shares the same
+  snapshot; cancelling the job stops the job, not the parse.
+- **Same-workspace note for future work.** Progress is only defined for `getProjects` today; if
+  another long read needs it, add a `ContextRpcHandler` entry and a `CoreCallOptions.onProgress`
+  caller — the transport side is already generic.
+
+Verification: `npm run quality` PASS (8/8); `dotnet test` 308 passing; `npm test` 439 passing
+inside the gate; real sidecar emits progress before the response.
+
+### Follow-up from the aspire test run (2026-11-03)
+
+The first test VSIX (`2026.11103.11322`) fixed the parse but exposed two defects, both fixed in
+`2026.11103.11336` (plan: `.ai/plans/scan-cancellation-and-scope.md`):
+
+- **A webview `rpc-cancel` was logged as a failure.** `RpcHost` aborts the handler signal, the
+  coordinator rejects only that caller, and `getOutdatedPackagesAsync` logged the `AbortError` as
+  `Failed`. New `utilities/cancellation.ts` (`isCancellation`) makes both
+  `getOutdatedPackagesAsync` and `loadWorkspaceProjectsAsync` return
+  `fail("The request was cancelled.")` with a debug line.
+- **The badge and the tabs did not share a scan.** `BuildScanCacheKey` included `ProjectPaths`;
+  the badge sends none, the views send all of them. `prepareOutdatedScanAsync` now canonicalises
+  a full-coverage list to `[]` using `WorkspaceSnapshotCache.knownProjectFiles()` (no parse), so
+  the views attach to the badge's in-flight run.
+- `.vscodeignore` now excludes `coverage/**`: the VSIX had been shipping C# coverage XML from
+  local test runs (12.3 MB → 9.5 MB).
+
+Second test VSIX (`2026.11103.11349`, plan: `.ai/plans/tab-refresh-task-args.md`):
+
+- **The tabs aborted their own scans.** `updates-view`, `consolidate-view` and
+  `vulnerabilities-view` called `Task.run([..., forceReload])` while `args()` hardcoded `false`.
+  `@lit/task` compares the stored run args with `args()` on every host update, so the first
+  re-render after a forced load cancelled the request (`rpc-cancel`) and started another; the
+  cancelled run rendered as "Failed to check for updates". The flag now lives in a
+  `_forceReloadNext` field and `run()` is called with no arguments.
+- **Cancellation is not an error in the UI.** `CANCELLED_ERROR`/`isCancelledMessage` live in
+  `@/common/rpc/result`; the Updates error card is suppressed for a cancellation and shows the
+  host message for a real failure.
+
+Third test VSIX (`2026.11103.11434`, plan: `.ai/plans/aspire-parse-cost.md`) — performance
+baseline on the aspire checkout (522 projects, 12 cores):
+
+- **Cold parse 14.1 s, warm 56 ms** (was ~700 s extrapolated, and the cache thrashed so warm was
+  as slow as cold). `CpmPropertyResolver` substitutes literal `$(Name)` values from the
+  `Directory.Packages.props` import chain, partially and per entry; `WorkspaceModelService`
+  decides `needsEvaluation` per project (only ids *this project* references that are still
+  expressions). Arcade's `artifacts/obj/<project>/project.assets.json` is now used for target
+  frameworks. Cache bounds 500 → 16 384 (a >500-project repo evicted itself mid-scan).
+  `MsBuildProcessGate` default 8.
+- **Diagnostics.** Every parse writes
+  `getProjects: 522 project(s) in 14087ms (14 msbuild evaluation(s), 8 in flight at peak)` to
+  stderr (visible in the output channel), so the baseline is reproducible.
+- **Outdated scan is a job.** `startOutdatedScanAsync` + `OperationJobs.OutdatedScan`; Updates
+  and the packages-view count poll it, so the 120 s RPC deadline can no longer turn a running
+  scan into "Failed to check for updates".
 
 ---
 

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Xml;
 using System.Xml.Linq;
+using NugetPackageManager.Core.Workspace.Infrastructure;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
@@ -16,9 +17,20 @@ namespace NugetPackageManager.Core.Workspace.Cpm;
 /// exit, timeout, unreadable output — yields <c>null</c>, and the writer then keeps the literal
 /// <c>PackageVersion</c> edit.
 /// </summary>
-public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
+/// <param name="gate">
+/// The gate to wait on before spawning <c>dotnet msbuild -pp</c>; <c>null</c> means
+/// <see cref="MsBuildProcessGate.Shared"/>. The same gate is shared with
+/// <see cref="CpmEvaluator"/> and <see cref="TargetFrameworks.TargetFrameworkResolver"/>, so the
+/// three can no longer add up to a burst of concurrent <c>dotnet</c> processes. The caller keeps
+/// ownership, so this instance never disposes it.
+/// </param>
+public sealed class CpmPropertyLocator(MsBuildProcessGate? gate = null) : ICpmPropertyLocator, IDisposable
 {
-    private const int MaxCacheEntries = 500;
+    // One entry per project plus property name, so a bound of 500 made a 500-project repository
+    // evict its own cache mid-scan and re-run `dotnet msbuild -pp` for every project on the next
+    // pass. The bound only guards against unbounded growth; "clear when full" is kept because a
+    // large monorepo is the reason for a generous bound, not an LRU rewrite.
+    private const int MaxCacheEntries = 16384;
     private const string DotnetExecutableName = "dotnet";
     private const string ConditionAttribute = "Condition";
     private const string ImportOpenTag = "<Import";
@@ -27,7 +39,7 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
     private const string TargetElement = "Target";
     private static readonly TimeSpan locatorTimeout = TimeSpan.FromSeconds(60);
 
-    private readonly SemaphoreSlim locatorSlots = new(16, 16);
+    private readonly MsBuildProcessGate processGate = gate ?? MsBuildProcessGate.Shared;
     private readonly Dictionary<string, CacheEntry> cache = [];
     private readonly object cacheLock = new();
 
@@ -71,84 +83,79 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
         string propertyName,
         CancellationToken cancellationToken)
     {
-        await locatorSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // The shared gate bounds the total number of `dotnet` processes, across every evaluator.
+        using var lease = await processGate.AcquireAsync(cancellationToken).ConfigureAwait(false);
+
+        // The preprocessed output is a throw-away diagnostic dump: it never belongs inside
+        // the workspace, so it goes to the system temp directory and is deleted here.
+        var tempPath = Path.Combine(
+            Path.GetTempPath(),
+            string.Concat("cpm-property-locator-", Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture), ".xml"));
+
         try
         {
-            // The preprocessed output is a throw-away diagnostic dump: it never belongs inside
-            // the workspace, so it goes to the system temp directory and is deleted here.
-            var tempPath = Path.Combine(
-                Path.GetTempPath(),
-                string.Concat("cpm-property-locator-", Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture), ".xml"));
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = DotnetHost(),
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
+            };
+
+            startInfo.ArgumentList.Add("msbuild");
+            startInfo.ArgumentList.Add(projectPath);
+            startInfo.ArgumentList.Add(string.Concat("-pp:", tempPath));
+            startInfo.ArgumentList.Add("-nologo");
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return null;
+            }
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(locatorTimeout);
 
             try
             {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = DotnetHost(),
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
-                };
-
-                startInfo.ArgumentList.Add("msbuild");
-                startInfo.ArgumentList.Add(projectPath);
-                startInfo.ArgumentList.Add(string.Concat("-pp:", tempPath));
-                startInfo.ArgumentList.Add("-nologo");
-
-                using var process = Process.Start(startInfo);
-                if (process is null)
-                {
-                    return null;
-                }
-
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(locatorTimeout);
-
-                try
-                {
-                    // Read stderr to completion so the child never blocks on a full pipe.
-                    var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
-                    await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
-                    await errorTask.ConfigureAwait(false);
-                    await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    TryKill(process);
-                    return null;
-                }
-
-                if (process.ExitCode != 0 || !File.Exists(tempPath))
-                {
-                    return null;
-                }
-
-                string xml;
-                try
-                {
-                    xml = await File.ReadAllTextAsync(tempPath, cancellationToken).ConfigureAwait(false);
-                }
-                catch (IOException)
-                {
-                    return null;
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    return null;
-                }
-
-                return ParsePreprocessed(xml, projectPath, propertyName);
+                // Read stderr to completion so the child never blocks on a full pipe.
+                var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+                await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+                await errorTask.ConfigureAwait(false);
+                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
             }
-            finally
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                DeleteQuietly(tempPath);
+                TryKill(process);
+                return null;
             }
+
+            if (process.ExitCode != 0 || !File.Exists(tempPath))
+            {
+                return null;
+            }
+
+            string xml;
+            try
+            {
+                xml = await File.ReadAllTextAsync(tempPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return null;
+            }
+
+            return ParsePreprocessed(xml, projectPath, propertyName);
         }
         finally
         {
-            locatorSlots.Release();
+            DeleteQuietly(tempPath);
         }
     }
 
@@ -378,5 +385,13 @@ public sealed class CpmPropertyLocator : ICpmPropertyLocator, IDisposable
             ? File.GetLastWriteTimeUtc(path).ToString("O", CultureInfo.InvariantCulture)
             : "missing";
 
-    public void Dispose() => locatorSlots.Dispose();
+    /// <summary>
+    /// Retained so existing callers can keep disposing the locator. The MSBuild gate belongs to the
+    /// caller that injected it (or to the process, for <see cref="MsBuildProcessGate.Shared"/>), so
+    /// there is nothing here to release.
+    /// </summary>
+    public void Dispose()
+    {
+        // Intentionally empty: the gate is shared, never owned by this instance.
+    }
 }

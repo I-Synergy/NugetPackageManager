@@ -1,11 +1,15 @@
-import { fail, ok, type Result } from "@/common/rpc/result";
+import { CANCELLED_ERROR, fail, ok, type Result } from "@/common/rpc/result";
 import type {
   BatchUpdateRequest,
   BatchUpdateResponse,
+  CacheControl,
   CleanupUnusedRequest,
   CleanupUnusedResponse,
   ConsolidateRequest,
   GetJobResponse,
+  GetOutdatedPackagesRequest,
+  GetOutdatedPackagesResponse,
+  GetProjectsResponse,
   JobState,
   StartJobResponse,
   UpdateProjectRequest,
@@ -140,6 +144,64 @@ export async function runCleanupJobAsync(
   if (job.State === "cancelled") {
     return fail("The cleanup was cancelled — packages removed so far stay removed (backups were created)");
   }
+  if (job.State === "completed" && job.Response) return ok(job.Response);
+  return fail(job.Error ?? failureMessage(job.State));
+}
+
+/**
+ * Runs the workspace scan as a job: the host discovers and parses the whole repository, and reports
+ * the core's own per-project progress while it does.
+ *
+ * A job is what makes a cold parse of a large repository possible: no request deadline applies, and
+ * `signal` only stops this view from waiting - the host keeps parsing and caches the result.
+ */
+export async function runWorkspaceScanJobAsync(
+  request: CacheControl,
+  options: JobRunOptions = {}
+): Promise<Result<GetProjectsResponse>> {
+  const started = await startJobAsync(hostApi.startWorkspaceScanAsync(request), options);
+  if (!started.ok) return started;
+
+  const status = await waitForJobAsync(started.value, options);
+  if (!status.ok) return status;
+
+  const job = status.value;
+  if (job.Kind !== "workspaceScan") return fail(`Unexpected job kind: ${job.Kind}`);
+  if (job.State === "cancelled") {
+    return fail("The workspace scan was cancelled");
+  }
+  if (job.State === "completed" && job.Response) return ok(job.Response);
+  return fail(job.Error ?? failureMessage(job.State));
+}
+
+/**
+ * Runs the outdated-package scan as a job.
+ *
+ * The scan is a discovery + parse plus one metadata walk per installed package, so on a large
+ * repository it outlives the RPC deadline and used to come back as "Failed to check for updates"
+ * while the host was still working. A job has no client deadline: this view polls stage/percent and
+ * reads the response when the job settles.
+ *
+ * `signal` only stops this view waiting - the host keeps scanning, and the shared run still fills
+ * the memo and the scan cache the next caller (or the same view after a refresh) answers from. An
+ * aborted signal therefore returns {@link CANCELLED_ERROR} instead of waiting for the scan: every
+ * view already treats that text as "the view gave up", never as a scan failure.
+ */
+export async function runOutdatedScanJobAsync(
+  request: GetOutdatedPackagesRequest,
+  options: JobRunOptions = {}
+): Promise<Result<GetOutdatedPackagesResponse>> {
+  const started = await startJobAsync(hostApi.startOutdatedScanAsync(request), options);
+  if (!started.ok) return started;
+  if (options.signal?.aborted) return fail(CANCELLED_ERROR);
+
+  const status = await waitForJobAsync(started.value, options);
+  if (!status.ok) return options.signal?.aborted ? fail(CANCELLED_ERROR) : status;
+
+  const job = status.value;
+  if (job.Kind !== "outdatedScan") return fail(`Unexpected job kind: ${job.Kind}`);
+  // An explicit cancel (`cancelJobAsync`) is the view's own doing, not a scan failure.
+  if (job.State === "cancelled") return fail(CANCELLED_ERROR);
   if (job.State === "completed" && job.Response) return ok(job.Response);
   return fail(job.Error ?? failureMessage(job.State));
 }

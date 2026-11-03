@@ -8,10 +8,14 @@ import { repositoryPath } from '../test-paths';
 import { createHostAPI } from '@/host/host-api';
 import nugetApiFactory from '@/host/nuget/api-factory';
 import coreProcess from '@/host/nuget/core-process';
+import type { CoreCallOptions } from '@/host/nuget/core-client';
 import NuGetConfigResolver from '@/host/utilities/nuget-config-resolver';
 import CpmReader, { type CpmPackageMap } from '@/host/utilities/cpm-reader';
 import TaskExecutorDefault, { DotnetError } from '@/host/utilities/task-executor';
 import { OperationJobs } from '@/host/utilities/operation-jobs';
+import { outdatedScans } from '@/host/utilities/outdated-scan-coordinator';
+import { workspaceSnapshot } from '@/host/utilities/workspace-snapshot';
+import { ScanProgress } from '@/host/utilities/scan-progress';
 import type { Result } from '@/common/rpc/result';
 import type { GetJobResponse } from '@/common/rpc/types';
 import { Logger } from '@/common/logger';
@@ -131,7 +135,10 @@ let projectResolver: ((projectPath: string) => Project | null) | null = null;
 type CoreCall = { method: string; params: Record<string, unknown> };
 
 let coreCalls: CoreCall[] = [];
-let coreOverrides = new Map<string, (params: Record<string, unknown>) => unknown | Promise<unknown>>();
+let coreOverrides = new Map<
+    string,
+    (params: Record<string, unknown>, options?: CoreCallOptions) => unknown | Promise<unknown>
+>();
 
 function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
     projectResolver = null;
@@ -140,20 +147,35 @@ function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
 
     return sandbox.stub(coreProcess, 'CallAsync').callsFake((async (
         method: string,
-        params: Record<string, unknown>
+        params: Record<string, unknown>,
+        _signal?: AbortSignal,
+        options?: CoreCallOptions
     ) => {
         coreCalls.push({ method, params });
         const override = coreOverrides.get(method);
         if (override) {
-            return override(params);
+            return override(params, options);
         }
 
         switch (method) {
             case 'getProjects': {
                 const projects: Project[] = [];
-                for (const projectPath of (params as unknown as { projectPaths?: string[] }).projectPaths ?? []) {
+                const projectPaths = (params as unknown as { projectPaths?: string[] }).projectPaths ?? [];
+                for (const projectPath of projectPaths) {
                     const project = projectResolver?.(projectPath) ?? null;
                     if (project) projects.push(project);
+                }
+
+                // The real core streams one progress line per parsed project; the host's
+                // forwarding is what these tests exercise, so the stub does the same.
+                const total = projectPaths.length;
+                for (let index = 0; index < total; index += 1) {
+                    options?.onProgress?.({
+                        stage: `Parsing projects (${index + 1}/${total})…`,
+                        percent: Math.round(((index + 1) / Math.max(1, total)) * 100),
+                        completed: index + 1,
+                        total,
+                    });
                 }
 
                 return projects;
@@ -199,7 +221,7 @@ function installCoreStub(sandbox: sinon.SinonSandbox): sinon.SinonStub {
 /** Replaces one core method for the current test, e.g. to simulate the write a restore then fails on. */
 function stubCoreCall(
     method: string,
-    handler: (params: Record<string, unknown>) => unknown | Promise<unknown>
+    handler: (params: Record<string, unknown>, options?: CoreCallOptions) => unknown | Promise<unknown>
 ): void {
     coreOverrides.set(method, handler);
 }
@@ -219,6 +241,20 @@ function stubProjectParsing(
     return coreStub as sinon.SinonStub;
 }
 
+/** Polls a host job until it leaves `running`, the way every view does. */
+async function waitForJobAsync(
+    api: ReturnType<typeof createHostAPI>,
+    jobId: string
+): Promise<Result<GetJobResponse>> {
+    let status = await api.getJobAsync({ JobId: jobId });
+    for (let i = 0; i < 400; i += 1) {
+        if (!status.ok || status.value.State !== 'running') return status;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        status = await api.getJobAsync({ JobId: jobId });
+    }
+    return status;
+}
+
 suite('HostAPI Tests', () => {
     let sandbox: sinon.SinonSandbox;
     /** Flipped by the tests that exercise the .NET core path. */
@@ -231,6 +267,19 @@ suite('HostAPI Tests', () => {
         sandbox.stub(Logger, 'warn');
         sandbox.stub(Logger, 'error');
 
+        // The snapshot, the scan coordinator and the progress registry are module-level state
+        // shared by every `createHostAPI()` caller, so each test starts from a clean workspace.
+        workspaceSnapshot.Reset();
+        outdatedScans.Reset();
+        ScanProgress.Reset();
+        // The snapshot arms a file watcher; these tests must not leave real ones behind.
+        sandbox.stub(vscode.workspace, 'createFileSystemWatcher').returns({
+            onDidChange: () => ({ dispose: () => undefined }),
+            onDidCreate: () => ({ dispose: () => undefined }),
+            onDidDelete: () => ({ dispose: () => undefined }),
+            dispose: () => undefined,
+        } as unknown as vscode.FileSystemWatcher);
+
         // The in-process path is what these tests exercise; the .NET core has its own suite.
         coreConfigured = false;
         sandbox.stub(coreProcess, 'IsConfigured').get(() => coreConfigured);
@@ -238,6 +287,9 @@ suite('HostAPI Tests', () => {
     });
 
     teardown(() => {
+        workspaceSnapshot.Reset();
+        outdatedScans.Reset();
+        ScanProgress.Reset();
         sandbox.restore();
     });
 
@@ -323,6 +375,198 @@ suite('HostAPI Tests', () => {
             assert.ok(result.ok);
             assert.strictEqual(result.value.Projects.length, 1);
             assert.strictEqual(result.value.Projects[0]!.Name, 'A');
+        });
+
+        test('parses the whole workspace in exactly one getProjects core call', async () => {
+            const uris = [
+                { fsPath: '/ws/A.csproj' } as vscode.Uri,
+                { fsPath: '/ws/B.csproj' } as vscode.Uri,
+                { fsPath: '/ws/C.csproj' } as vscode.Uri,
+            ];
+            sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
+            stubProjectParsing((projectPath) =>
+                ({ Name: projectPath, Path: projectPath, Packages: [], CpmEnabled: false } as Project)
+            );
+
+            const api = createHostAPI();
+            const result = await api.getProjectsAsync({});
+
+            assert.ok(result.ok);
+            assert.strictEqual(result.value.Projects.length, 3);
+
+            const parseCalls = coreCallsTo('getProjects');
+            assert.strictEqual(parseCalls.length, 1, 'the whole workspace must be one core call');
+            assert.deepStrictEqual(parseCalls[0]!.projectPaths, [
+                '/ws/A.csproj',
+                '/ws/B.csproj',
+                '/ws/C.csproj',
+            ]);
+            assert.strictEqual(parseCalls[0]!.reportProgress, true);
+        });
+
+        test('reports a cancelled caller as a cancel instead of a parse failure', async () => {
+            // The project tree starts the job and the request may be cancelled mid-flight; that is
+            // not the core failing to parse the workspace.
+            const controller = new AbortController();
+            controller.abort();
+            const errorLog = Logger.error as unknown as sinon.SinonStub;
+
+            const result = await createHostAPI().getProjectsAsync({}, controller.signal);
+
+            assert.ok(!result.ok);
+            assert.strictEqual(result.error, 'The request was cancelled.');
+            assert.strictEqual(errorLog.callCount, 0);
+        });
+    });
+
+    // ----------------------------------------------------------------
+    // workspaceScan job
+    // ----------------------------------------------------------------
+    suite('workspaceScan job', () => {
+        function projectAt(projectPath: string): Project {
+            return {
+                Name: path.basename(projectPath, path.extname(projectPath)),
+                Path: projectPath,
+                Packages: [],
+                CpmEnabled: false,
+            } as Project;
+        }
+
+        function scanStatus(status: Result<GetJobResponse>) {
+            assert.ok(status.ok, status.ok ? '' : status.error);
+            if (status.value.Kind !== 'workspaceScan') {
+                throw new Error(`Unexpected job kind: ${status.value.Kind}`);
+            }
+            return status.value;
+        }
+
+        test('completes a job with the parsed project list', async () => {
+            const projectUris = [
+                { fsPath: '/ws/A/A.csproj' } as vscode.Uri,
+                { fsPath: '/ws/B/B.csproj' } as vscode.Uri,
+            ];
+            sandbox.stub(vscode.workspace, 'findFiles').resolves(projectUris);
+            stubProjectParsing((projectPath) => projectAt(projectPath));
+
+            const api = createHostAPI();
+            const started = await api.startWorkspaceScanAsync({});
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            const status = scanStatus(await waitForJobAsync(api, started.value.JobId));
+
+            assert.strictEqual(status.State, 'completed');
+            assert.strictEqual(status.Percent, 100);
+            assert.deepStrictEqual(
+                status.Response?.Projects.map((project) => project.Name).sort(),
+                ['A', 'B']
+            );
+            assert.strictEqual(
+                coreCallsTo('getProjects').length,
+                1,
+                'the scan parses the workspace in one core call'
+            );
+        });
+
+        test('applies the solution restriction to the scanned projects', async () => {
+            const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-workspace-scan-'));
+            const solutionPath = path.join(workspaceDir, 'App.sln');
+            fs.writeFileSync(
+                solutionPath,
+                [
+                    'Microsoft Visual Studio Solution File, Format Version 12.00',
+                    'Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "A", "src\\A\\A.csproj", "{11111111-1111-1111-1111-111111111111}"',
+                    'EndProject',
+                ].join('\n'),
+                'utf8'
+            );
+
+            try {
+                const inSolution = { fsPath: path.join(workspaceDir, 'src', 'A', 'A.csproj') } as vscode.Uri;
+                const outside = { fsPath: path.join(workspaceDir, 'tools', 'B.csproj') } as vscode.Uri;
+                sandbox.stub(vscode.workspace, 'findFiles').callsFake(
+                    (async (include: vscode.GlobPattern) => (
+                        include === '*.{sln,slnx}'
+                            ? [{ fsPath: solutionPath } as vscode.Uri]
+                            : [inSolution, outside]
+                    )) as typeof vscode.workspace.findFiles
+                );
+                stubProjectParsing((projectPath) => projectAt(projectPath));
+
+                const api = createHostAPI();
+                const started = await api.startWorkspaceScanAsync({});
+                assert.ok(started.ok, started.ok ? '' : started.error);
+
+                const status = scanStatus(await waitForJobAsync(api, started.value.JobId));
+
+                assert.strictEqual(status.State, 'completed');
+                assert.deepStrictEqual(
+                    status.Response?.Projects.map((project) => project.Path),
+                    [path.join(workspaceDir, 'src', 'A', 'A.csproj')],
+                    'only the projects the solution references are scanned'
+                );
+            } finally {
+                fs.rmSync(workspaceDir, { recursive: true, force: true });
+            }
+        });
+
+        test('reports the core parse progress on the job', async () => {
+            const projectUris = [
+                { fsPath: '/ws/A/A.csproj' } as vscode.Uri,
+                { fsPath: '/ws/B/B.csproj' } as vscode.Uri,
+                { fsPath: '/ws/C/C.csproj' } as vscode.Uri,
+            ];
+            sandbox.stub(vscode.workspace, 'findFiles').resolves(projectUris);
+
+            let releaseParse!: () => void;
+            const parseGate = new Promise<void>((resolve) => { releaseParse = resolve; });
+
+            stubCoreCall('getProjects', async (params, options) => {
+                const projectPaths = (params as { projectPaths?: string[] }).projectPaths ?? [];
+                options?.onProgress?.({
+                    stage: 'Parsing projects (2/3)…',
+                    percent: 67,
+                    completed: 2,
+                    total: 3,
+                });
+                await parseGate;
+                return projectPaths.map((projectPath) => projectAt(projectPath));
+            });
+
+            const api = createHostAPI();
+            const started = await api.startWorkspaceScanAsync({});
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            let status = await api.getJobAsync({ JobId: started.value.JobId });
+            for (let i = 0; i < 400; i += 1) {
+                if (status.ok && status.value.Stage.startsWith('Parsing projects')) break;
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                status = await api.getJobAsync({ JobId: started.value.JobId });
+            }
+
+            assert.ok(status.ok);
+            assert.strictEqual(status.value.Stage, 'Parsing projects (2/3)…');
+            assert.strictEqual(status.value.Percent, 67);
+
+            releaseParse();
+            const finished = scanStatus(await waitForJobAsync(api, started.value.JobId));
+            assert.strictEqual(finished.State, 'completed');
+            assert.strictEqual(finished.Response?.Projects.length, 3);
+        });
+
+        test('fails the job when the core parses none of the discovered projects', async () => {
+            sandbox.stub(vscode.workspace, 'findFiles').resolves([
+                { fsPath: '/ws/A/A.csproj' } as vscode.Uri,
+            ]);
+            stubProjectParsing(() => null);
+
+            const api = createHostAPI();
+            const started = await api.startWorkspaceScanAsync({});
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            const status = scanStatus(await waitForJobAsync(api, started.value.JobId));
+
+            assert.strictEqual(status.State, 'failed');
+            assert.match(status.Error ?? '', /could not parse any of the 1 project/);
         });
     });
 
@@ -782,6 +1026,7 @@ suite('HostAPI Tests', () => {
             sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
                 mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
             );
+            return mockApi;
         }
 
         setup(() => {
@@ -918,6 +1163,125 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(result.value.Packages[0]!.LatestVersion, '1.0.0');
         });
 
+        test('shares one core parse and one scan across three concurrent callers', async () => {
+            // The badge, the packages view and the Updates tab all ask at activation; they must
+            // not each run their own discovery + parse.
+            const uris = [makeProjectUri('/ws/A.csproj'), makeProjectUri('/ws/B.csproj')];
+            let releaseDiscovery: (() => void) | undefined;
+            const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async () => {
+                await discoveryGate;
+                return uris;
+            });
+            stubProjectParsing((projectPath) =>
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            );
+            setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            const scans = [
+                api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false, ScanId: 'scan-1' }),
+                api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false, ScanId: 'scan-2' }),
+                api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false, ScanId: 'scan-3' }),
+            ];
+            // Hold discovery open until every caller has had a turn to attach.
+            setTimeout(() => releaseDiscovery!(), 0);
+            const results = await Promise.all(scans);
+
+            for (const result of results) {
+                assert.ok(result.ok);
+                assert.strictEqual(result.value.Packages.length, 1);
+            }
+            assert.strictEqual(coreCallsTo('getProjects').length, 1);
+        });
+
+        test('forwards the core parse progress into the scan report', async () => {
+            const uris = [makeProjectUri('/ws/A.csproj'), makeProjectUri('/ws/B.csproj')];
+            sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
+            stubProjectParsing((projectPath) =>
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            );
+            setupNugetApi('2.0.0');
+
+            const reported: Array<{ stage: string; percent: number }> = [];
+            sandbox.stub(ScanProgress, 'Report').callsFake((_scanId, stage, percent) => {
+                reported.push({ stage, percent });
+            });
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({
+                ForceReload: false,
+                Prerelease: false,
+                ScanId: 'scan-parse-progress',
+            });
+
+            assert.ok(result.ok);
+            const parseStages = reported.filter((entry) => entry.stage.startsWith('Parsing projects ('));
+            assert.deepStrictEqual(
+                parseStages.map((entry) => entry.stage),
+                ['Parsing projects (1/2)…', 'Parsing projects (2/2)…']
+            );
+            // The core's completed/total drive the 4-30% slice the parse owns in the scan.
+            assert.strictEqual(parseStages[1]!.percent, 30);
+        });
+
+        test('reports a cancelled caller as a cancel instead of a scan failure', async () => {
+            // `RpcHost` aborts the handler's signal when the webview cancels the request; the
+            // shared scan keeps running, so nothing failed and nothing is logged at ERROR.
+            const controller = new AbortController();
+            controller.abort();
+            const errorLog = Logger.error as unknown as sinon.SinonStub;
+
+            const result = await createHostAPI().getOutdatedPackagesAsync(
+                { Prerelease: false },
+                controller.signal
+            );
+
+            assert.ok(!result.ok);
+            assert.strictEqual(result.error, 'The request was cancelled.');
+            assert.strictEqual(errorLog.callCount, 0);
+        });
+
+        test('keys a view scan over every project as the badge scan so one run answers both', async () => {
+            const uris = [makeProjectUri('/ws/A.csproj'), makeProjectUri('/ws/B.csproj')];
+            sandbox.stub(vscode.workspace, 'findFiles').resolves(uris);
+            stubProjectParsing((projectPath) =>
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            );
+            const sourceApi = setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            // Prime the shared snapshot the way the project tree does: only then do the views know
+            // every project file, which is what lets their project list collapse to the badge's.
+            const projects = await api.getProjectsAsync({});
+            assert.ok(projects.ok);
+            assert.strictEqual(coreCallsTo('getProjects').length, 1);
+
+            const [badge, view] = await Promise.all([
+                // The badge: no ProjectPaths.
+                api.getOutdatedPackagesAsync({ Prerelease: false }),
+                // The views: every discovered project path.
+                api.getOutdatedPackagesAsync({
+                    Prerelease: false,
+                    ProjectPaths: projects.value.Projects.map((project) => project.Path),
+                }),
+            ]);
+
+            assert.ok(badge.ok);
+            assert.ok(view.ok);
+            // One scan and one parse for both: the view attached to the badge's run.
+            assert.strictEqual(coreCallsTo('getProjects').length, 1);
+            assert.strictEqual(sourceApi.GetPackagesAsync.callCount, 1);
+            assert.strictEqual(badge.value.Packages.length, 1);
+            assert.deepStrictEqual(view.value.Packages.map((pkg) => pkg.Id), ['Newtonsoft.Json']);
+        });
+
         test('serves the persisted scan when PreferCache is set', async () => {
             const uri = makeProjectUri('/ws/A.csproj');
             const findFiles = sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
@@ -949,6 +1313,202 @@ suite('HostAPI Tests', () => {
             const otherFilter = await createHostAPI(context).getOutdatedPackagesAsync({ Prerelease: true, PreferCache: true });
             assert.ok(otherFilter.ok);
             assert.strictEqual(otherFilter.value.Packages.length, 0);
+        });
+    });
+
+    // ----------------------------------------------------------------
+    // outdatedScan job
+    // ----------------------------------------------------------------
+    suite('outdatedScan job', () => {
+        function makeProjectUri(fsPath: string): vscode.Uri {
+            return { fsPath } as vscode.Uri;
+        }
+
+        function makeProject(name: string, projectPath: string, version: string): Project {
+            return {
+                Name: name,
+                Path: projectPath,
+                CpmEnabled: false,
+                Packages: [{ Id: 'Newtonsoft.Json', Version: version, IsPinned: false }],
+            } as unknown as Project;
+        }
+
+        function setupNugetApi(latestVersion: string): sinon.SinonStub {
+            const mockApi = {
+                GetPackagesAsync: sandbox.stub().resolves({
+                    data: [{ Name: 'Newtonsoft.Json', Id: 'Newtonsoft.Json', Version: latestVersion }],
+                }),
+            };
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+            return mockApi.GetPackagesAsync;
+        }
+
+        function outdatedStatus(status: Result<GetJobResponse>) {
+            assert.ok(status.ok, status.ok ? '' : status.error);
+            if (status.value.Kind !== 'outdatedScan') {
+                throw new Error(`Unexpected job kind: ${status.value.Kind}`);
+            }
+            return status.value;
+        }
+
+        setup(() => {
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
+                { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
+            ]);
+        });
+
+        teardown(() => {
+            OperationJobs.Reset();
+        });
+
+        test('completes a job with the scan response', async () => {
+            sandbox.stub(vscode.workspace, 'findFiles').resolves([
+                makeProjectUri('/ws/A.csproj'),
+                makeProjectUri('/ws/B.csproj'),
+            ]);
+            stubProjectParsing((projectPath) => (
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            ));
+            setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            const started = await api.startOutdatedScanAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            const status = outdatedStatus(await waitForJobAsync(api, started.value.JobId));
+
+            assert.strictEqual(status.State, 'completed');
+            assert.strictEqual(status.Percent, 100);
+            assert.strictEqual(status.Response?.Packages.length, 1);
+            assert.strictEqual(status.Response?.Packages[0]!.Id, 'Newtonsoft.Json');
+            assert.strictEqual(status.Response?.Packages[0]!.InstalledVersion, '1.0.0');
+        });
+
+        test('reports the scan stage and percent on the job', async () => {
+            let releaseDiscovery: (() => void) | undefined;
+            const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async () => {
+                await discoveryGate;
+                return [makeProjectUri('/ws/A.csproj')];
+            });
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0'));
+            setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            const started = await api.startOutdatedScanAsync({ Prerelease: false });
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            let status = await api.getJobAsync({ JobId: started.value.JobId });
+            for (let i = 0; i < 400; i += 1) {
+                // The scan reports "Reading project files…" and then "Parsing projects…"; the
+                // discovery gate holds the latter, so that is the stage to observe.
+                if (status.ok && status.value.Stage === 'Parsing projects…') break;
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                status = await api.getJobAsync({ JobId: started.value.JobId });
+            }
+
+            assert.ok(status.ok);
+            assert.strictEqual(status.value.Kind, 'outdatedScan');
+            assert.strictEqual(status.value.Stage, 'Parsing projects…');
+            assert.strictEqual(status.value.Percent, 4);
+
+            releaseDiscovery!();
+            const finished = outdatedStatus(await waitForJobAsync(api, started.value.JobId));
+            assert.strictEqual(finished.State, 'completed');
+            assert.strictEqual(finished.Response?.Packages.length, 1);
+        });
+
+        test('two concurrent jobs share one scan and both get the response', async () => {
+            let releaseDiscovery: (() => void) | undefined;
+            const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async () => {
+                await discoveryGate;
+                return [makeProjectUri('/ws/A.csproj'), makeProjectUri('/ws/B.csproj')];
+            });
+            stubProjectParsing((projectPath) => (
+                projectPath === '/ws/A.csproj'
+                    ? makeProject('A', '/ws/A.csproj', '1.0.0')
+                    : makeProject('B', '/ws/B.csproj', '2.0.0')
+            ));
+            const getPackages = setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            const first = await api.startOutdatedScanAsync({ Prerelease: false });
+            const second = await api.startOutdatedScanAsync({ Prerelease: false });
+            assert.ok(first.ok && second.ok);
+            if (!first.ok || !second.ok) return;
+
+            // Hold discovery open until both jobs have had a turn to attach to the run.
+            setTimeout(() => releaseDiscovery!(), 0);
+
+            const statuses = await Promise.all([
+                waitForJobAsync(api, first.value.JobId),
+                waitForJobAsync(api, second.value.JobId),
+            ]);
+
+            for (const status of statuses) {
+                const job = outdatedStatus(status);
+                assert.strictEqual(job.State, 'completed');
+                assert.strictEqual(job.Response?.Packages.length, 1);
+            }
+            assert.strictEqual(coreCallsTo('getProjects').length, 1, 'one parse for both jobs');
+            assert.strictEqual(getPackages.callCount, 1, 'one feed walk for both jobs');
+        });
+
+        test('cancels the job without failing the scan', async () => {
+            let releaseDiscovery: (() => void) | undefined;
+            const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async () => {
+                await discoveryGate;
+                return [makeProjectUri('/ws/A.csproj')];
+            });
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0'));
+            setupNugetApi('2.0.0');
+
+            const api = createHostAPI();
+            const started = await api.startOutdatedScanAsync({ Prerelease: false });
+            assert.ok(started.ok, started.ok ? '' : started.error);
+            if (!started.ok) return;
+
+            // Wait until the scan is really running before cancelling it.
+            let status = await api.getJobAsync({ JobId: started.value.JobId });
+            for (let i = 0; i < 400; i += 1) {
+                if (status.ok && status.value.Stage === 'Parsing projects…') break;
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                status = await api.getJobAsync({ JobId: started.value.JobId });
+            }
+
+            const cancelled = await api.cancelJobAsync({ JobId: started.value.JobId });
+            assert.ok(cancelled.ok);
+
+            const finished = outdatedStatus(await waitForJobAsync(api, started.value.JobId));
+            assert.strictEqual(finished.State, 'cancelled', 'a cancel is not a scan failure');
+
+            // The shared scan kept running: releasing discovery lets it finish and warm the cache,
+            // so the next caller does not start over.
+            releaseDiscovery!();
+            const again = await api.getOutdatedPackagesAsync({ Prerelease: false });
+            assert.ok(again.ok);
+            assert.strictEqual(again.value.Packages.length, 1);
+            assert.strictEqual(coreCallsTo('getProjects').length, 1, 'the cancelled scan still warmed the cache');
+        });
+
+        test('fails the job when the scan really fails', async () => {
+            sandbox.stub(vscode.workspace, 'findFiles').rejects(new Error('discovery exploded'));
+
+            const api = createHostAPI();
+            const started = await api.startOutdatedScanAsync({ Prerelease: false });
+            assert.ok(started.ok, started.ok ? '' : started.error);
+
+            const status = outdatedStatus(await waitForJobAsync(api, started.value.JobId));
+
+            assert.strictEqual(status.State, 'failed');
+            assert.match(status.Error ?? '', /Failed to check for outdated packages/);
         });
     });
 
@@ -1633,19 +2193,6 @@ suite('HostAPI Tests', () => {
             let open!: () => void;
             const wait = new Promise<void>((resolve) => { open = resolve; });
             return { wait, open };
-        }
-
-        async function waitForJobAsync(
-            api: ReturnType<typeof createHostAPI>,
-            jobId: string
-        ): Promise<Result<GetJobResponse>> {
-            let status = await api.getJobAsync({ JobId: jobId });
-            for (let i = 0; i < 400; i += 1) {
-                if (!status.ok || status.value.State !== 'running') return status;
-                await new Promise((resolve) => setTimeout(resolve, 5));
-                status = await api.getJobAsync({ JobId: jobId });
-            }
-            return status;
         }
 
         function batchJob(status: Result<GetJobResponse>) {

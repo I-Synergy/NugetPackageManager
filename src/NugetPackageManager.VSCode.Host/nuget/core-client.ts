@@ -35,10 +35,35 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESTARTS = 3;
 
+/** One progress report the core streamed for an in-flight request. */
+export type CoreProgress = {
+  stage: string;
+  percent: number;
+  completed: number;
+  total: number;
+};
+
+/** Per-call transport tuning; every field is optional and independent of the client defaults. */
+export type CoreCallOptions = {
+  /** Overall wall-clock cap. Defaults to the client's requestTimeoutMs. */
+  timeoutMs?: number;
+  /** Rejects when no progress arrives for this long. Only applied when onProgress is set. */
+  stallTimeoutMs?: number;
+  /** Receives core-side progress for this call. */
+  onProgress?: (progress: CoreProgress) => void;
+};
+
 type PendingCall = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  /** Overall cap for this call. */
   timer: NodeJS.Timeout;
+  /** Progress-liveness guard; absent unless the call asked for progress and a stall limit. */
+  stallTimer: NodeJS.Timeout | undefined;
+  stallTimeoutMs: number | undefined;
+  /** The method name, so a stall message can name the call that went quiet. */
+  method: string;
+  onProgress: ((progress: CoreProgress) => void) | undefined;
   onAbort: (() => void) | undefined;
   signal: AbortSignal | undefined;
 };
@@ -67,7 +92,12 @@ export class CoreClient {
   }
 
   /** Sends a request and resolves with its `value`. */
-  public async CallAsync<T>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+  public async CallAsync<T>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    options?: CoreCallOptions
+  ): Promise<T> {
     if (this.disposed) {
       throw new CoreError("unavailable", "The .NET sidecar client has been disposed.");
     }
@@ -81,7 +111,7 @@ export class CoreClient {
     this.nextId += 1;
 
     const response = new Promise<T>((resolve, reject) => {
-      this.RegisterPending(id, signal, resolve as (value: unknown) => void, reject);
+      this.RegisterPending(id, method, signal, options, resolve as (value: unknown) => void, reject);
     });
 
     child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
@@ -121,15 +151,39 @@ export class CoreClient {
 
   private RegisterPending(
     id: number,
+    method: string,
     signal: AbortSignal | undefined,
+    options: CoreCallOptions | undefined,
     resolve: (value: unknown) => void,
     reject: (error: Error) => void
   ): void {
+    const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
+    const onProgress = options?.onProgress;
+    // A stall guard only makes sense as a liveness check on progress, so it is ignored for a
+    // call that does not ask for progress: that call's only deadline is the overall cap.
+    const stallTimeoutMs = onProgress !== undefined ? options?.stallTimeoutMs : undefined;
+
     const timer = setTimeout(() => {
-      this.RemovePending(id);
-      this.Notify("cancel", { target: id });
-      reject(new CoreError("timeout", `The .NET sidecar did not answer request ${id} in time.`));
-    }, this.requestTimeoutMs);
+      this.FailAndCancel(
+        id,
+        reject,
+        new CoreError("timeout", `The .NET sidecar did not answer request ${id} in time.`)
+      );
+    }, timeoutMs);
+
+    const stallTimer =
+      stallTimeoutMs !== undefined
+        ? setTimeout(() => {
+            this.FailAndCancel(
+              id,
+              reject,
+              new CoreError(
+                "timeout",
+                `The .NET sidecar stopped reporting progress for ${method} after ${stallTimeoutMs}ms.`
+              )
+            );
+          }, stallTimeoutMs)
+        : undefined;
 
     const onAbort = signal
       ? () => {
@@ -143,12 +197,54 @@ export class CoreClient {
       signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    this.pending.set(id, { resolve, reject, timer, onAbort, signal });
+    this.pending.set(id, {
+      resolve,
+      reject,
+      timer,
+      stallTimer,
+      stallTimeoutMs,
+      method,
+      onProgress,
+      onAbort,
+      signal,
+    });
 
     // The signal may have fired between the entry check and this registration.
     if (signal?.aborted === true) {
       onAbort?.();
     }
+  }
+
+  /**
+   * Removes the pending call, tells the sidecar to stop working on it, and rejects it.
+   * Used by both deadlines: the overall cap and the progress-stall guard fail the same way.
+   */
+  private FailAndCancel(id: number, reject: (error: Error) => void, error: CoreError): void {
+    if (this.RemovePending(id) === undefined) {
+      return;
+    }
+
+    this.Notify("cancel", { target: id });
+    reject(error);
+  }
+
+  /** Restarts the stall deadline; every progress line is proof the sidecar is still working. */
+  private RestartStallTimer(id: number, call: PendingCall): void {
+    if (call.stallTimeoutMs === undefined) {
+      return;
+    }
+
+    clearTimeout(call.stallTimer);
+    call.stallTimer = setTimeout(() => {
+      this.FailAndCancel(
+        id,
+        call.reject,
+        new CoreError(
+          "timeout",
+          `The .NET sidecar stopped reporting progress for ${call.method} after ${call.stallTimeoutMs}ms.`
+        )
+      );
+    }, call.stallTimeoutMs);
   }
 
   private RemovePending(id: number): PendingCall | undefined {
@@ -159,6 +255,7 @@ export class CoreClient {
 
     this.pending.delete(id);
     clearTimeout(call.timer);
+    clearTimeout(call.stallTimer);
     if (call.onAbort && call.signal) {
       call.signal.removeEventListener("abort", call.onAbort);
     }
@@ -291,6 +388,37 @@ export class CoreClient {
     }
   }
 
+  /**
+   * Routes a `type: "progress"` line: progress is a notification, not an answer, so the call
+   * stays pending. A progress line for an unknown id (already settled) is dropped.
+   */
+  private HandleProgress(message: Record<string, unknown>, id: number): void {
+    const call = this.pending.get(id);
+    if (!call) {
+      return;
+    }
+
+    // Every progress line proves the sidecar is still working, so the stall deadline restarts.
+    this.RestartStallTimer(id, call);
+    if (!call.onProgress) {
+      return;
+    }
+
+    const progress: CoreProgress = {
+      stage: ReadString(message["stage"]),
+      percent: ReadNumber(message["percent"]),
+      completed: ReadNumber(message["completed"]),
+      total: ReadNumber(message["total"]),
+    };
+
+    try {
+      call.onProgress(progress);
+    } catch (error) {
+      // A listener must never break the read loop for every other in-flight call.
+      Logger.warn(`CoreClient: a progress listener for ${call.method} failed: ${Describe(error)}`);
+    }
+  }
+
   private HandleLine(line: string): void {
     let parsed: unknown;
     try {
@@ -313,6 +441,11 @@ export class CoreClient {
 
     const id = message["id"];
     if (typeof id !== "number") {
+      return;
+    }
+
+    if (message["type"] === "progress") {
+      this.HandleProgress(message, id);
       return;
     }
 
@@ -345,4 +478,12 @@ export class CoreClient {
 
 function Describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function ReadString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function ReadNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }

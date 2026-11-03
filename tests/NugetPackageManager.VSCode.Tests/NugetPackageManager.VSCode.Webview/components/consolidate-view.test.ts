@@ -161,6 +161,31 @@ suite('ConsolidateView', () => {
         assert.strictEqual(host.querySelector('.package-name'), null);
     });
 
+    test('a forced load issues one request and the following update issues none', async () => {
+        const requests: Array<{ ForceReload?: boolean }> = [];
+        mockHostApi.getInconsistentPackagesAsync = async (request) => {
+            requests.push(request as { ForceReload?: boolean });
+            return ok({ Packages: [] });
+        };
+
+        view.projectPaths = ['/ws/A.csproj'];
+        await view.LoadInconsistentPackagesAsync(true);
+        assert.strictEqual(requests.length, 1, 'a forced load is exactly one request');
+        assert.strictEqual(requests[0]!.ForceReload, true, 'the forced load bypasses the host cache');
+
+        // The host update that follows used to differ from the args the run started with, which
+        // aborted the in-flight request and started a second one.
+        document.body.appendChild(view);
+        try {
+            await view.updateComplete;
+            await view.updateComplete;
+            assert.strictEqual(view.hasUpdated, true, 'the update cycle that checks the task args really ran');
+            assert.strictEqual(requests.length, 1, 'a re-render must not restart the scan');
+        } finally {
+            document.body.removeChild(view);
+        }
+    });
+
     test('cancels a running consolidation from the card action', async () => {
         let running = true;
         const cancelled: string[] = [];
