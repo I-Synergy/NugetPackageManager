@@ -94,13 +94,26 @@ import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "@/common/logger";
 import { getConfiguration, getSetting } from "@/common/configuration";
-import { BuildScanCacheKey, ScanCacheStore } from "./scan-cache";
+import { BuildScanCacheKey, CurrentScanCacheEpoch, InvalidateScanCache, ScanCacheStore } from "./scan-cache";
 import { isCancellation } from "./utilities/cancellation";
 import { ScanProgress } from "./utilities/scan-progress";
 import { workspaceSnapshot, type ParseBatchResult } from "./utilities/workspace-snapshot";
 import { outdatedScans, type ScanReporter } from "./utilities/outdated-scan-coordinator";
 import { OperationJobs, type JobReporter } from "./utilities/operation-jobs";
 import { AxiosError } from "axios";
+
+/**
+ * A package version changed: every cached view of the workspace is stale.
+ *
+ * Kept in one place so no mutation path can forget one of the three: the parsed-workspace
+ * snapshot, the coordinator's memo and the scan persisted in `workspaceState`. Forgetting the last
+ * two is what repainted the pre-update Updates list after a successful batch update.
+ */
+function invalidateAfterMutation(): void {
+  workspaceSnapshot.invalidate();
+  outdatedScans.Invalidate();
+  InvalidateScanCache();
+}
 
 /**
  * Parses a .sln or .slnx file and returns the absolute paths of all project files it references.
@@ -680,7 +693,7 @@ async function runBatchUpdateAsync(
 
   StatusBarUtils.hide();
   report("Completed", 100);
-  workspaceSnapshot.invalidate();
+  invalidateAfterMutation();
   const response: BatchUpdateResponse = { Results: results };
   if (signal?.aborted) response.Cancelled = true;
   return ok(response);
@@ -933,7 +946,7 @@ async function finalizeTransactionalBatchAsync(params: {
   if (!transactionFailed && !failedRestore) {
     StatusBarUtils.hide();
     report("Completed", 100);
-    workspaceSnapshot.invalidate();
+    invalidateAfterMutation();
     const response: BatchUpdateResponse = { Results: results };
     if (signal?.aborted) response.Cancelled = true;
     return ok(response);
@@ -948,7 +961,7 @@ async function finalizeTransactionalBatchAsync(params: {
   }
   // The files were written and then reverted: whatever the snapshot holds may be from the middle
   // of that transaction, so it cannot be trusted either.
-  workspaceSnapshot.invalidate();
+  invalidateAfterMutation();
   StatusBarUtils.hide();
   Logger.error("batchUpdatePackages: Transaction rolled back", failedRestore ?? "write failure");
 
@@ -1003,7 +1016,7 @@ async function runProjectUpdateAsync(
   nugetApiFactory.ClearCache();
   // The project file (and possibly Directory.Packages.props) changed: the shared snapshot is
   // stale, and the read below must not be served from it.
-  workspaceSnapshot.invalidate();
+  invalidateAfterMutation();
   report("Refreshing project…", 95);
   const project = await parseProjectAsync(request.ProjectPath, signal);
 
@@ -1258,7 +1271,7 @@ async function runCleanupAsync(
 
     // Unused PackageVersion entries were removed from the props files: the snapshot that produced
     // this report is already stale.
-    workspaceSnapshot.invalidate();
+    invalidateAfterMutation();
     return ok({ Report: cleanupReport, Removed: [...new Set(removed)], Backups: backups, Errors: errors });
   } catch (err) {    return fail(`Failed to clean unused packages: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1333,7 +1346,7 @@ async function runConsolidateAsync(
 
     StatusBarUtils.hide();
     report("Completed", 100);
-    workspaceSnapshot.invalidate();
+    invalidateAfterMutation();
     Logger.info(`consolidatePackages: Done`);
     return ok(undefined as void);
   } catch (err) {
@@ -2460,14 +2473,15 @@ async function saveOutdatedScanAsync(
   scanCache: ScanCacheStore,
   cacheKey: string,
   outdated: OutdatedPackage[],
-  blocked: NonNullable<GetOutdatedPackagesResponse["BlockedPackages"]>
+  blocked: NonNullable<GetOutdatedPackagesResponse["BlockedPackages"]>,
+  epoch: number
 ): Promise<void> {
   await scanCache.SaveAsync({
     Key: cacheKey,
     ScannedAt: new Date().toISOString(),
     Packages: outdated,
     BlockedPackages: blocked,
-  });
+  }, epoch);
 }
 
 type OutdatedScanContext = {
@@ -2490,6 +2504,10 @@ async function runOutdatedScanAsync(
   signal: AbortSignal
 ): Promise<GetOutdatedPackagesResponse> {
   const { request, prepared } = context;
+  // Captured before parsing: if a mutation lands while this scan runs, the result describes the
+  // pre-mutation workspace and must be persisted under the epoch it started with, so the next read
+  // refuses it instead of repainting the pre-update list.
+  const scanEpoch = CurrentScanCacheEpoch();
   const projects = await parseOutdatedProjectsAsync(request, report, signal);
   const state = buildInstalledState(projects);
   Logger.info(`getOutdatedPackages: ${state.installedMap.size} unique packages to check`);
@@ -2511,7 +2529,7 @@ async function runOutdatedScanAsync(
     report,
   });
 
-  await saveOutdatedScanAsync(context.scanCache, prepared.cacheKey, outdated, blocked);
+  await saveOutdatedScanAsync(context.scanCache, prepared.cacheKey, outdated, blocked, scanEpoch);
   Logger.info(
     `getOutdatedPackages: Found ${outdated.length} outdated packages, ${blocked.length} held back in ${Date.now() - context.scanStarted}ms total`
   );
@@ -3533,7 +3551,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         // authoritative and report its failure instead of claiming success.
         const failure = await restoreProjectsInternalAsync([request.ProjectPath], undefined, false);
         toolchainHealthCache = null;
-        workspaceSnapshot.invalidate();
+        invalidateAfterMutation();
         Logger.info(
           `fixRestoreConflict: ${request.PackageId} -> ${request.Version} (${target}) restored=${!failure}`
         );
@@ -3605,7 +3623,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
 
         await WriteCentralVersionsAsync(propsFile, plan, projectPaths, workspaceRoots);
-        workspaceSnapshot.invalidate();
+        invalidateAfterMutation();
 
         const failure = await restoreProjectsInternalAsync([projectPath], undefined, false);
         if (failure) {
@@ -4129,7 +4147,7 @@ function collectMissing(used: Map<string, string>, defined: Map<string, string>)
 async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSignal): Promise<void> {
   // The package reference this prune follows was just removed, so any earlier snapshot predates
   // the write; re-reading is the only way to see whether the entry is now unused.
-  workspaceSnapshot.invalidate();
+  invalidateAfterMutation();
 
   // The pruned CPM file must never lose an entry a project still uses, so a project the core
   // could not read counts as referencing it.
@@ -4143,7 +4161,7 @@ async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSig
   if (usage.aborted) return;
 
   await removeUnusedCpmVersionsAsync(usage.cpmFiles, usage.referencedCpmFiles, packageId);
-  workspaceSnapshot.invalidate();
+  invalidateAfterMutation();
 }
 
 type CpmPackageUsage = {

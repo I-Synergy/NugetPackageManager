@@ -412,6 +412,14 @@ export class UpdatesView extends LitElement {
    * `forceReload` that lives in the args aborts every forced load on the next host update.
    */
   private _forceReloadNext = false;
+  /**
+   * Bumped by every successful update.
+   *
+   * A scan that was already in flight when the update landed holds the pre-update list; when it
+   * comes back its result is discarded instead of repainted. The forced reload that follows the
+   * `packages-updated` event repopulates the list.
+   */
+  private _mutationEpoch = 0;
   private _progressTimer: ReturnType<typeof setInterval> | undefined;
   private _progressPollInFlight = false;
   private _jobAbort: AbortController | undefined;
@@ -565,6 +573,7 @@ export class UpdatesView extends LitElement {
       // the run that is already in flight.
       const forceReload = this._forceReloadNext;
       this._forceReloadNext = false;
+      const epoch = this._mutationEpoch;
       const scanId = globalThis.crypto.randomUUID();
       this._activeScanId = scanId;
       this.scanProgress = {
@@ -600,6 +609,12 @@ export class UpdatesView extends LitElement {
           // keeps scanning, and the next run paints its result.
           if (isCancelledMessage(result.error)) throw new Error(CANCELLED_ERROR);
           throw new Error(result.error);
+        }
+        // An update landed while this scan was running, so what it found describes the workspace
+        // as it was before the write. Publish nothing: the forced reload repopulates the list.
+        if (epoch !== this._mutationEpoch) {
+            const discarded: GetOutdatedPackagesResponse = { Packages: [] };
+            return discarded;
         }
         return result.value;
       } finally {
@@ -800,6 +815,9 @@ export class UpdatesView extends LitElement {
   }
 
   private async handleSingleSuccessAsync(pkg: OutdatedPackageViewModel, version: string): Promise<void> {
+    // Bumped before `packages-updated`: a scan still in flight from before the write must not
+    // paint the pre-update list when it lands.
+    this._mutationEpoch += 1;
     // Condition + TFM identify a framework-scoped row, so updating the net10.0
     // line does not also remove the net11.0 entry.
     this.packages = this.packages.filter(
@@ -1144,6 +1162,8 @@ export class UpdatesView extends LitElement {
   }
 
   private async handleSelectedSuccessAsync(packages: OutdatedPackageViewModel[]): Promise<void> {
+    // See `handleSingleSuccessAsync`: any scan in flight predates this write.
+    this._mutationEpoch += 1;
     // The transaction succeeded, so every selected row can be removed.
     this.packages = this.packages.filter((pkg) => !packages.includes(pkg));
     this.dispatchEvent(new CustomEvent<number>("count-changed", {

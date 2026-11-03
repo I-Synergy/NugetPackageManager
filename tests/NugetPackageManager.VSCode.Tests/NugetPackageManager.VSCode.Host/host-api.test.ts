@@ -1314,6 +1314,45 @@ suite('HostAPI Tests', () => {
             assert.ok(otherFilter.ok);
             assert.strictEqual(otherFilter.value.Packages.length, 0);
         });
+
+        test('a successful update hides the pre-update scan from a PreferCache read', async () => {
+            const uri = makeProjectUri('/ws/A.csproj');
+            sandbox.stub(vscode.workspace, 'findFiles').resolves([uri]);
+            stubProjectParsing(() => makeProject('A', '/ws/A.csproj', '1.0.0'));
+            setupNugetApi('2.0.0');
+
+            let stored: unknown;
+            const memento = {
+                get: <T>(_key: string, defaultValue?: T): T | undefined => (stored as T | undefined) ?? defaultValue,
+                update: async (_key: string, value: unknown) => { stored = value; },
+                keys: () => [],
+                setKeysForSync: () => undefined,
+            } as unknown as vscode.Memento;
+            const context = { workspaceState: memento } as unknown as vscode.ExtensionContext;
+
+            const live = await createHostAPI(context).getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(live.ok);
+            assert.strictEqual(live.value.Packages.length, 1, 'the live scan is persisted for the next activation');
+
+            // A non-CPM single update: the write and the restore are `dotnet add package` / `dotnet restore`.
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(null);
+            sandbox.stub(CpmReader, 'GetFrameworkPackageMapAsync').resolves(null);
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').resolves();
+
+            const update = await createHostAPI(context).updateProjectAsync({
+                ProjectPath: '/ws/A.csproj',
+                PackageId: 'Newtonsoft.Json',
+                Version: '2.0.0',
+                Type: 'UPDATE',
+            });
+            assert.ok(update.ok, update.ok ? '' : update.error);
+
+            // The scan taken before the update must not be repainted as if it were current.
+            const cached = await createHostAPI(context).getOutdatedPackagesAsync({ Prerelease: false, PreferCache: true });
+            assert.ok(cached.ok);
+            assert.strictEqual(cached.value.FromCache, true);
+            assert.strictEqual(cached.value.Packages.length, 0);
+        });
     });
 
     // ----------------------------------------------------------------

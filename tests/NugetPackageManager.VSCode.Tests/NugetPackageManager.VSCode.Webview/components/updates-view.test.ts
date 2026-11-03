@@ -827,6 +827,55 @@ suite('UpdatesView', () => {
         assert.strictEqual(jobRequests[0]!.PreferCache, undefined, 'the live job scans');
     });
 
+    test('discards a scan that completes after a mutation changed the epoch', async () => {
+        let started = false;
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                startOutdatedScanAsync: async () => {
+                    started = true;
+                    return ok({ JobId: 'job-mutated' });
+                },
+                // The scan is still running when the update lands; it answers afterwards with the
+                // list it was asked for before the write.
+                getJobAsync: async () => {
+                    await gate;
+                    return ok({
+                        Kind: 'outdatedScan',
+                        State: 'completed',
+                        Stage: 'Completed',
+                        Percent: 100,
+                        Response: {
+                            Packages: [{
+                                Id: 'Pkg.Shared',
+                                InstalledVersion: '1.0.0',
+                                LatestVersion: '2.0.0',
+                                Projects: [{ Name: 'A', Path: '/ws/A.csproj', Version: '1.0.0' }],
+                                SourceUrl: 'https://api.nuget.org/v3/index.json',
+                                SourceName: 'nuget.org',
+                            }],
+                        },
+                    });
+                },
+                getOutdatedPackagesAsync: async () => ok({ Packages: [] }),
+                updateBadgeAsync: async () => ok(undefined),
+                getOutdatedScanProgressAsync: async () => ok({ Stage: "", Percent: 0, Completed: 0, Total: 0, Active: false }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        const load = view.LoadOutdatedPackagesAsync(true);
+        await waitForAsync(() => started);
+        (view as unknown as { _mutationEpoch: number })._mutationEpoch += 1;
+        release();
+        await load;
+
+        assert.strictEqual(view.packages.length, 0, 'a pre-mutation scan must not be painted');
+    });
+
     test('a forced load starts one job and the following update starts none', async () => {
         const requests: GetOutdatedPackagesRequest[] = [];
         Object.defineProperty(registrations, 'hostApi', {

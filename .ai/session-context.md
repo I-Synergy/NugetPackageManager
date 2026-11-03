@@ -116,6 +116,22 @@ baseline on the aspire checkout (522 projects, 12 cores):
   and the packages-view count poll it, so the 120 s RPC deadline can no longer turn a running
   scan into "Failed to check for updates".
 
+### Post-update flash (2026-11-03)
+
+Fixed in the same branch (`.ai/plans/post-update-stale-scan.md`): after a successful update the
+Updates tab repainted the pre-update list. The `@lit/task` auto-ran between the project reload and
+the forced scan with `forceReload = false`, and the host answered from the 5-minute coordinator
+memo / persisted `ScanCacheStore`, both still holding the old scan.
+
+- `scan-cache.ts`: `Epoch` on the entry (schema 2), module-level `InvalidateScanCache()` /
+  `CurrentScanCacheEpoch()`; a save carries the epoch the scan started with, so a straddling scan
+  cannot make stale data readable.
+- `outdated-scan-coordinator.ts`: `Invalidate()` bumps the epoch and clears the memo; an in-flight
+  run still answers its caller but cannot memoize.
+- `host-api.ts`: every `workspaceSnapshot.invalidate()` call is now `invalidateAfterMutation()`
+  (snapshot + scan memo + persisted scan).
+- `updates-view.ts`: `_mutationEpoch` discards a scan that finishes after a mutation.
+
 ---
 
 ## Current state (2026-11-01) — read this first

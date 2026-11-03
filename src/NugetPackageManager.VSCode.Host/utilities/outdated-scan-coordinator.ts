@@ -37,6 +37,8 @@ const INITIAL_STAGE = "Resolving package sources…";
 type MemoEntry = {
   response: GetOutdatedPackagesResponse;
   at: number;
+  /** The epoch this result was produced under; a later `Invalidate()` makes it unreadable. */
+  epoch: number;
 };
 
 type ProgressSnapshot = {
@@ -75,6 +77,8 @@ export class OutdatedScanCoordinator {
   private readonly inFlight = new Map<string, InFlightScan>();
   private readonly memo = new Map<string, MemoEntry>();
   private generation = 0;
+  /** Bumped by `Invalidate()`: a scan taken before a mutation must not answer one after it. */
+  private epoch = 0;
 
   /**
    * Runs `run` unless an identical scan is already in flight or its result is memoized.
@@ -110,6 +114,17 @@ export class OutdatedScanCoordinator {
   /** Test seam: forget every run and every memoized result. */
   public Reset(): void {
     this.inFlight.clear();
+    this.memo.clear();
+  }
+
+  /**
+   * A package version changed: drop every memoized result.
+   *
+   * The epoch also guards the memo from the other side: a scan that started before this call only
+   * repopulates the memo when the epoch it captured at start is still the current one.
+   */
+  public Invalidate(): void {
+    this.epoch += 1;
     this.memo.clear();
   }
 
@@ -161,12 +176,15 @@ export class OutdatedScanCoordinator {
     run: OutdatedScanRun,
     context: RunContext
   ): Promise<GetOutdatedPackagesResponse> {
+    // Captured before the first await: `Invalidate()` during the scan must keep its result out of
+    // the memo, even though the caller that started it still receives it.
+    const epoch = this.epoch;
     try {
       const response = await run.run(context.report, context.controller.signal);
       // Only the run that is still the current generation for this key may become the memo: an
       // older run finishing late must not overwrite a forced scan's fresher result.
-      if (this.isCurrent(context)) {
-        this.memo.set(context.key, { response, at: Date.now() });
+      if (epoch === this.epoch && this.isCurrent(context)) {
+        this.memo.set(context.key, { response, at: Date.now(), epoch });
       }
       return response;
     } finally {
@@ -244,7 +262,7 @@ export class OutdatedScanCoordinator {
   private readMemo(key: string): GetOutdatedPackagesResponse | null {
     const entry = this.memo.get(key);
     if (!entry) return null;
-    if (Date.now() - entry.at > MEMO_WINDOW_MS) {
+    if (entry.epoch !== this.epoch || Date.now() - entry.at > MEMO_WINDOW_MS) {
       this.memo.delete(key);
       return null;
     }

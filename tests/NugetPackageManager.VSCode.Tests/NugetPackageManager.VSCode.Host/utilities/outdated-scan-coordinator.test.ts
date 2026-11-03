@@ -180,6 +180,40 @@ suite('outdated-scan-coordinator', () => {
         assert.strictEqual(ScanProgress.Get('scan-b'), null);
     });
 
+    test('Invalidate drops the memoized response', async () => {
+        let runCount = 0;
+        const runner = async (): Promise<GetOutdatedPackagesResponse> => {
+            runCount += 1;
+            return { Packages: [] };
+        };
+
+        await coordinator.RunAsync(scanRun('key-1', [], runner));
+        await coordinator.RunAsync(scanRun('key-1', [], runner));
+        assert.strictEqual(runCount, 1, 'the second call inside the window is served from the memo');
+
+        coordinator.Invalidate();
+
+        await coordinator.RunAsync(scanRun('key-1', [], runner));
+        assert.strictEqual(runCount, 2, 'a mutation must force the next scan to run again');
+    });
+
+    test('a run in flight across Invalidate does not repopulate the memo', async () => {
+        const gate = createGate();
+        const runs = { count: 0 };
+        const runner = gatedRunner(gate, runs);
+
+        const inFlight = coordinator.RunAsync(scanRun('key-1', [], runner));
+        coordinator.Invalidate();
+        gate.open();
+
+        // The caller that started the scan still receives its response.
+        assert.deepStrictEqual(await inFlight, { Packages: [] });
+        assert.strictEqual(runs.count, 1);
+
+        await coordinator.RunAsync(scanRun('key-1', [], runner));
+        assert.strictEqual(runs.count, 2, 'the pre-mutation result must not answer the next caller');
+    });
+
     test('an already-aborted caller neither scans nor attaches', async () => {
         const controller = new AbortController();
         controller.abort(new Error('cancelled before start'));
