@@ -155,13 +155,10 @@ public sealed class CpmPropertyResolver : IDisposable
             return false;
         }
 
-        foreach (var character in inner)
+        // `$([System.String]::Copy(...))` fails here on the '[' and the ':'.
+        if (inner.Any(character => !char.IsLetterOrDigit(character) && character is not ('_' or '.' or '-')))
         {
-            // `$([System.String]::Copy(...))` fails here on the '[' and the ':'.
-            if (!char.IsLetterOrDigit(character) && character is not ('_' or '.' or '-'))
-            {
-                return false;
-            }
+            return false;
         }
 
         name = inner;
@@ -180,7 +177,7 @@ public sealed class CpmPropertyResolver : IDisposable
 
         lock (cacheLock)
         {
-            if (cache.TryGetValue(key, out var cached) && cached.Stamp == Stamp(cached.Files))
+            if (cache.TryGetValue(key, out var cached) && cached.Stamp == BuildStamp(cached.Files))
             {
                 return cached.Table;
             }
@@ -197,7 +194,7 @@ public sealed class CpmPropertyResolver : IDisposable
             return null;
         }
 
-        var stamp = Stamp([.. chain.Files.Select(file => file.Path)]);
+        var stamp = BuildStamp([.. chain.Files.Select(file => file.Path)]);
         var table = chain.Complete ? BuildTable(chain.Files) : new PropertyTable();
 
         lock (cacheLock)
@@ -409,7 +406,7 @@ public sealed class CpmPropertyResolver : IDisposable
         && !value.Contains("%(", StringComparison.Ordinal);
 
     /// <summary>Length and last-write stamp of every file in the chain, in chain order.</summary>
-    private static string Stamp(List<string> files)
+    private static string BuildStamp(List<string> files)
     {
         var parts = new List<string>(files.Count);
         foreach (var file in files)
