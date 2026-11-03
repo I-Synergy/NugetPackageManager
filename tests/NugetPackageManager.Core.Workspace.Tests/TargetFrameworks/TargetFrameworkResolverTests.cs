@@ -146,6 +146,39 @@ public class TargetFrameworkResolverTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public void TryResolveFromAssets_ArcadeArtifactsLayout_IsUsed()
+    {
+        // Arrange — Arcade hoists the intermediate directory to `<repo>/artifacts/obj/<name>/`, so
+        // the restore record is not next to the project at all.
+        var project = WriteArcadeProject();
+        WriteArcadeAssets(
+            "Sample",
+            """{"targets":{"net10.0":{},"net11.0":{}}}""",
+            DateTime.UtcNow.AddMinutes(1));
+
+        // Act
+        var info = TargetFrameworkResolver.TryResolveFromAssets(project);
+
+        // Assert — resolved from the assets record, so no `dotnet msbuild` is spent on it.
+        Assert.IsNotNull(info);
+        Assert.AreEqual(TargetFrameworkSource.Assets, info.Source);
+        CollectionAssert.AreEquivalent(net10AndNet11, info.Frameworks.ToArray());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void TryResolveFromAssets_StaleArcadeAssetsFile_IsIgnored()
+    {
+        // Arrange — the staleness rule applies to the Arcade candidate too.
+        var project = WriteArcadeProject();
+        WriteArcadeAssets("Sample", """{"targets":{"net10.0":{}}}""", DateTime.UtcNow.AddMinutes(-5));
+
+        // Act + Assert
+        Assert.IsNull(TargetFrameworkResolver.TryResolveFromAssets(project));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public async Task GetTargetFrameworksAsync_MissingProject_ReturnsOverrides()
     {
         // Arrange
@@ -192,6 +225,25 @@ public class TargetFrameworkResolverTests
     private void WriteAssets(string content, DateTime modifiedUtc)
     {
         var objDirectory = Path.Combine(directory, "obj");
+        Directory.CreateDirectory(objDirectory);
+        var path = Path.Combine(objDirectory, "project.assets.json");
+        File.WriteAllText(path, content);
+        File.SetLastWriteTimeUtc(path, modifiedUtc);
+    }
+
+    /// <summary>A project two levels below the repository root, as an Arcade checkout lays it out.</summary>
+    private string WriteArcadeProject()
+    {
+        var projectDirectory = Path.Combine(directory, "repo", "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+        var path = Path.Combine(projectDirectory, "Sample.csproj");
+        File.WriteAllText(path, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+        return path;
+    }
+
+    private void WriteArcadeAssets(string projectName, string content, DateTime modifiedUtc)
+    {
+        var objDirectory = Path.Combine(directory, "repo", "artifacts", "obj", projectName);
         Directory.CreateDirectory(objDirectory);
         var path = Path.Combine(objDirectory, "project.assets.json");
         File.WriteAllText(path, content);

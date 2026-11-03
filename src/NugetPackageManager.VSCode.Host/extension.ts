@@ -9,6 +9,7 @@ import { getSetting } from "@/common/configuration";
 import { COMMAND_IDS, NUGET_VIEW_CONTEXT, PANEL_ID, VIEW_ID } from "./extension-ids";
 import { NugetWebviewManager } from "./webview-manager";
 import { NugetLauncherTreeProvider } from "./launcher-tree-provider";
+import { workspaceSnapshot } from "./utilities/workspace-snapshot";
 
 export function activate(context: vscode.ExtensionContext) {
   Logger.configure(context);
@@ -181,5 +182,7 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {
   coreProcess.Dispose();
   nugetApiFactory.ClearCache();
+  // Aborts an in-flight workspace parse and disposes the file-system watcher.
+  workspaceSnapshot.dispose();
   Logger.info("Extension.deactivate: Extension deactivated");
 }

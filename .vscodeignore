@@ -7,6 +7,7 @@
 out/**
 src/**
 tests/**
+coverage/**
 Directory.Build.props
 NugetPackageManager.slnx
 docs/raw/**

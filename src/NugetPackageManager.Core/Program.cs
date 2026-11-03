@@ -12,9 +12,18 @@ foreach (var (name, handler) in new NuGetCoreHandlers(new NuGetVulnerabilityRead
     handlers[name] = handler;
 }
 
-foreach (var (name, handler) in new WorkspaceHandlers(new WorkspaceModelService()).Create())
+// One handler instance (and one workspace model) for the whole sidecar, so the per-project
+// caches are shared by the plain and the progress-reporting entry points.
+var workspaceHandlers = new WorkspaceHandlers(new WorkspaceModelService());
+foreach (var (name, handler) in workspaceHandlers.Create())
 {
     handlers[name] = handler;
+}
+
+var contextHandlers = new Dictionary<string, ContextRpcHandler>(StringComparer.Ordinal);
+foreach (var (name, handler) in workspaceHandlers.CreateContextHandlers())
+{
+    contextHandlers[name] = handler;
 }
 
 foreach (var (name, handler) in new DependencyHandlers(sources).Create())
@@ -37,5 +46,5 @@ foreach (var (name, handler) in ConfigurationHandlers.Create())
     handlers[name] = handler;
 }
 
-using var server = new NdjsonServer(Console.In, Console.Out, Console.Error, handlers);
+using var server = new NdjsonServer(Console.In, Console.Out, Console.Error, handlers, contextHandlers);
 return await server.RunAsync(CancellationToken.None).ConfigureAwait(false);

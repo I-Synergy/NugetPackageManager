@@ -9,6 +9,11 @@ using NugetPackageManager.Common;
 namespace NugetPackageManager.Core.Workspace;
 
 /// <summary>
+/// One project finished: <c>Completed</c> of <c>Total</c> distinct projects, and which one.
+/// </summary>
+public sealed record ProjectParseProgress(string ProjectPath, int Completed, int Total);
+
+/// <summary>
 /// Builds the project model the Installed, Updates, Consolidate and Cleanup tabs consume.
 ///
 /// The caller decides *which* files belong to the workspace (VS Code's globbing, solution
@@ -16,55 +21,116 @@ namespace NugetPackageManager.Core.Workspace;
 /// </summary>
 public sealed class WorkspaceModelService(
     TargetFrameworkResolver? frameworkResolver = null,
-    ICpmEvaluator? cpmEvaluator = null) : IDisposable
+    ICpmEvaluator? cpmEvaluator = null,
+    int? parseConcurrency = null,
+    CpmPropertyResolver? cpmPropertyResolver = null) : IDisposable
 {
     private const string PropertyReference = "$(";
+
+    private static readonly int defaultParseConcurrency = Math.Clamp(Environment.ProcessorCount, 2, 16);
 
     private readonly TargetFrameworkResolver frameworkResolver = frameworkResolver ?? new TargetFrameworkResolver();
     private readonly ICpmEvaluator cpmEvaluator = cpmEvaluator ?? new CpmEvaluator();
     private readonly bool ownsEvaluator = cpmEvaluator is null;
+    private readonly CpmPropertyResolver propertyResolver = cpmPropertyResolver ?? new CpmPropertyResolver();
+    private readonly bool ownsPropertyResolver = cpmPropertyResolver is null;
+    private readonly int projectsInFlight = ValidateConcurrency(parseConcurrency);
     private readonly ConcurrentDictionary<string, CachedCpmMap> cpmCache = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Parses every distinct project in parallel and returns them sorted by file name.
+    ///
+    /// The parallelism is set by the <c>parseConcurrency</c> constructor argument; the MSBuild
+    /// spawns those parses can trigger are bounded separately by
+    /// <see cref="NugetPackageManager.Core.Workspace.Infrastructure.MsBuildProcessGate"/>. One
+    /// unreadable project (<see cref="IOException"/>, <see cref="XmlException"/> or
+    /// <see cref="UnauthorizedAccessException"/>) is skipped so the rest of the workspace still
+    /// loads; cancellation propagates as <see cref="OperationCanceledException"/>.
+    /// </summary>
+    /// <param name="projectPaths">The discovered project files; duplicates are collapsed.</param>
+    /// <param name="extraTargetFrameworks">Target frameworks the caller wants evaluated as well.</param>
+    /// <param name="cancellationToken">Aborts the whole scan.</param>
+    /// <param name="progress">
+    /// Optional per-project progress. Nothing is reported when it is null; otherwise one report is
+    /// emitted per finished project (parsed or skipped), with <c>Completed</c> running 1..N and
+    /// <c>Total</c> the distinct-path count.
+    /// </param>
     public async Task<IReadOnlyList<ProjectModel>> GetProjectsAsync(
         IReadOnlyList<string> projectPaths,
         IReadOnlyList<string>? extraTargetFrameworks,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<ProjectParseProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(projectPaths);
 
         var overrides = extraTargetFrameworks ?? [];
-        var projects = new List<ProjectModel>();
+        var distinctPaths = projectPaths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var projects = new ConcurrentBag<ProjectModel>();
+        var completed = 0;
 
-        foreach (var projectPath in projectPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        await Parallel.ForEachAsync(
+            distinctPaths,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = projectsInFlight,
+                CancellationToken = cancellationToken,
+            },
+            async (projectPath, token) =>
+            {
+                try
+                {
+                    projects.Add(await ParseProjectAsync(projectPath, overrides, token).ConfigureAwait(false));
+                }
+                catch (Exception exception) when (exception is IOException or XmlException or UnauthorizedAccessException)
+                {
+                    // One unreadable project must not fail the whole workspace scan.
+                }
+
+                if (progress is not null)
+                {
+                    // IProgress<T>.Report is thread-safe, so the counter is all that needs ordering.
+                    progress.Report(new ProjectParseProgress(
+                        projectPath,
+                        Interlocked.Increment(ref completed),
+                        distinctPaths.Length));
+                }
+            }).ConfigureAwait(false);
+
+        // Path is the tie-break so projects that share a file name keep a stable order.
+        return [.. projects
+            .OrderBy(project => project.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(project => project.Path, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    private static int ValidateConcurrency(int? parseConcurrency)
+    {
+        if (parseConcurrency is null)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            try
-            {
-                projects.Add(await ParseProjectAsync(projectPath, overrides, cancellationToken).ConfigureAwait(false));
-            }
-            catch (Exception exception) when (exception is IOException or XmlException or UnauthorizedAccessException)
-            {
-                // One unreadable project must not fail the whole workspace scan.
-            }
+            return defaultParseConcurrency;
         }
 
-        return [.. projects.OrderBy(project => project.Name, StringComparer.OrdinalIgnoreCase)];
+        if (parseConcurrency < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(parseConcurrency),
+                parseConcurrency,
+                "Parallelism must be at least 1.");
+        }
+
+        return parseConcurrency.Value;
     }
 
     /// <summary>
-    /// Drops the evaluator's and the CPM props map's cached state so the next scan re-runs MSBuild
-    /// and re-parses <c>Directory.Packages.props</c>.
+    /// Drops the evaluator's, the property resolver's and the CPM props map's cached state so the
+    /// next scan re-runs MSBuild, re-reads the props/import chain and re-parses
+    /// <c>Directory.Packages.props</c>.
     ///
     /// The evaluator's stamp only covers the project, <c>Directory.Packages.props</c> and
     /// <c>Directory.Build.props</c>; a CPM write that edits a property in some other imported
     /// <c>.props</c> file therefore needs this explicit nudge. Clearing the props map cache as well
     /// makes a write made through the extension visible even when the filesystem timestamp is too
-    /// coarse to change. Only the evaluator this service created is invalidated — an injected fake
-    /// is left alone.
+    /// coarse to change. Only the evaluator and the resolver this service created are invalidated —
+    /// an injected fake is left alone.
     /// </summary>
     public void InvalidateVersionCache()
     {
@@ -73,6 +139,11 @@ public sealed class WorkspaceModelService(
         if (ownsEvaluator && cpmEvaluator is CpmEvaluator owned)
         {
             owned.ClearCache();
+        }
+
+        if (ownsPropertyResolver)
+        {
+            propertyResolver.ClearCache();
         }
     }
 
@@ -115,11 +186,15 @@ public sealed class WorkspaceModelService(
         IReadOnlyList<string> overrides,
         CancellationToken cancellationToken)
     {
-        var usesProperties = HasPropertyReferences(cpmMap);
+        // One cheap XML read settles whether *this* project needs MSBuild: a project whose
+        // referenced ids all have literal versions after (possibly partial) property resolution
+        // must not pay for an evaluation only because some other package's property is undefined.
+        var references = ProjectFileReader.Read(projectPath);
+        var needsEvaluation = NeedsEvaluation(cpmMap, references);
         var flatMap = BuildFlatMap(cpmMap);
 
         CpmEvaluation? defaultEvaluation = null;
-        if (usesProperties)
+        if (needsEvaluation)
         {
             // One evaluation with no TargetFramework supplies the flat map ProjectFileReader uses.
             defaultEvaluation = await cpmEvaluator
@@ -131,7 +206,13 @@ public sealed class WorkspaceModelService(
             }
         }
 
-        var project = ProjectFileReader.Read(projectPath, flatMap) with { CpmEnabled = true };
+        // A `$(…)` in the project itself (a `Version` or `VersionOverride`) can only be expanded by
+        // the evaluation, so its resolved reference is handed to the reader just like the non-CPM
+        // path does; without an evaluation the raw text survives unchanged.
+        var project = ProjectFileReader.Read(projectPath, flatMap, defaultEvaluation?.PackageReferences) with
+        {
+            CpmEnabled = true,
+        };
 
         if (!cpmMap.HasConditionalGroups)
         {
@@ -149,12 +230,80 @@ public sealed class WorkspaceModelService(
             TfmSource = SourceName(frameworks.Source),
         };
 
-        var effectiveByTfm = usesProperties
+        var effectiveByTfm = needsEvaluation
             ? await BuildEffectiveVersionsByTfmAsync(projectPath, defaultEvaluation, frameworks.Frameworks, cancellationToken)
                 .ConfigureAwait(false)
             : null;
 
         return ApplyResolutions(project, cpmMap, frameworks.Frameworks, effectiveByTfm);
+    }
+
+    /// <summary>
+    /// True when this project's versions cannot be read from XML alone: one of the ids it references
+    /// still carries a <c>$(…)</c> version in the map (unconditional or any conditional entry), or
+    /// the project itself writes a <c>$(…)</c> version (or <c>VersionOverride</c>).
+    ///
+    /// The map may be partially resolved, so the answer is per project: a package whose property the
+    /// resolver could not follow only costs the projects that actually reference it.
+    /// </summary>
+    /// <param name="map">The (possibly partially resolved) central package map.</param>
+    /// <param name="project">The project as read without the map, so versions are still raw.</param>
+    private static bool NeedsEvaluation(CpmPackageMap map, ProjectModel project)
+    {
+        foreach (var package in project.Packages)
+        {
+            if (IsPropertyVersion(package.Version))
+            {
+                return true;
+            }
+
+            if (MapVersionIsProperty(map, package.Id))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>True when any version line of the map for <paramref name="packageId"/> is a property.</summary>
+    private static bool MapVersionIsProperty(CpmPackageMap map, string packageId)
+    {
+        var version = FindVersion(map.Unconditional, packageId);
+        if (version is not null)
+        {
+            return IsPropertyVersion(version);
+        }
+
+        foreach (var entry in map.Conditional)
+        {
+            version = FindVersion(entry.Versions, packageId);
+            if (version is not null && IsPropertyVersion(version))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Case-insensitive version lookup, matching how the map itself is consulted.</summary>
+    private static string? FindVersion(Dictionary<string, string> versions, string packageId)
+    {
+        if (versions.TryGetValue(packageId, out var exact))
+        {
+            return exact;
+        }
+
+        foreach (var (key, value) in versions)
+        {
+            if (string.Equals(key, packageId, StringComparison.OrdinalIgnoreCase))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private async Task<Dictionary<string, IReadOnlyDictionary<string, string>>> BuildEffectiveVersionsByTfmAsync(
@@ -249,10 +398,21 @@ public sealed class WorkspaceModelService(
             return cached.Map;
         }
 
-        var parsed = CpmPropsReader.Parse(File.ReadAllText(cpmFile));
+        var parsed = ResolvePropertyVersions(cpmFile, CpmPropsReader.Parse(File.ReadAllText(cpmFile)));
         cpmCache[cpmFile] = new CachedCpmMap(parsed, stamp.Length, stamp.LastWriteTimeUtc);
         return parsed;
     }
+
+    /// <summary>
+    /// Replaces property-based versions with their literal definitions when the props/import chain
+    /// can be read without MSBuild. The resolver substitutes every property it can and leaves the
+    /// rest exactly as written, so a partially resolved map still carries the full set of versions
+    /// and only the packages that keep a <c>$(</c> cost an evaluation.
+    /// </summary>
+    private CpmPackageMap ResolvePropertyVersions(string cpmFile, CpmPackageMap parsed) =>
+        HasPropertyReferences(parsed)
+            ? propertyResolver.TryResolve(cpmFile, parsed) ?? parsed
+            : parsed;
 
     private sealed record CachedCpmMap(CpmPackageMap Map, long Length, DateTime LastWriteUtc);
 
@@ -316,6 +476,11 @@ public sealed class WorkspaceModelService(
         if (ownsEvaluator)
         {
             (cpmEvaluator as IDisposable)?.Dispose();
+        }
+
+        if (ownsPropertyResolver)
+        {
+            propertyResolver.Dispose();
         }
     }
 }

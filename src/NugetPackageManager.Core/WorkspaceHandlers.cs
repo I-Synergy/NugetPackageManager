@@ -1,7 +1,11 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using NugetPackageManager.Core.Protocol;
 using NugetPackageManager.Core.Workspace;
 using NugetPackageManager.Core.Workspace.Cpm;
+using NugetPackageManager.Core.Workspace.Infrastructure;
 using NugetPackageManager.Common;
 
 namespace NugetPackageManager.Core;
@@ -33,6 +37,16 @@ public sealed class WorkspaceHandlers
             ["removePackageVersion"] = HandleRemovePackageVersionAsync,
             ["updatePackageVersion"] = HandleUpdatePackageVersionAsync,
             ["resolveCpmWriteTargets"] = HandleResolveCpmWriteTargetsAsync,
+        };
+
+    /// <summary>
+    /// Methods that stream progress while they run. A name listed here wins over the plain
+    /// handler of the same name, so the host can opt into progress by asking for it.
+    /// </summary>
+    public Dictionary<string, ContextRpcHandler> CreateContextHandlers() =>
+        new(StringComparer.Ordinal)
+        {
+            ["getProjects"] = HandleGetProjectsWithProgressAsync,
         };
 
     private Task<object?> HandleGetCpmMapAsync(JsonElement parameters, CancellationToken cancellationToken)
@@ -231,6 +245,103 @@ public sealed class WorkspaceHandlers
 
     private async Task<object?> HandleGetProjectsAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
+        var (projectPaths, overrides) = ReadGetProjectsParameters(parameters);
+
+        var stopwatch = Stopwatch.StartNew();
+        var evaluationsBefore = MsBuildProcessGate.Shared.TotalAcquisitions;
+        var projectCount = 0;
+        var completed = false;
+
+        try
+        {
+            var projects = await workspace
+                .GetProjectsAsync(projectPaths, overrides, cancellationToken)
+                .ConfigureAwait(false);
+            projectCount = projects.Count;
+            completed = true;
+
+            return projects;
+        }
+        finally
+        {
+            stopwatch.Stop();
+            WriteGetProjectsDiagnostic(projectCount, stopwatch, evaluationsBefore, completed);
+        }
+    }
+
+    /// <summary>
+    /// The same scan as <see cref="HandleGetProjectsAsync" />, but every finished project is
+    /// announced as a progress line so the host can show real progress instead of a spinner.
+    /// The pending lines are awaited before the response so the last one is never lost.
+    /// </summary>
+    private async Task<object?> HandleGetProjectsWithProgressAsync(
+        JsonElement parameters,
+        RpcContext context,
+        CancellationToken cancellationToken)
+    {
+        var (projectPaths, overrides) = ReadGetProjectsParameters(parameters);
+        var reporter = new RpcProgressReporter(context);
+
+        var stopwatch = Stopwatch.StartNew();
+        var evaluationsBefore = MsBuildProcessGate.Shared.TotalAcquisitions;
+        var projectCount = 0;
+        var completed = false;
+
+        try
+        {
+            try
+            {
+                var projects = await workspace
+                    .GetProjectsAsync(projectPaths, overrides, cancellationToken, reporter)
+                    .ConfigureAwait(false);
+                projectCount = projects.Count;
+                completed = true;
+
+                return projects;
+            }
+            finally
+            {
+                await reporter.DrainAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            stopwatch.Stop();
+            WriteGetProjectsDiagnostic(projectCount, stopwatch, evaluationsBefore, completed);
+        }
+    }
+
+    /// <summary>
+    /// Writes the one perf line the extension log baselines a workspace parse from. stderr is the
+    /// protocol's diagnostic channel, so this never interleaves with the NDJSON responses.
+    /// </summary>
+    private static void WriteGetProjectsDiagnostic(
+        int projectCount,
+        Stopwatch stopwatch,
+        int evaluationsBefore,
+        bool completed)
+    {
+        var evaluations = MsBuildProcessGate.Shared.TotalAcquisitions - evaluationsBefore;
+        var peak = MsBuildProcessGate.Shared.PeakConcurrency;
+        var suffix = completed ? string.Empty : " (not completed)";
+
+        try
+        {
+            Console.Error.WriteLine(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"getProjects: {projectCount} project(s) in {stopwatch.ElapsedMilliseconds}ms ({evaluations} msbuild evaluation(s), {peak} in flight at peak){suffix}"));
+        }
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException)
+        {
+            // stderr can be gone during shutdown; a lost diagnostic must never replace the real
+            // result or exception of the scan it was measuring.
+        }
+    }
+
+    private static (List<string> ProjectPaths, List<string> Overrides) ReadGetProjectsParameters(
+        JsonElement parameters)
+    {
         if (parameters.ValueKind != JsonValueKind.Object
             || !parameters.TryGetProperty("projectPaths", out var paths)
             || paths.ValueKind != JsonValueKind.Array)
@@ -253,8 +364,38 @@ public sealed class WorkspaceHandlers
                 .Where(value => value.Length > 0));
         }
 
-        return await workspace
-            .GetProjectsAsync(projectPaths, overrides, cancellationToken)
-            .ConfigureAwait(false);
+        return (projectPaths, overrides);
+    }
+
+    /// <summary>
+    /// Turns per-project parse reports into progress lines. <see cref="IProgress{T}.Report" />
+    /// cannot be awaited, so the writes are tracked and flushed by <see cref="DrainAsync" />.
+    /// </summary>
+    private sealed class RpcProgressReporter(RpcContext context) : IProgress<ProjectParseProgress>
+    {
+        private readonly ConcurrentQueue<Task> pending = new();
+
+        public void Report(ProjectParseProgress value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+
+            var percent = value.Total > 0 ? (int)(100L * value.Completed / value.Total) : 0;
+            pending.Enqueue(context.ReportProgressAsync(
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Parsing projects ({value.Completed}/{value.Total})…"),
+                percent,
+                value.Completed,
+                value.Total));
+        }
+
+        /// <summary>Waits for every queued progress line; reporting failures are already swallowed.</summary>
+        public async Task DrainAsync()
+        {
+            while (pending.TryDequeue(out var write))
+            {
+                await write.ConfigureAwait(false);
+            }
+        }
     }
 }

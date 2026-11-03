@@ -486,12 +486,13 @@ public class WorkspaceModelServiceTests
     [TestCategory("Unit")]
     public async Task GetProjectsAsync_EvaluatorReturnsNull_KeepsRawPropertyVersion()
     {
-        // Arrange
+        // Arrange — a version the XML-level resolver cannot follow (a function definition), so the
+        // MSBuild path is the one under test.
         workspace!.WriteFile("Directory.Packages.props", """
             <Project>
               <PropertyGroup>
                 <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-                <FooBarVersion>1.2.3</FooBarVersion>
+                <FooBarVersion>$([System.String]::Copy('1.2.3'))</FooBarVersion>
               </PropertyGroup>
               <ItemGroup>
                 <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
@@ -514,6 +515,234 @@ public class WorkspaceModelServiceTests
 
         // Assert — evaluation failure leaves the raw XML value.
         Assert.AreEqual("$(FooBarVersion)", projects[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PropertyResolvableFromProps_NeverInvokesEvaluator()
+    {
+        // Arrange — Aspire's shape: the versions are properties, but every property is a literal in
+        // the props chain. Resolving them from XML removes both the unconditional evaluation and the
+        // one-per-framework evaluations, which is the whole point of the resolver.
+        workspace!.WriteFile("eng/Versions.props", """
+            <Project>
+              <PropertyGroup>
+                <FooBarVersion>1.2.3</FooBarVersion>
+                <Net10Version>10.0.1</Net10Version>
+                <Net11Version>11.0.0</Net11Version>
+              </PropertyGroup>
+            </Project>
+            """);
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <Import Project="eng\Versions.props" />
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+                <PackageVersion Include="Pkg.Shared" Version="$(Net10Version)" />
+              </ItemGroup>
+              <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
+                <PackageVersion Include="Pkg.Shared" Version="$(Net11Version)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Resolved", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+                <PackageReference Include="Pkg.Shared" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation());
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert — no `dotnet msbuild` at all, and the literal versions are in the model.
+        Assert.AreEqual(0, evaluator.Calls);
+        var byId = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3", byId["Foo.Bar"].Version);
+        Assert.AreEqual(
+            "10.0.1",
+            byId["Pkg.Shared"].CpmResolutions!.Single(row => row.Tfm == "net10.0").Version);
+        Assert.AreEqual(
+            "11.0.0",
+            byId["Pkg.Shared"].CpmResolutions!.Single(row => row.Tfm == "net11.0").Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PropertyNotResolvableFromProps_StillInvokesEvaluator()
+    {
+        // Arrange — a concatenated version cannot be resolved from XML, so the MSBuild path has to
+        // run exactly as it did before the resolver existed.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)-beta" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("Unresolvable", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation(("Foo.Bar", "1.2.3-beta")));
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        Assert.IsTrue(evaluator.Calls > 0, "the unresolvable map must still fall back to MSBuild.");
+        Assert.AreEqual("1.2.3-beta", projects[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PartialMap_ProjectOnResolvedIdsNeverInvokesEvaluator()
+    {
+        // Arrange — Phase A2: the map has one entry the props chain cannot answer
+        // (`Microsoft.Signed.Wix` → an undefined property), but the project under test references
+        // only resolved ids, so no `dotnet msbuild` may be spent on it.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+                <PackageVersion Include="Microsoft.Signed.Wix" Version="$(MicrosoftSignedWixVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("ResolvedOnly", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => Evaluation());
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert — no evaluation at all, and the resolved literal is in the model.
+        Assert.AreEqual(0, evaluator.Calls);
+        Assert.AreEqual("1.2.3", projects[0].Packages[0].Version);
+        Assert.AreEqual("central", projects[0].Packages[0].VersionSource);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PartialMap_ProjectReferencingUnresolvedIdInvokesEvaluator()
+    {
+        // Arrange — same partial map, but this project references the one package whose property
+        // is undefined, so it alone pays for an evaluation; its sibling stays evaluation-free.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+                <PackageVersion Include="Microsoft.Signed.Wix" Version="$(MicrosoftSignedWixVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var resolvedOnly = WriteProject("ResolvedOnly", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+              </ItemGroup>
+            </Project>
+            """);
+        var unresolved = WriteProject("Unresolved", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Microsoft.Signed.Wix" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((path, _) => path.EndsWith("Unresolved.csproj", StringComparison.Ordinal)
+            ? Evaluation(("Microsoft.Signed.Wix", "5.0.2.0"))
+            : Evaluation(("Foo.Bar", "1.2.3")));
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([resolvedOnly, unresolved], [], CancellationToken.None);
+
+        // Assert — exactly one evaluation, for the project that needs it.
+        Assert.AreEqual(1, evaluator.Calls);
+        var byName = projects.ToDictionary(project => project.Name, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3", byName["ResolvedOnly.csproj"].Packages[0].Version);
+        Assert.AreEqual("5.0.2.0", byName["Unresolved.csproj"].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_PartialMap_ProjectOwnPropertyVersionStillInvokesEvaluator()
+    {
+        // Arrange — the map resolves fully, but the project writes its own `$(…)` version, which
+        // only MSBuild can expand.
+        workspace!.WriteFile("Directory.Packages.props", """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+                <FooBarVersion>1.2.3</FooBarVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageVersion Include="Foo.Bar" Version="$(FooBarVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = WriteProject("ProjectExpression", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <SerilogVersion>3.1.1</SerilogVersion>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Foo.Bar" />
+                <PackageReference Include="Serilog" Version="$(SerilogVersion)" />
+              </ItemGroup>
+            </Project>
+            """);
+        var evaluator = new FakeCpmEvaluator((_, _) => EvaluationWithReferences(("Serilog", "3.1.1")));
+
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator);
+
+        // Act
+        var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
+
+        // Assert
+        Assert.IsTrue(evaluator.Calls > 0, "a project-level `$(…)` version still needs MSBuild.");
+        var byId = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
+        Assert.AreEqual("1.2.3", byId["Foo.Bar"].Version);
+        Assert.AreEqual("3.1.1", byId["Serilog"].Version);
     }
 
     [TestMethod]
@@ -629,10 +858,10 @@ public class WorkspaceModelServiceTests
 
     [TestMethod]
     [TestCategory("Unit")]
-    public async Task GetProjectsAsync_PropertyWithSuffix_UsesEvaluatedValueAndKeepsUnresolvedRaw()
+    public async Task GetProjectsAsync_PropertyWithSuffix_UsesEvaluatedValueAndResolvesLiteralSibling()
     {
         // Arrange — one version embeds the property in surrounding text and evaluates; the second
-        // package is missing from the evaluation, so its raw expression has to survive.
+        // package's property is a plain literal, so the XML resolver answers it without MSBuild.
         workspace!.WriteFile("Directory.Packages.props", """
             <Project>
               <PropertyGroup>
@@ -661,11 +890,257 @@ public class WorkspaceModelServiceTests
         // Act
         var projects = await service.GetProjectsAsync([project], [], CancellationToken.None);
 
-        // Assert — the whole expression is replaced; a package absent from the evaluation keeps
-        // its raw XML value.
+        // Assert — the whole expression is replaced; a package whose property the props chain does
+        // define (a literal) is now resolved from XML instead of borrowing the evaluation.
         var packages = projects[0].Packages.ToDictionary(package => package.Id, StringComparer.Ordinal);
         Assert.AreEqual("1.2.3-beta", packages["Foo.Bar"].Version);
-        Assert.AreEqual("$(MissingVersion)", packages["Missing.Package"].Version);
+        Assert.AreEqual("9.9.9", packages["Missing.Package"].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_ManyProjects_ReturnsEveryProjectSortedByName()
+    {
+        // Arrange — 40 generated projects, deliberately written in reverse order.
+        var projectPaths = new List<string>();
+        for (var index = 39; index >= 0; index--)
+        {
+            projectPaths.Add(WriteProject($"Project{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <ItemGroup>
+                    <PackageReference Include="Serilog" Version="3.1.1" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        using var service = new WorkspaceModelService();
+
+        // Act
+        var projects = await service.GetProjectsAsync(projectPaths, [], CancellationToken.None);
+
+        // Assert — the parallel scan returns the same list, still sorted by name.
+        Assert.AreEqual(40, projects.Count);
+        var expected = projectPaths
+            .Select(path => Path.GetFileName(path))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        CollectionAssert.AreEqual(expected, projects.Select(project => project.Name).ToList());
+        Assert.AreEqual("Project00.csproj", projects[0].Name);
+        Assert.AreEqual("Project39.csproj", projects[^1].Name);
+        Assert.IsTrue(projects.All(project => project.Packages.Count == 1));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_EvaluatedProjects_NeverExceedConfiguredParallelism()
+    {
+        // Arrange — property-based versions force one evaluator call per project, and the fake
+        // holds its slot long enough for the overlap to be observable.
+        var projectPaths = new List<string>();
+        for (var index = 0; index < 24; index++)
+        {
+            projectPaths.Add(WriteProject($"Concurrent{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <FooBarVersion>1.2.3</FooBarVersion>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        var evaluator = new CountingCpmEvaluator(TimeSpan.FromMilliseconds(20));
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator, parseConcurrency: 3);
+
+        // Act
+        var projects = await service.GetProjectsAsync(projectPaths, [], CancellationToken.None);
+
+        // Assert
+        Assert.AreEqual(24, projects.Count);
+        Assert.AreEqual(24, evaluator.Calls);
+        Assert.IsTrue(
+            evaluator.PeakConcurrency <= 3,
+            $"observed {evaluator.PeakConcurrency} concurrent evaluations with parseConcurrency 3.");
+        Assert.AreEqual(0, evaluator.ActiveConcurrency);
+        Assert.AreEqual("1.2.3", projects[0].Packages[0].Version);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_CancelledDuringBatch_ThrowsOperationCanceled()
+    {
+        // Arrange — a batch that would need ~400 ms, cancelled after 50 ms.
+        var projectPaths = new List<string>();
+        for (var index = 0; index < 40; index++)
+        {
+            projectPaths.Add(WriteProject($"Cancel{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <FooBarVersion>1.2.3</FooBarVersion>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Foo.Bar" Version="$(FooBarVersion)" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var evaluator = new CountingCpmEvaluator(TimeSpan.FromMilliseconds(20));
+        using var service = new WorkspaceModelService(cpmEvaluator: evaluator, parseConcurrency: 2);
+
+        // Act
+        var cancelled = false;
+        try
+        {
+            await service.GetProjectsAsync(projectPaths, [], cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        // Assert — cancellation propagates instead of returning a partial list.
+        Assert.IsTrue(cancelled, "GetProjectsAsync should surface the cancellation.");
+        Assert.IsTrue(evaluator.Calls > 0, "the batch should have started before it was cancelled.");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_OneBrokenProjectAmongMany_SkipsOnlyThatProject()
+    {
+        // Arrange
+        var projectPaths = new List<string>();
+        for (var index = 0; index < 10; index++)
+        {
+            projectPaths.Add(WriteProject($"Healthy{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <ItemGroup>
+                    <PackageReference Include="Serilog" Version="3.1.1" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        var broken = workspace!.Combine("Broken.csproj");
+        File.WriteAllText(broken, "<Project><unclosed>");
+        projectPaths.Insert(4, broken);
+
+        using var service = new WorkspaceModelService(parseConcurrency: 4);
+
+        // Act
+        var projects = await service.GetProjectsAsync(projectPaths, [], CancellationToken.None);
+
+        // Assert — only the broken project is dropped.
+        Assert.AreEqual(10, projects.Count);
+        Assert.IsFalse(projects.Any(project => project.Name.Equals("Broken.csproj", StringComparison.OrdinalIgnoreCase)));
+        Assert.AreEqual("Healthy00.csproj", projects[0].Name);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Constructor_NonPositiveParseConcurrency_Throws()
+    {
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new WorkspaceModelService(parseConcurrency: 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new WorkspaceModelService(parseConcurrency: -2));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_WithProgress_ReportsEveryProjectExactlyOnce()
+    {
+        // Arrange — 20 generated projects and a synchronous collector, so the assertions do not
+        // race a SynchronizationContext hop.
+        var projectPaths = new List<string>();
+        for (var index = 0; index < 20; index++)
+        {
+            projectPaths.Add(WriteProject($"Progress{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <ItemGroup>
+                    <PackageReference Include="Serilog" Version="3.1.1" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        var progress = new CollectingProgress();
+
+        using var service = new WorkspaceModelService();
+
+        // Act
+        var projects = await service.GetProjectsAsync(projectPaths, [], CancellationToken.None, progress);
+
+        // Assert — the same projects come back, and the reports cover 1..20 exactly once.
+        Assert.AreEqual(20, projects.Count);
+        var reports = progress.Reports;
+        Assert.AreEqual(20, reports.Count);
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(1, 20).ToList(),
+            reports.Select(report => report.Completed).Order().ToList());
+        Assert.IsTrue(reports.All(report => report.Total == 20), "Total must stay 20 throughout.");
+        CollectionAssert.AreEquivalent(
+            projectPaths.ToList(),
+            reports.Select(report => report.ProjectPath).ToList());
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_ProgressIncludesSkippedProjects()
+    {
+        // Arrange — a broken project still counts as finished, so the host's counter never stalls.
+        var healthy = WriteProject("Healthy", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="Serilog" Version="3.1.1" />
+              </ItemGroup>
+            </Project>
+            """);
+        var broken = workspace!.Combine("Broken.csproj");
+        File.WriteAllText(broken, "<Project><unclosed>");
+
+        var progress = new CollectingProgress();
+
+        using var service = new WorkspaceModelService();
+
+        // Act
+        var projects = await service.GetProjectsAsync([healthy, broken], [], CancellationToken.None, progress);
+
+        // Assert
+        Assert.AreEqual(1, projects.Count);
+        Assert.AreEqual(2, progress.Reports.Count);
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(1, 2).ToList(),
+            progress.Reports.Select(report => report.Completed).Order().ToList());
+        Assert.IsTrue(progress.Reports.All(report => report.Total == 2));
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetProjectsAsync_WithoutProgress_StillWorks()
+    {
+        // Arrange
+        var projectPaths = new List<string>();
+        for (var index = 0; index < 5; index++)
+        {
+            projectPaths.Add(WriteProject($"NoProgress{index:D2}", """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <ItemGroup>
+                    <PackageReference Include="Serilog" Version="3.1.1" />
+                  </ItemGroup>
+                </Project>
+                """));
+        }
+
+        using var service = new WorkspaceModelService();
+
+        // Act — null progress is the pre-existing call shape and must stay a no-op.
+        var projects = await service.GetProjectsAsync(projectPaths, [], CancellationToken.None, progress: null);
+
+        // Assert
+        Assert.AreEqual(5, projects.Count);
     }
 
     private static CpmEvaluation Evaluation(
@@ -695,6 +1170,91 @@ public class WorkspaceModelServiceTests
         {
             Calls++;
             return Task.FromResult(factory(projectPath, targetFramework));
+        }
+    }
+
+    /// <summary>
+    /// An evaluator that stands in for `dotnet msbuild`: it holds its slot for
+    /// <paramref name="delay"/> so the parallel window is observable, and records the peak overlap.
+    /// It reports the resolved reference through <c>PackageReferences</c>, because the projects it
+    /// serves are non-CPM (no `Directory.Packages.props`), so the non-CPM parse path is the one that
+    /// consumes the evaluation result.
+    /// </summary>
+    private sealed class CountingCpmEvaluator(TimeSpan delay) : ICpmEvaluator
+    {
+        private int active;
+        private int peak;
+        private int calls;
+
+        public int Calls => Volatile.Read(ref calls);
+
+        public int ActiveConcurrency => Volatile.Read(ref active);
+
+        public int PeakConcurrency => Volatile.Read(ref peak);
+
+        public async Task<CpmEvaluation?> EvaluateAsync(
+            string projectPath,
+            string? targetFramework,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref calls);
+            var activeNow = Interlocked.Increment(ref active);
+            RecordPeak(activeNow);
+
+            try
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref active);
+            }
+
+            return EvaluationWithReferences(("Foo.Bar", "1.2.3"));
+        }
+
+        private void RecordPeak(int activeNow)
+        {
+            var observed = Volatile.Read(ref peak);
+            while (activeNow > observed)
+            {
+                var prior = Interlocked.CompareExchange(ref peak, activeNow, observed);
+                if (prior == observed)
+                {
+                    return;
+                }
+
+                observed = prior;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A deterministic <see cref="IProgress{T}" />: reports are recorded synchronously on the
+    /// calling thread instead of being posted to a synchronization context.
+    /// </summary>
+    private sealed class CollectingProgress : IProgress<ProjectParseProgress>
+    {
+        private readonly List<ProjectParseProgress> reports = [];
+        private readonly object gate = new();
+
+        public IReadOnlyList<ProjectParseProgress> Reports
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return [.. reports];
+                }
+            }
+        }
+
+        public void Report(ProjectParseProgress value)
+        {
+            lock (gate)
+            {
+                reports.Add(value);
+            }
         }
     }
 

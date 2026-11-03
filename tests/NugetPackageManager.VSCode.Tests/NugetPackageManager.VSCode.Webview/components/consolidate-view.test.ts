@@ -72,6 +72,20 @@ suite('ConsolidateView', () => {
         assert.deepStrictEqual(groups.map((group) => group.label), ['Shared', 'net10.0', 'net11.0']);
     });
 
+    test('renders no group header when every card belongs to one framework line', () => {
+        view.packages = [packageModel('', ''), packageModel('', '')];
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+
+        assert.strictEqual(
+            host.querySelectorAll('.group-header').length,
+            0,
+            'a single framework line has nothing to separate, so it gets no header'
+        );
+        assert.strictEqual(host.querySelectorAll('.package-list package-row').length, 2, 'the cards still render');
+    });
+
     test('sends only the selected framework line when a card contains two lines', async () => {
         const calls: Array<{ CpmCondition?: string; Scope?: string; ProjectPaths: string[] }> = [];
         mockHostApi.startConsolidateAsync = async (req) => {
@@ -159,6 +173,31 @@ suite('ConsolidateView', () => {
         assert.strictEqual(host.querySelectorAll('package-row [slot="badges"]').length, 2);
         // No legacy standalone header markup remains.
         assert.strictEqual(host.querySelector('.package-name'), null);
+    });
+
+    test('a forced load issues one request and the following update issues none', async () => {
+        const requests: Array<{ ForceReload?: boolean }> = [];
+        mockHostApi.getInconsistentPackagesAsync = async (request) => {
+            requests.push(request as { ForceReload?: boolean });
+            return ok({ Packages: [] });
+        };
+
+        view.projectPaths = ['/ws/A.csproj'];
+        await view.LoadInconsistentPackagesAsync(true);
+        assert.strictEqual(requests.length, 1, 'a forced load is exactly one request');
+        assert.strictEqual(requests[0]!.ForceReload, true, 'the forced load bypasses the host cache');
+
+        // The host update that follows used to differ from the args the run started with, which
+        // aborted the in-flight request and started a second one.
+        document.body.appendChild(view);
+        try {
+            await view.updateComplete;
+            await view.updateComplete;
+            assert.strictEqual(view.hasUpdated, true, 'the update cycle that checks the task args really ran');
+            assert.strictEqual(requests.length, 1, 'a re-render must not restart the scan');
+        } finally {
+            document.body.removeChild(view);
+        }
     });
 
     test('cancels a running consolidation from the card action', async () => {

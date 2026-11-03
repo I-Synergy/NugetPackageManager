@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using NugetPackageManager.Core.Workspace.Infrastructure;
 
 namespace NugetPackageManager.Core.Workspace.Cpm;
 
@@ -13,17 +14,33 @@ namespace NugetPackageManager.Core.Workspace.Cpm;
 /// file invalidates the entry. Any failure (non-zero exit, timeout, unparseable output) yields
 /// <c>null</c> so callers keep the raw XML values.
 /// </summary>
-public sealed class CpmEvaluator : ICpmEvaluator, IDisposable
+/// <param name="gate">
+/// The gate to wait on before spawning <c>dotnet msbuild</c>; <c>null</c> means
+/// <see cref="MsBuildProcessGate.Shared"/>.
+/// The caller keeps ownership, so this instance never disposes it.
+/// </param>
+public sealed class CpmEvaluator(MsBuildProcessGate? gate = null) : ICpmEvaluator, IDisposable
 {
-    private const int MaxCacheEntries = 500;
+    // One entry per project (and per target framework, since the key carries it), so a bound of 500
+    // made a 500-project repository evict its own cache mid-scan: the next pass re-ran every
+    // `dotnet msbuild -getItem`. The bound only guards against unbounded growth; the "clear when
+    // full" behaviour is kept because a large monorepo is the reason for a generous bound, not an
+    // LRU rewrite.
+    private const int MaxCacheEntries = 16384;
     private const string DotnetExecutableName = "dotnet";
     private static readonly TimeSpan evaluationTimeout = TimeSpan.FromSeconds(60);
 
-    private readonly SemaphoreSlim evaluationSlots = new(16, 16);
+    private readonly MsBuildProcessGate processGate = gate ?? MsBuildProcessGate.Shared;
     private readonly Dictionary<string, CacheEntry> cache = [];
     private readonly object cacheLock = new();
 
     private sealed record CacheEntry(string FileStamp, CpmEvaluation? Evaluation);
+
+    /// <summary>
+    /// Test seam: when set, it replaces the <c>dotnet msbuild -getItem</c> spawn, so the cache's
+    /// eviction behaviour can be verified without starting a process. Never set in production code.
+    /// </summary>
+    internal Func<string, string?, CancellationToken, Task<CpmEvaluation?>>? EvaluationOverride { get; set; }
 
     public async Task<CpmEvaluation?> EvaluateAsync(
         string projectPath,
@@ -92,65 +109,65 @@ public sealed class CpmEvaluator : ICpmEvaluator, IDisposable
         string? targetFramework,
         CancellationToken cancellationToken)
     {
-        await evaluationSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (EvaluationOverride is { } evaluationOverride)
+        {
+            return await evaluationOverride(projectPath, targetFramework, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The shared gate bounds the total number of `dotnet` processes, across both evaluators.
+        using var lease = await processGate.AcquireAsync(cancellationToken).ConfigureAwait(false);
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = DotnetHost(),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
+        };
+
+        startInfo.ArgumentList.Add("msbuild");
+        startInfo.ArgumentList.Add(projectPath);
+        startInfo.ArgumentList.Add("-getItem:PackageVersion");
+        startInfo.ArgumentList.Add("-getItem:PackageReference");
+        startInfo.ArgumentList.Add("-getProperty:TargetFramework");
+        startInfo.ArgumentList.Add("-nologo");
+        if (!string.IsNullOrEmpty(targetFramework))
+        {
+            startInfo.ArgumentList.Add($"-p:TargetFramework={targetFramework}");
+        }
+
+        using var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            return null;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(evaluationTimeout);
+
+        string output;
         try
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = DotnetHost(),
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(projectPath) ?? Environment.CurrentDirectory,
-            };
-
-            startInfo.ArgumentList.Add("msbuild");
-            startInfo.ArgumentList.Add(projectPath);
-            startInfo.ArgumentList.Add("-getItem:PackageVersion");
-            startInfo.ArgumentList.Add("-getItem:PackageReference");
-            startInfo.ArgumentList.Add("-getProperty:TargetFramework");
-            startInfo.ArgumentList.Add("-nologo");
-            if (!string.IsNullOrEmpty(targetFramework))
-            {
-                startInfo.ArgumentList.Add($"-p:TargetFramework={targetFramework}");
-            }
-
-            using var process = Process.Start(startInfo);
-            if (process is null)
-            {
-                return null;
-            }
-
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(evaluationTimeout);
-
-            string output;
-            try
-            {
-                // Read stderr to completion so the child never blocks on a full pipe.
-                var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
-                output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
-                await errorTask.ConfigureAwait(false);
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                TryKill(process);
-                return null;
-            }
-
-            if (process.ExitCode != 0)
-            {
-                return null;
-            }
-
-            return ParseEvaluation(output);
+            // Read stderr to completion so the child never blocks on a full pipe.
+            var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+            output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+            await errorTask.ConfigureAwait(false);
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
         }
-        finally
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            evaluationSlots.Release();
+            TryKill(process);
+            return null;
         }
+
+        if (process.ExitCode != 0)
+        {
+            return null;
+        }
+
+        return ParseEvaluation(output);
     }
 
     private static void TryKill(Process process)
@@ -284,5 +301,13 @@ public sealed class CpmEvaluator : ICpmEvaluator, IDisposable
             ? File.GetLastWriteTimeUtc(path).ToString("O", CultureInfo.InvariantCulture)
             : "missing";
 
-    public void Dispose() => evaluationSlots.Dispose();
+    /// <summary>
+    /// Retained so existing callers can keep disposing the evaluator. The MSBuild gate is owned by
+    /// the caller that injected it (or by the process, for <see cref="MsBuildProcessGate.Shared"/>),
+    /// so there is nothing here to release.
+    /// </summary>
+    public void Dispose()
+    {
+        // Intentionally empty: the gate is shared, never owned by this instance.
+    }
 }

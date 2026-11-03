@@ -22,6 +22,7 @@ public sealed class NdjsonServer : IDisposable
     private readonly TextWriter output;
     private readonly TextWriter error;
     private readonly Dictionary<string, RpcHandler> handlers;
+    private readonly Dictionary<string, ContextRpcHandler> contextHandlers;
     private readonly ConcurrentDictionary<long, CancellationTokenSource> inFlight = new();
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private bool disposed;
@@ -31,11 +32,20 @@ public sealed class NdjsonServer : IDisposable
     {
     }
 
+    /// <summary>Creates a server over the given streams.</summary>
+    /// <param name="input">Request lines, one JSON object per line.</param>
+    /// <param name="output">Handshake, progress and response lines.</param>
+    /// <param name="error">Out-of-band diagnostics for the host's log.</param>
+    /// <param name="handlers">The plain request handlers.</param>
+    /// <param name="contextHandlers">
+    /// Handlers that may stream progress. One of these wins over a plain handler of the same name.
+    /// </param>
     public NdjsonServer(
         TextReader input,
         TextWriter output,
         TextWriter error,
-        IReadOnlyDictionary<string, RpcHandler>? handlers)
+        IReadOnlyDictionary<string, RpcHandler>? handlers,
+        IReadOnlyDictionary<string, ContextRpcHandler>? contextHandlers = null)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
@@ -45,6 +55,7 @@ public sealed class NdjsonServer : IDisposable
         this.output = output;
         this.error = error;
         this.handlers = BuildHandlers(handlers);
+        this.contextHandlers = BuildContextHandlers(contextHandlers);
     }
 
     /// <summary>Reads until the input closes, then waits for outstanding requests.</summary>
@@ -108,6 +119,21 @@ public sealed class NdjsonServer : IDisposable
         return merged;
     }
 
+    private static Dictionary<string, ContextRpcHandler> BuildContextHandlers(
+        IReadOnlyDictionary<string, ContextRpcHandler>? extra)
+    {
+        var merged = new Dictionary<string, ContextRpcHandler>(StringComparer.Ordinal);
+        if (extra is not null)
+        {
+            foreach (var (name, handler) in extra)
+            {
+                merged[name] = handler;
+            }
+        }
+
+        return merged;
+    }
+
     private static Task<object?> HandlePingAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
         _ = parameters;
@@ -145,7 +171,20 @@ public sealed class NdjsonServer : IDisposable
             return;
         }
 
-        if (!handlers.TryGetValue(request.Method, out var handler))
+        Func<CancellationToken, Task<object?>> invoke;
+        if (contextHandlers.TryGetValue(request.Method, out var contextHandler))
+        {
+            var context = new RpcContext(
+                request.Id,
+                (stage, percent, completed, total) =>
+                    WriteProgressAsync(request.Id, stage, percent, completed, total));
+            invoke = token => contextHandler(request.Params, context, token);
+        }
+        else if (handlers.TryGetValue(request.Method, out var handler))
+        {
+            invoke = token => handler(request.Params, token);
+        }
+        else
         {
             await WriteErrorAsync(
                 request.Id,
@@ -159,7 +198,7 @@ public sealed class NdjsonServer : IDisposable
         inFlight[request.Id] = source;
         try
         {
-            var value = await handler(request.Params, source.Token).ConfigureAwait(false);
+            var value = await invoke(source.Token).ConfigureAwait(false);
             await WriteAsync(new RpcResponse { Id = request.Id, Ok = true, Value = value }, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -222,6 +261,38 @@ public sealed class NdjsonServer : IDisposable
                 version = typeof(NdjsonServer).Assembly.GetName().Version?.ToString() ?? "0.0.0",
             },
             cancellationToken);
+
+    /// <summary>
+    /// Writes one progress line. Failures are swallowed on purpose: a long read must keep going
+    /// when a progress write cannot land, and the host decides on a stall from silence alone.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Design",
+        "CA1031:Do not catch general exception types",
+        Justification = "Progress is advisory; losing a line must never fail the request it describes.")]
+    private async Task WriteProgressAsync(long id, string stage, int percent, int completed, int total)
+    {
+        try
+        {
+            // No cancellation token: a half-written line would break the framing for every
+            // request that shares the stream.
+            await WriteAsync(
+                new
+                {
+                    type = "progress",
+                    id,
+                    stage,
+                    percent,
+                    completed,
+                    total,
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Advisory only — the host's stall guard is the backstop.
+        }
+    }
 
     private Task WriteErrorAsync(long id, string code, string message, CancellationToken cancellationToken) =>
         WriteAsync(

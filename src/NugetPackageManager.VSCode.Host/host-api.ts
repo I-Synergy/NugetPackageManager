@@ -66,7 +66,7 @@ import type {
   ToolchainHealth,
 } from "@/common/rpc/types";
 import type { Result } from "@/common/rpc/result";
-import { ok, fail } from "@/common/rpc/result";
+import { ok, fail, CANCELLED_ERROR } from "@/common/rpc/result";
 import CpmReader, { type CpmFrameworkEntry, type CpmPackageMap } from "./utilities/cpm-reader";
 import CpmWriter, { type CpmVersionChange } from "./utilities/cpm-writer";
 import { findPathOutsideWorkspaceAsync } from "./utilities/workspace-path";
@@ -74,6 +74,7 @@ import { compareVersions, isVersionInRange, satisfiesVersionRange } from "./util
 import { isValidNuGetVersion, isValidPackageId } from "./utilities/nuget-identifier";
 import nugetApiFactory, { ReadProxyUrl } from "./nuget/api-factory";
 import coreProcess from "./nuget/core-process";
+import type { CoreProgress } from "./nuget/core-client";
 import { SetUpdateBadge } from "./view-badge";
 import NuGetConfigResolver from "./utilities/nuget-config-resolver";
 import TaskExecutor, { CreateDotnetOptions, DotnetError } from "./utilities/task-executor";
@@ -93,10 +94,26 @@ import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "@/common/logger";
 import { getConfiguration, getSetting } from "@/common/configuration";
-import { BuildScanCacheKey, ScanCacheStore } from "./scan-cache";
+import { BuildScanCacheKey, CurrentScanCacheEpoch, InvalidateScanCache, ScanCacheStore } from "./scan-cache";
+import { isCancellation } from "./utilities/cancellation";
 import { ScanProgress } from "./utilities/scan-progress";
+import { workspaceSnapshot, type ParseBatchResult } from "./utilities/workspace-snapshot";
+import { outdatedScans, type ScanReporter } from "./utilities/outdated-scan-coordinator";
 import { OperationJobs, type JobReporter } from "./utilities/operation-jobs";
 import { AxiosError } from "axios";
+
+/**
+ * A package version changed: every cached view of the workspace is stale.
+ *
+ * Kept in one place so no mutation path can forget one of the three: the parsed-workspace
+ * snapshot, the coordinator's memo and the scan persisted in `workspaceState`. Forgetting the last
+ * two is what repainted the pre-update Updates list after a successful batch update.
+ */
+function invalidateAfterMutation(): void {
+  workspaceSnapshot.invalidate();
+  outdatedScans.Invalidate();
+  InvalidateScanCache();
+}
 
 /**
  * Parses a .sln or .slnx file and returns the absolute paths of all project files it references.
@@ -243,11 +260,26 @@ function isFrameworkAlignedPackage(packageId: string, patterns: string[]): boole
 }
 
 /**
+ * Cap for one whole-workspace parse. A cold 400+ project workspace parses for minutes, and the
+ * stall guard below - not this cap - is what detects a sidecar that stopped working.
+ */
+const PROJECT_PARSE_TIMEOUT_MS = 15 * 60_000;
+/** How long the core may go without reporting a parsed project before the call is failed. */
+const PROJECT_PARSE_STALL_TIMEOUT_MS = 120_000;
+
+/**
  * Parses projects through the .NET core, which owns csproj reading, CPM resolution and
  * target-framework evaluation. Discovery stays here: which files belong to the workspace is a
  * VS Code question, and duplicating that globbing in the core would drift.
+ *
+ * This is one request for the whole list: the core streams `progress` lines per parsed project,
+ * so a large workspace needs neither chunking nor a short flat deadline.
  */
-async function parseProjectsAsync(projectPaths: string[], signal?: AbortSignal): Promise<Project[]> {
+async function parseProjectsAsync(
+  projectPaths: string[],
+  signal?: AbortSignal,
+  onProgress?: (completed: number, total: number) => void
+): Promise<Project[]> {
   if (projectPaths.length === 0) {
     return [];
   }
@@ -257,8 +289,16 @@ async function parseProjectsAsync(projectPaths: string[], signal?: AbortSignal):
     {
       projectPaths,
       extraTargetFrameworks: getCpmSettings().extraTargetFrameworks,
+      reportProgress: true,
     },
-    signal
+    signal,
+    {
+      timeoutMs: PROJECT_PARSE_TIMEOUT_MS,
+      stallTimeoutMs: PROJECT_PARSE_STALL_TIMEOUT_MS,
+      ...(onProgress !== undefined && {
+        onProgress: (progress: CoreProgress) => onProgress(progress.completed, progress.total),
+      }),
+    }
   );
 }
 
@@ -307,6 +347,200 @@ function applyExcludeGlobs<T extends { fsPath: string }>(files: T[], excludeGlob
   return visibleFiles.filter((file) => {
     const normalized = file.fsPath.replace(/\\/g, "/");
     return !patterns.some((pattern) => pattern.test(normalized));
+  });
+}
+
+/**
+ * Project discovery for the shared workspace snapshot.
+ *
+ * Discovery stays host-side: which files belong to the workspace is a VS Code question
+ * (workspace globbing plus the configured exclude globs), and duplicating it in the core would
+ * drift. The solution restriction is applied afterwards, by the callers that need it.
+ */
+async function discoverWorkspaceProjectFilesAsync(): Promise<string[]> {
+  const settings = getCpmSettings();
+  const files = await vscode.workspace.findFiles(
+    "**/*.{csproj,fsproj,vbproj}",
+    "**/node_modules/**"
+  );
+  return applyExcludeGlobs(files, settings.excludeGlobs).map((file) => file.fsPath);
+}
+
+/**
+ * The parse the snapshot runs: one `getProjects` call for the whole discovered list, with the
+ * core's own progress forwarded to the snapshot's listeners.
+ *
+ * `failedPaths` is still reported - it is "discovered minus parsed" - because the cleanup and CPM
+ * cleanup callers must refuse to act on an incomplete picture.
+ */
+async function parseWorkspaceProjectsAsync(
+  projectPaths: string[],
+  signal?: AbortSignal,
+  onProgress?: (completed: number, total: number) => void
+): Promise<ParseBatchResult> {
+  const projects = await parseProjectsAsync(projectPaths, signal, onProgress);
+  const returned = new Set(projects.map((project) => path.normalize(project.Path)));
+  const failedPaths = projectPaths.filter((projectPath) => !returned.has(path.normalize(projectPath)));
+  return { projects, failedPaths };
+}
+
+type SnapshotProjectsRequest = {
+  /** Restrict the answer to these project files; absent means the whole workspace. */
+  projectPaths?: string[];
+  forceReload?: boolean;
+  signal?: AbortSignal;
+  onProgress?: (completed: number, total: number) => void;
+};
+
+type SnapshotProjects = {
+  projects: Project[];
+  /** Discovered project files inside the requested subset. */
+  projectFiles: string[];
+  /** Requested project files the core could not parse at all. */
+  failedPaths: string[];
+};
+
+/**
+ * Projects read from the shared workspace snapshot.
+ *
+ * A `ProjectPaths`-scoped request filters the snapshot; it never starts a second full parse. The
+ * parse failures are reported per request so conservative callers (cleanup, CPM cleanup) can
+ * still refuse to act on an incomplete picture.
+ */
+async function loadSnapshotProjectsAsync(request: SnapshotProjectsRequest): Promise<SnapshotProjects> {
+  const snapshot = await workspaceSnapshot.GetAsync({
+    discover: discoverWorkspaceProjectFilesAsync,
+    parse: parseWorkspaceProjectsAsync,
+    ...(request.forceReload !== undefined && { forceReload: request.forceReload }),
+    ...(request.signal !== undefined && { signal: request.signal }),
+    ...(request.onProgress !== undefined && { onProgress: request.onProgress }),
+  });
+
+  const requested = request.projectPaths;
+  if (!requested?.length) {
+    return {
+      projects: snapshot.projects,
+      projectFiles: snapshot.projectFiles,
+      failedPaths: snapshot.failedPaths,
+    };
+  }
+
+  const wanted = new Set(requested.map((projectPath) => path.normalize(projectPath)));
+  const inScope = (candidate: string): boolean => wanted.has(path.normalize(candidate));
+  return {
+    projects: snapshot.projects.filter((project) => inScope(project.Path)),
+    projectFiles: snapshot.projectFiles.filter(inScope),
+    failedPaths: snapshot.failedPaths.filter(inScope),
+  };
+}
+
+/**
+ * The project set a solution in the workspace roots restricts management to, or `null` when the
+ * workspace has no usable `.sln`/`.slnx`.
+ *
+ * Only the workspace roots are searched: a solution nested in a subfolder describes a sample or a
+ * vendored copy, not the workspace, and scoping to it would silently drop most of the projects.
+ */
+async function findSolutionProjectPathsAsync(): Promise<Set<string> | null> {
+  const slnFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
+  if (slnFiles.length === 0) return null;
+
+  const allPaths = (
+    await Promise.all(slnFiles.map((file) => parseSolutionProjectPathsAsync(file.fsPath)))
+  ).flat().filter((candidate): candidate is string => candidate !== null);
+  if (allPaths.length === 0) return null;
+
+  const solutionProjectPaths = new Set(allPaths.map((candidate) => path.normalize(candidate)));
+  Logger.info(
+    `Project discovery: Found ${slnFiles.length} solution file(s), ${solutionProjectPaths.size} project(s) referenced`
+  );
+  return solutionProjectPaths;
+}
+
+/**
+ * The workspace's projects, restricted to the solution when the workspace has one.
+ *
+ * `getProjectsAsync` and the `workspaceScan` job share this: the job is only a detached way to run
+ * the same read, so a second copy of the discovery/restriction logic would drift on the next
+ * change. `label` prefixes the log lines so a request and a job read apart.
+ */
+async function loadWorkspaceProjectsAsync(
+  label: string,
+  options: SnapshotProjectsRequest
+): Promise<Result<GetProjectsResponse>> {
+  Logger.info(`${label}: Handling request`);
+
+  // The .NET core owns project parsing, CPM resolution and framework evaluation. VS Code keeps
+  // discovery: workspace globbing, solution restriction and exclude settings are host concerns,
+  // and duplicating them in the core would drift. Both happen once per workspace change and every
+  // tab reads the same snapshot.
+  const solutionProjectPaths = await findSolutionProjectPathsAsync();
+
+  try {
+    const parseStarted = Date.now();
+    const snapshot = await loadSnapshotProjectsAsync(options);
+
+    const projectFiles = ScopeProjectFiles(
+      snapshot.projectFiles.map((fsPath) => ({ fsPath })),
+      solutionProjectPaths
+    ).map((file) => file.fsPath);
+    Logger.info(`${label}: Found ${projectFiles.length} project files`);
+
+    if (projectFiles.length === 0) {
+      return ok({ Projects: [] });
+    }
+
+    const inScope = new Set(projectFiles.map((file) => path.normalize(file)));
+    const projects = snapshot.projects.filter((project) => inScope.has(path.normalize(project.Path)));
+    const failedPaths = snapshot.failedPaths.filter((file) => inScope.has(path.normalize(file)));
+
+    if (failedPaths.length > 0) {
+      Logger.warn(
+        `${label}: ${failedPaths.length} of ${projectFiles.length} project(s) timed out while parsing` +
+        ` (for example ${failedPaths[0]})`
+      );
+    }
+    if (projects.length === 0 && projectFiles.length > 0) {
+      return fail(`The .NET core could not parse any of the ${projectFiles.length} project(s)`);
+    }
+
+    Logger.info(`${label}: Parsed ${projects.length} project(s) in ${Date.now() - parseStarted}ms`);
+    return ok({ Projects: projects });
+  } catch (error) {
+    if (isCancellation(error) || options.signal?.aborted) {
+      // The caller went away (an `rpc-cancel` from a re-rendering view). The shared parse keeps
+      // running and still fills the snapshot, so nothing failed here.
+      Logger.debug(`${label}: Cancelled by the caller`);
+      return fail(CANCELLED_ERROR);
+    }
+    Logger.error(`${label}: The .NET core could not parse the workspace`, error);
+    return fail(formatApiError(error));
+  }
+}
+
+/**
+ * The `workspaceScan` job runner.
+ *
+ * A full discovery + parse of a large repository outgrew the RPC deadline, so the project tree
+ * starts this job and polls it instead of waiting on a request. Discovery and parsing are the same
+ * code `getProjectsAsync` runs; the job only detaches them from the request signal and forwards the
+ * core's own per-project progress.
+ *
+ * Cancelling stops this job, not the parse: the shared snapshot parse keeps running and warms the
+ * cache, so the next read answers instantly instead of starting over.
+ */
+async function runWorkspaceScanAsync(
+  request: CacheControl,
+  signal: AbortSignal,
+  report: JobReporter
+): Promise<Result<GetProjectsResponse>> {
+  return loadWorkspaceProjectsAsync("workspaceScan", {
+    ...(request.ForceReload !== undefined && { forceReload: request.ForceReload }),
+    signal,
+    onProgress: (completed, total) => report(
+      `Parsing projects (${completed}/${total})…`,
+      total > 0 ? Math.round((100 * completed) / total) : 0
+    ),
   });
 }
 
@@ -459,6 +693,7 @@ async function runBatchUpdateAsync(
 
   StatusBarUtils.hide();
   report("Completed", 100);
+  invalidateAfterMutation();
   const response: BatchUpdateResponse = { Results: results };
   if (signal?.aborted) response.Cancelled = true;
   return ok(response);
@@ -711,6 +946,7 @@ async function finalizeTransactionalBatchAsync(params: {
   if (!transactionFailed && !failedRestore) {
     StatusBarUtils.hide();
     report("Completed", 100);
+    invalidateAfterMutation();
     const response: BatchUpdateResponse = { Results: results };
     if (signal?.aborted) response.Cancelled = true;
     return ok(response);
@@ -723,6 +959,9 @@ async function finalizeTransactionalBatchAsync(params: {
   if (!skipRestore) {
     rollbackRestoreError = (await restoreProjectsInternalAsync(allProjectPaths, signal, false))?.message;
   }
+  // The files were written and then reverted: whatever the snapshot holds may be from the middle
+  // of that transaction, so it cannot be trusted either.
+  invalidateAfterMutation();
   StatusBarUtils.hide();
   Logger.error("batchUpdatePackages: Transaction rolled back", failedRestore ?? "write failure");
 
@@ -775,6 +1014,9 @@ async function runProjectUpdateAsync(
   }
 
   nugetApiFactory.ClearCache();
+  // The project file (and possibly Directory.Packages.props) changed: the shared snapshot is
+  // stale, and the read below must not be served from it.
+  invalidateAfterMutation();
   report("Refreshing project…", 95);
   const project = await parseProjectAsync(request.ProjectPath, signal);
 
@@ -1027,9 +1269,11 @@ async function runCleanupAsync(
       await cleanupPropsFileAsync(propsFile, stamp, { removed, backups, errors }, signal);
     }
 
+    // Unused PackageVersion entries were removed from the props files: the snapshot that produced
+    // this report is already stale.
+    invalidateAfterMutation();
     return ok({ Report: cleanupReport, Removed: [...new Set(removed)], Backups: backups, Errors: errors });
-  } catch (err) {
-    return fail(`Failed to clean unused packages: ${err instanceof Error ? err.message : String(err)}`);
+  } catch (err) {    return fail(`Failed to clean unused packages: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -1102,6 +1346,7 @@ async function runConsolidateAsync(
 
     StatusBarUtils.hide();
     report("Completed", 100);
+    invalidateAfterMutation();
     Logger.info(`consolidatePackages: Done`);
     return ok(undefined as void);
   } catch (err) {
@@ -1237,21 +1482,10 @@ async function restoreConsolidatedProjectsAsync(
   if (getSetting<boolean>("skipRestore", false)) return;
 
   report("Restoring projects…", 70);
-  for (const [i, projectPath] of request.ProjectPaths.entries()) {
-    report(
-      `Restoring project ${i + 1}/${request.ProjectPaths.length}…`,
-      70 + (i / Math.max(1, request.ProjectPaths.length)) * 25
-    );
-    await TaskExecutor.ExecuteCommandAsync(
-      "dotnet",
-      ["restore", projectPath.replace(/\\/g, "/")],
-      `restore-${request.PackageId}`,
-      undefined,
-      undefined,
-      undefined,
-      CreateDotnetOptions(projectPath)
-    );
-  }
+  // The result is ignored on purpose: consolidation reports its own stages, and a restore failure
+  // surfaces through the consolidated packages rather than the job state. Batching is shared with
+  // the batch update path, so a consolidation restores each owning solution once.
+  await restoreProjectsInternalAsync(request.ProjectPaths, undefined, false);
 }
 
 /**
@@ -1759,7 +1993,7 @@ async function fetchPackageFromSourceAsync(
   return ok({ Package: packageResult.data, SourceUrl: url });
 }
 
-function createScanReporter(scanId: string | undefined) {
+function createScanReporter(scanId: string | undefined): ScanReporter {
   return (stage: string, percent: number, completed = 0, total = 0): void => {
     if (scanId) ScanProgress.Report(scanId, stage, percent, completed, total);
   };
@@ -1771,6 +2005,25 @@ async function validateOutdatedRequestAsync(request: GetOutdatedPackagesRequest)
   return outsideWorkspace ? `Project path is outside the workspace: ${outsideWorkspace}` : null;
 }
 
+/**
+ * The `ProjectPaths` list the scan cache key uses.
+ *
+ * The badge asks for the scan with no project paths and the views ask with every project they
+ * discovered, which is the same scan over the same workspace. Keying them apart made the views
+ * start a second full metadata walk and then cancel it; a requested list that covers exactly the
+ * known project files is therefore keyed as `[]`, so both attach to one run. Anything else - an
+ * unknown snapshot, or a genuine subset such as a single project's update - keys unchanged.
+ */
+function canonicalScanProjectPaths(projectPaths: string[] | undefined): string[] {
+  if (!projectPaths?.length) return [];
+  const known = workspaceSnapshot.knownProjectFiles();
+  if (!known?.length || projectPaths.length !== known.length) return projectPaths;
+
+  const knownFiles = new Set(known.map((file) => path.normalize(file)));
+  const coversWorkspace = projectPaths.every((file) => knownFiles.has(path.normalize(file)));
+  return coversWorkspace ? [] : projectPaths;
+}
+
 type PreparedOutdatedScan =
   | { kind: "empty" }
   | { kind: "cached"; cached: GetOutdatedPackagesResponse }
@@ -1779,13 +2032,12 @@ type PreparedOutdatedScan =
       sources: Array<{ Name: string; Url: string; Patterns?: string[] }>;
       settings: ReturnType<typeof getCpmSettings>;
       cacheKey: string;
-      projectFiles: Array<{ fsPath: string }>;
     };
 
 async function prepareOutdatedScanAsync(
   request: GetOutdatedPackagesRequest,
   scanCache: ScanCacheStore,
-  report: (stage: string, percent: number, completed?: number, total?: number) => void
+  report: ScanReporter
 ): Promise<PreparedOutdatedScan> {
   const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath);
   let sources = await NuGetConfigResolver.GetSourcesAndDecodePasswordsAsync(workspaceRoots);
@@ -1795,9 +2047,12 @@ async function prepareOutdatedScanAsync(
   if (sources.length === 0) return { kind: "empty" };
 
   const settings = getCpmSettings();
+  // The badge sends no project paths while the views send every discovered path; both describe the
+  // same scan, so a full-coverage list is keyed as `[]` and the views attach to the badge's run.
+  const projectPaths = canonicalScanProjectPaths(request.ProjectPaths);
   const cacheKey = BuildScanCacheKey({
     workspaceRoots,
-    projectPaths: request.ProjectPaths ?? [],
+    projectPaths,
     sourceUrls: sources.map((source) => source.Url),
     prerelease: request.Prerelease,
     excludeGlobs: settings.excludeGlobs,
@@ -1808,17 +2063,10 @@ async function prepareOutdatedScanAsync(
     return { kind: "cached", cached: buildCachedOutdatedResponse(cached) };
   }
 
+  // Discovery itself happens in the shared snapshot; the stage is reported here so a poller sees
+  // the scan moving before the first parsed project comes back.
   report("Reading project files…", 4);
-  let projectFiles = await vscode.workspace.findFiles(
-    "**/*.{csproj,fsproj,vbproj}",
-    "**/node_modules/**"
-  );
-  projectFiles = applyExcludeGlobs(projectFiles, settings.excludeGlobs);
-  if (request.ProjectPaths?.length) {
-    projectFiles = projectFiles.filter((file) => request.ProjectPaths!.includes(file.fsPath));
-  }
-
-  return { kind: "ready", sources, settings, cacheKey, projectFiles };
+  return { kind: "ready", sources, settings, cacheKey };
 }
 
 function buildCachedOutdatedResponse(
@@ -1836,33 +2084,33 @@ function buildCachedOutdatedResponse(
 }
 
 async function parseOutdatedProjectsAsync(
-  projectFiles: Array<{ fsPath: string }>,
-  report: (stage: string, percent: number, completed?: number, total?: number) => void
+  request: GetOutdatedPackagesRequest,
+  report: ScanReporter,
+  signal?: AbortSignal
 ): Promise<Project[]> {
   const parseStarted = Date.now();
-  const totalProjects = projectFiles.length;
-  report(`Parsing projects (0/${totalProjects})…`, 4, 0, totalProjects);
+  report("Parsing projects…", 4, 0, 0);
 
-  // Batched so the progress bar still moves; the core parses each batch in one round trip.
-  const chunkSize = Math.max(1, Math.ceil(totalProjects / 10));
-  const projects: Project[] = [];
+  // One parse for the whole workspace, shared with every other tab. A `ProjectPaths` request
+  // filters that snapshot instead of asking the core for the same projects again.
+  const { projects, projectFiles, failedPaths } = await loadSnapshotProjectsAsync({
+    ...(request.ProjectPaths?.length ? { projectPaths: request.ProjectPaths } : {}),
+    ...(signal !== undefined && { signal }),
+    onProgress: (completed, total) => {
+      report(
+        `Parsing projects (${completed}/${total})…`,
+        4 + (26 * completed) / Math.max(1, total),
+        completed,
+        total
+      );
+    },
+  });
 
-  for (let index = 0; index < totalProjects; index += chunkSize) {
-    const chunk = projectFiles.slice(index, index + chunkSize);
-    const parsed = await parseProjectsAsync(chunk.map((file) => file.fsPath));
-    projects.push(...parsed);
-
-    const completed = Math.min(totalProjects, index + chunk.length);
-    report(
-      `Parsing projects (${completed}/${totalProjects})…`,
-      4 + (26 * completed) / Math.max(1, totalProjects),
-      completed,
-      totalProjects
+  if (failedPaths.length > 0 || projects.length !== projectFiles.length) {
+    Logger.debug(
+      `getOutdatedPackages: ${projectFiles.length - projects.length} project(s) could not be parsed` +
+      ` (${failedPaths.length} timed out)`
     );
-  }
-
-  if (projects.length !== totalProjects) {
-    Logger.debug(`getOutdatedPackages: ${totalProjects - projects.length} project(s) could not be parsed`);
   }
 
   const tfmSources = new Map<string, number>();
@@ -2214,14 +2462,177 @@ async function saveOutdatedScanAsync(
   scanCache: ScanCacheStore,
   cacheKey: string,
   outdated: OutdatedPackage[],
-  blocked: NonNullable<GetOutdatedPackagesResponse["BlockedPackages"]>
+  blocked: NonNullable<GetOutdatedPackagesResponse["BlockedPackages"]>,
+  epoch: number
 ): Promise<void> {
   await scanCache.SaveAsync({
     Key: cacheKey,
     ScannedAt: new Date().toISOString(),
     Packages: outdated,
     BlockedPackages: blocked,
+  }, epoch);
+}
+
+type OutdatedScanContext = {
+  request: GetOutdatedPackagesRequest;
+  prepared: Extract<PreparedOutdatedScan, { kind: "ready" }>;
+  scanCache: ScanCacheStore;
+  /** When the caller started waiting, so the total time includes the pre-flight work. */
+  scanStarted: number;
+};
+
+/**
+ * The scan body itself: projects, candidates, dependency constraints, persisted result.
+ *
+ * Extracted so a coordinator run and any direct caller execute exactly the same steps; the
+ * coordinator decides *whether* a scan happens, this decides what it does.
+ */
+async function runOutdatedScanAsync(
+  context: OutdatedScanContext,
+  report: ScanReporter,
+  signal: AbortSignal
+): Promise<GetOutdatedPackagesResponse> {
+  const { request, prepared } = context;
+  // Captured before parsing: if a mutation lands while this scan runs, the result describes the
+  // pre-mutation workspace and must be persisted under the epoch it started with, so the next read
+  // refuses it instead of repainting the pre-update list.
+  const scanEpoch = CurrentScanCacheEpoch();
+  const projects = await parseOutdatedProjectsAsync(request, report, signal);
+  const state = buildInstalledState(projects);
+  Logger.info(`getOutdatedPackages: ${state.installedMap.size} unique packages to check`);
+
+  const candidates = await collectOutdatedCandidatesAsync({
+    installedMap: state.installedMap,
+    sources: prepared.sources,
+    request,
+    settings: prepared.settings,
+    signal,
+    report,
   });
+
+  const { outdated, blocked } = await applyOutdatedConstraintsAsync({
+    candidates,
+    groups: state.groups,
+    sources: prepared.sources,
+    signal,
+    report,
+  });
+
+  await saveOutdatedScanAsync(context.scanCache, prepared.cacheKey, outdated, blocked, scanEpoch);
+  Logger.info(
+    `getOutdatedPackages: Found ${outdated.length} outdated packages, ${blocked.length} held back in ${Date.now() - context.scanStarted}ms total`
+  );
+
+  const response: GetOutdatedPackagesResponse = { Packages: outdated };
+  if (blocked.length > 0) response.BlockedPackages = blocked;
+  return response;
+}
+
+/**
+ * Fans one scan's stage out to `ScanProgress` and, when the scan runs as a job, to the job.
+ *
+ * Without `jobReport` the reporter is exactly what the direct call has always used. Inside the
+ * coordinator run this wraps the coordinator's own reporter instead of `ScanProgress` directly: the
+ * coordinator already fans out to every attached `ScanId`, so reporting there too would double up.
+ */
+function withJobProgress(report: ScanReporter, jobReport: JobReporter | undefined): ScanReporter {
+  if (!jobReport) return report;
+  return (stage, percent, completed = 0, total = 0): void => {
+    report(stage, percent, completed, total);
+    jobReport(stage, percent);
+  };
+}
+
+/** Either the request is already answered, or the shared run has nothing left to prepare. */
+type OutdatedScanPreflight =
+  | { kind: "done"; result: Result<GetOutdatedPackagesResponse> }
+  | { kind: "ready"; prepared: Extract<PreparedOutdatedScan, { kind: "ready" }> };
+
+/**
+ * Everything before the shared run: validate the request, then either answer it without scanning
+ * (nothing configured to scan, or a cache-only read) or hand back what the scan needs.
+ */
+async function preflightOutdatedScanAsync(
+  request: GetOutdatedPackagesRequest,
+  scanCache: ScanCacheStore,
+  report: ScanReporter
+): Promise<OutdatedScanPreflight> {
+  const validationError = await validateOutdatedRequestAsync(request);
+  if (validationError) return { kind: "done", result: fail(validationError) };
+  if (request.ForceReload) nugetApiFactory.ClearCache(true);
+
+  const prepared = await prepareOutdatedScanAsync(request, scanCache, report);
+  if (prepared.kind === "empty") return { kind: "done", result: ok({ Packages: [] }) };
+  if (prepared.kind === "cached") return { kind: "done", result: ok(prepared.cached) };
+  return { kind: "ready", prepared };
+}
+
+/**
+ * The scan behind both `getOutdatedPackagesAsync` and the `outdatedScan` job.
+ *
+ * `jobReport` is the job's stage/percent sink. Without it the scan reports only through
+ * `ScanProgress` for the request's `ScanId`, which is exactly what the direct call always did;
+ * with it the same stages also drive the job, so a client can poll a scan that outlives any request
+ * deadline. Everything else - validation, `ForceReload`, `PreferCache`, the persisted scan cache and
+ * the single-flight coordinator - is identical for both entry points, so a job cannot scan
+ * differently from a request.
+ *
+ * A caller that only *joins* an in-flight run gets its progress from `ScanProgress` (its `ScanId`),
+ * not from this function: the coordinator hands the run callback to the caller that started the scan.
+ */
+async function runOutdatedPackagesAsync(
+  request: GetOutdatedPackagesRequest,
+  scanCache: ScanCacheStore,
+  signal: AbortSignal | undefined,
+  jobReport?: JobReporter
+): Promise<Result<GetOutdatedPackagesResponse>> {
+  Logger.info("getOutdatedPackages: Checking for outdated packages");
+  StatusBarUtils.show(0, "Checking for updates...");
+  const scanStarted = Date.now();
+  const scanId = request.ScanId;
+
+  try {
+    if (scanId) ScanProgress.Begin(scanId, "Resolving package sources…");
+    const preflight = await preflightOutdatedScanAsync(
+      request,
+      scanCache,
+      withJobProgress(createScanReporter(scanId), jobReport)
+    );
+    if (preflight.kind === "done") return preflight.result;
+
+    // The badge, the packages view and the Updates tab all ask for the same scan at activation.
+    // One coordinator run answers all of them, so a 463-project workspace runs one scan instead of
+    // three racing the core's deadline.
+    const prepared = preflight.prepared;
+    const response = await outdatedScans.RunAsync(
+      {
+        key: prepared.cacheKey,
+        forceReload: request.ForceReload === true,
+        scanIds: scanId ? [scanId] : [],
+        run: (sharedReport, sharedSignal) =>
+          runOutdatedScanAsync(
+            { request, prepared, scanCache, scanStarted },
+            withJobProgress(sharedReport, jobReport),
+            sharedSignal
+          ),
+      },
+      signal
+    );
+    return ok(response);
+  } catch (err) {
+    if (isCancellation(err) || signal?.aborted) {
+      // The webview cancelled the request (`rpc-cancel`) or the job signal fired; the shared scan
+      // keeps running, so a cancel is a debug line, not an error.
+      Logger.debug("getOutdatedPackages: Cancelled by the caller");
+      return fail(CANCELLED_ERROR);
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    Logger.error("getOutdatedPackages: Failed", err);
+    return fail(`Failed to check for outdated packages: ${message}`);
+  } finally {
+    if (scanId) ScanProgress.Complete(scanId);
+    StatusBarUtils.hide();
+  }
 }
 
 async function validateProjectPathsAsync(projectPaths: string[] | undefined): Promise<string | null> {
@@ -2230,29 +2641,27 @@ async function validateProjectPathsAsync(projectPaths: string[] | undefined): Pr
   return outsideWorkspace ? `Project path is outside the workspace: ${outsideWorkspace}` : null;
 }
 
-async function findScanProjectFilesAsync(
-  projectPaths: string[] | undefined,
-  excludeGlobs: string[]
-): Promise<Array<{ fsPath: string }>> {
-  let projectFiles = await vscode.workspace.findFiles(
-    "**/*.{csproj,fsproj,vbproj}",
-    "**/node_modules/**"
-  );
-  projectFiles = applyExcludeGlobs(projectFiles, excludeGlobs);
-  if (projectPaths?.length) {
-    projectFiles = projectFiles.filter((file) => projectPaths.includes(file.fsPath));
-  }
-  return projectFiles;
-}
-
+/**
+ * Projects for a report tab (inconsistencies, vulnerabilities).
+ *
+ * `projectPaths` restricts the shared snapshot; it never re-discovers or re-parses the workspace,
+ * and it keeps the exclude globs and the solution-free discovery the snapshot already applied.
+ */
 async function parseProjectsForScanAsync(
-  projectFiles: Array<{ fsPath: string }>,
-  logLabel: string
+  projectPaths: string[] | undefined,
+  logLabel: string,
+  signal?: AbortSignal
 ): Promise<{ projects: Project[]; anyCpmEnabled: boolean }> {
-  const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath));
+  const { projects, projectFiles, failedPaths } = await loadSnapshotProjectsAsync({
+    ...(projectPaths?.length ? { projectPaths } : {}),
+    ...(signal !== undefined && { signal }),
+  });
 
-  if (projects.length !== projectFiles.length) {
-    Logger.debug(`${logLabel}: ${projectFiles.length - projects.length} project(s) could not be parsed`);
+  if (failedPaths.length > 0 || projects.length !== projectFiles.length) {
+    Logger.debug(
+      `${logLabel}: ${projectFiles.length - projects.length} project(s) could not be parsed` +
+      ` (${failedPaths.length} timed out)`
+    );
   }
 
   return { projects, anyCpmEnabled: projects.some((project) => project.CpmEnabled) };
@@ -2585,50 +2994,10 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
   const scanCache = new ScanCacheStore(context?.workspaceState);
   return {
     async getProjectsAsync(request: CacheControl, signal?: AbortSignal): Promise<Result<GetProjectsResponse>> {
-      Logger.info("getProjects: Handling request");
-      const settings = getCpmSettings();
-
-      // Discover solution files (.sln / .slnx) in workspace roots (non-recursive).
-      // If any exist, restrict project discovery to only the projects they reference.
-      const slnFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
-      let solutionProjectPaths: Set<string> | null = null;
-
-      if (slnFiles.length > 0) {
-        const allPaths = (
-          await Promise.all(slnFiles.map((f) => parseSolutionProjectPathsAsync(f.fsPath)))
-        ).flat().filter((p): p is string => p !== null);
-        if (allPaths.length > 0) {
-          solutionProjectPaths = new Set(allPaths.map((p) => path.normalize(p)));
-          Logger.info(`getProjects: Found ${slnFiles.length} solution file(s), ${solutionProjectPaths.size} project(s) referenced`);
-        }
-      }
-
-      let projectFiles = await vscode.workspace.findFiles(
-        "**/*.{csproj,fsproj,vbproj}",
-        "**/node_modules/**"
-      );
-      projectFiles = applyExcludeGlobs(projectFiles, settings.excludeGlobs);
-
-      if (solutionProjectPaths !== null) {
-        projectFiles = projectFiles.filter((f) => solutionProjectPaths!.has(path.normalize(f.fsPath)));
-      }
-
-      Logger.info(`getProjects: Found ${projectFiles.length} project files`);
-
-      if (projectFiles.length === 0) {
-        return ok({ Projects: [] });
-      }
-
-      // The .NET core owns project parsing, CPM resolution and framework evaluation. VS Code
-      // keeps discovery: workspace globbing, solution restriction and exclude settings are host
-      // concerns, and duplicating them in the core would drift.
-      try {
-        const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
-        return ok({ Projects: projects });
-      } catch (error) {
-        Logger.error("getProjects: The .NET core could not parse the workspace", error);
-        return fail(formatApiError(error));
-      }
+      return loadWorkspaceProjectsAsync("getProjects", {
+        ...(request.ForceReload !== undefined && { forceReload: request.ForceReload }),
+        ...(signal !== undefined && { signal }),
+      });
     },
 
     async getPackagesAsync(request: GetPackagesRequest, signal?: AbortSignal): Promise<Result<GetPackagesResponse>> {
@@ -2807,66 +3176,30 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
     },
 
     async getOutdatedPackagesAsync(request: GetOutdatedPackagesRequest, signal?: AbortSignal): Promise<Result<GetOutdatedPackagesResponse>> {
-      Logger.info("getOutdatedPackages: Checking for outdated packages");
-      StatusBarUtils.show(0, "Checking for updates...");
-      const scanStarted = Date.now();
-      const scanId = request.ScanId;
-      const report = createScanReporter(scanId);
-
-      const validationError = await validateOutdatedRequestAsync(request);
-      if (validationError) {
-        StatusBarUtils.hide();
-        return fail(validationError);
-      }
-      if (request.ForceReload) nugetApiFactory.ClearCache(true);
-
-      try {
-        if (scanId) ScanProgress.Begin(scanId, "Resolving package sources…");
-        const prepared = await prepareOutdatedScanAsync(request, scanCache, report);
-        if (prepared.kind === "empty") return ok({ Packages: [] });
-        if (prepared.kind === "cached") {
-          StatusBarUtils.hide();
-          return ok(prepared.cached);
-        }
-
-        const projects = await parseOutdatedProjectsAsync(prepared.projectFiles, report);
-        const state = buildInstalledState(projects);
-        Logger.info(`getOutdatedPackages: ${state.installedMap.size} unique packages to check`);
-
-        const candidates = await collectOutdatedCandidatesAsync({
-          installedMap: state.installedMap,
-          sources: prepared.sources,
-          request,
-          settings: prepared.settings,
-          signal,
-          report,
-        });
-
-        const { outdated, blocked } = await applyOutdatedConstraintsAsync({
-          candidates,
-          groups: state.groups,
-          sources: prepared.sources,
-          signal,
-          report,
-        });
-
-        await saveOutdatedScanAsync(scanCache, prepared.cacheKey, outdated, blocked);
-        Logger.info(
-          `getOutdatedPackages: Found ${outdated.length} outdated packages, ${blocked.length} held back in ${Date.now() - scanStarted}ms total`
-        );
-
-        const response: GetOutdatedPackagesResponse = { Packages: outdated };
-        if (blocked.length > 0) response.BlockedPackages = blocked;
-        return ok(response);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        Logger.error("getOutdatedPackages: Failed", err);
-        return fail(`Failed to check for outdated packages: ${message}`);
-      } finally {
-        if (scanId) ScanProgress.Complete(scanId);
-        StatusBarUtils.hide();
-      }
+      return runOutdatedPackagesAsync(request, scanCache, signal);
     },
+
+    /**
+     * Starts the `outdatedScan` job: the same scan `getOutdatedPackagesAsync` runs, detached from
+     * the request so no client deadline can report a healthy scan as a failure.
+     *
+     * Single-flight, the memo, the persisted scan cache and `PreferCache`/`ForceReload` are the
+     * coordinator's own logic and are untouched: concurrent jobs join one run exactly like
+     * concurrent requests did.
+     *
+     * Cancelling the job stops the job, not the scan: the shared coordinator run keeps going and
+     * still writes its result to the memo and the scan cache, so the next poll of any caller answers
+     * from that instead of starting over.
+     */
+    startOutdatedScanAsync(request: GetOutdatedPackagesRequest): Promise<Result<StartJobResponse>> {
+      const jobId = globalThis.crypto.randomUUID();
+      OperationJobs.OutdatedScan.Start(jobId, (jobSignal, jobReport) =>
+        runOutdatedPackagesAsync(request, scanCache, jobSignal, jobReport)
+      );
+      Logger.info(`outdatedScan: Started job ${jobId}`);
+      return Promise.resolve(ok({ JobId: jobId }));
+    },
+
     async batchUpdatePackagesAsync(request: BatchUpdateRequest, signal?: AbortSignal): Promise<Result<BatchUpdateResponse>> {
       return runBatchUpdateAsync(request, signal);
     },
@@ -2933,6 +3266,25 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       const jobId = globalThis.crypto.randomUUID();
       OperationJobs.Cleanup.Start(jobId, (jobSignal, jobReport) => runCleanupAsync(jobSignal, jobReport));
       Logger.info(`cleanupUnusedPackages: Started job ${jobId}`);
+      return Promise.resolve(ok({ JobId: jobId }));
+    },
+
+    /**
+     * Starts the `workspaceScan` job: discovery plus one core parse of the whole workspace, with
+     * the solution restriction applied like `getProjectsAsync`.
+     *
+     * The project tree polls the job instead of awaiting a request, so no client deadline governs a
+     * cold parse of a large repository, and the spinner shows the core's own progress.
+     *
+     * Cancelling the job stops the job, not the parse: the shared snapshot parse keeps running and
+     * warms the cache, so the next read answers instead of starting over.
+     */
+    startWorkspaceScanAsync(request: CacheControl): Promise<Result<StartJobResponse>> {
+      const jobId = globalThis.crypto.randomUUID();
+      OperationJobs.Workspace.Start(jobId, (jobSignal, jobReport) =>
+        runWorkspaceScanAsync(request, jobSignal, jobReport)
+      );
+      Logger.info(`workspaceScan: Started job ${jobId}`);
       return Promise.resolve(ok({ JobId: jobId }));
     },
 
@@ -3007,9 +3359,10 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       if (validationError) return fail(validationError);
 
       try {
-        const settings = getCpmSettings();
-        const projectFiles = await findScanProjectFilesAsync(request.ProjectPaths, settings.excludeGlobs);
-        const { projects, anyCpmEnabled } = await parseProjectsForScanAsync(projectFiles, "getInconsistentPackages");
+        const { projects, anyCpmEnabled } = await parseProjectsForScanAsync(
+          request.ProjectPaths,
+          "getInconsistentPackages"
+        );
         const packageMap = buildVersionConsistencyMap(projects);
 
         const inconsistent = buildInconsistentPackages(packageMap, anyCpmEnabled);
@@ -3038,9 +3391,11 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         if (request.ForceReload) await clearVulnerabilityCachesAsync(sources);
         if (sources.length === 0) return ok({ Packages: [] });
 
-        const settings = getCpmSettings();
-        const projectFiles = await findScanProjectFilesAsync(request.ProjectPaths, settings.excludeGlobs);
-        const { projects } = await parseProjectsForScanAsync(projectFiles, "getVulnerablePackages");
+        const { projects } = await parseProjectsForScanAsync(
+          request.ProjectPaths,
+          "getVulnerablePackages",
+          signal
+        );
 
         const installedMap = buildVulnerableInstalledMap(projects);
         await addTransitivePackagesAsync(projects, installedMap);
@@ -3185,6 +3540,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         // authoritative and report its failure instead of claiming success.
         const failure = await restoreProjectsInternalAsync([request.ProjectPath], undefined, false);
         toolchainHealthCache = null;
+        invalidateAfterMutation();
         Logger.info(
           `fixRestoreConflict: ${request.PackageId} -> ${request.Version} (${target}) restored=${!failure}`
         );
@@ -3256,6 +3612,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
 
         await WriteCentralVersionsAsync(propsFile, plan, projectPaths, workspaceRoots);
+        invalidateAfterMutation();
 
         const failure = await restoreProjectsInternalAsync([projectPath], undefined, false);
         if (failure) {
@@ -3506,17 +3863,7 @@ function findDirectoryPackagesPropsPath(projectPath: string): string | null {
  */
 async function findProjectFilesForDiagnosticsAsync(): Promise<string[]> {
   const settings = getCpmSettings();
-  const slnFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
-
-  let solutionProjectPaths: Set<string> | null = null;
-  if (slnFiles.length > 0) {
-    const allPaths = (
-      await Promise.all(slnFiles.map((file) => parseSolutionProjectPathsAsync(file.fsPath)))
-    ).flat().filter((candidate): candidate is string => candidate !== null);
-    if (allPaths.length > 0) {
-      solutionProjectPaths = new Set(allPaths.map((candidate) => path.normalize(candidate)));
-    }
-  }
+  const solutionProjectPaths = await findSolutionProjectPathsAsync();
 
   let files = await vscode.workspace.findFiles(
     "**/*.{csproj,fsproj,vbproj}",
@@ -3585,6 +3932,123 @@ async function rollbackFilesAsync(
   return errors.length > 0 ? errors.join("; ") : undefined;
 }
 
+type RestoreBatchOutcome = "restored" | "fallback";
+
+/**
+ * Restores each requested project through the solution that owns it, one process per solution.
+ *
+ * A batch update hands this helper every affected project — a 152-project solution used to become
+ * 152 sequential `dotnet restore <project>` runs. Restoring the solution once covers all of them.
+ * Grouping is deliberately first-wins: a project listed by two solutions is restored through the
+ * first discovered one, so no project is restored twice.
+ *
+ * Returns `"fallback"` when the batch could not be used (no solution covers the requested paths,
+ * a restore failed, or the operation was cancelled). The caller then runs its per-project loop,
+ * which attributes the failure and applies conflict resolution exactly as before.
+ */
+async function restoreViaSolutionsAsync(
+  projectPaths: string[],
+  signal: AbortSignal | undefined,
+  onProgress?: (progress: RestoreProgress) => void
+): Promise<RestoreBatchOutcome> {
+  const uniquePaths = [...new Set(projectPaths)];
+  const { projectsBySolution, projectsWithoutSolution } = await groupProjectsBySolutionAsync(uniquePaths);
+
+  // Nothing to batch: let the caller's per-project loop run rather than restoring twice over.
+  if (projectsBySolution.size === 0) return "fallback";
+
+  // One restore per owning solution, then one per project no solution covers.
+  const units: RestoreUnit[] = [
+    ...[...projectsBySolution].map(([solutionPath, members]) => ({
+      path: solutionPath,
+      stage: `Restoring ${path.basename(solutionPath)} (${members.length} project(s))…`,
+    })),
+    ...projectsWithoutSolution.map((projectPath) => ({
+      path: projectPath,
+      stage: `Restoring ${path.basename(projectPath)}…`,
+    })),
+  ];
+
+  try {
+    for (const [index, unit] of units.entries()) {
+      if (signal?.aborted) return "fallback";
+      await restoreUnitAsync(unit, index, units.length, signal, onProgress);
+    }
+  } catch (err) {
+    Logger.warn(`restoreProjects: Batched restore failed, falling back to per-project restores`, err);
+    return "fallback";
+  }
+
+  return "restored";
+}
+
+type RestoreUnit = {
+  path: string;
+  stage: string;
+};
+
+/** Restores one unit — a solution, or a project no solution covers — reporting its stage. */
+async function restoreUnitAsync(
+  unit: RestoreUnit,
+  index: number,
+  total: number,
+  signal: AbortSignal | undefined,
+  onProgress: ((progress: RestoreProgress) => void) | undefined
+): Promise<void> {
+  const reportProgress = (progress: { stage: string; percent: number }): void => {
+    onProgress?.({ projectPath: unit.path, index, total, stage: progress.stage, percent: progress.percent });
+  };
+  onProgress?.({ projectPath: unit.path, index, total, stage: unit.stage, percent: 0 });
+  await TaskExecutor.ExecuteCommandAsync(
+    "dotnet",
+    ["restore", unit.path.replace(/\\/g, "/")],
+    `restore-${path.basename(unit.path)}`,
+    signal,
+    undefined,
+    reportProgress,
+    CreateDotnetOptions(unit.path)
+  );
+}
+
+/**
+ * Groups the requested projects by the solution that owns them.
+ *
+ * Discovery matches `findSolutionProjectPathsAsync`: only the workspace roots are searched, so a
+ * nested sample solution cannot claim a workspace project. Ownership is first-wins, so a project
+ * listed by two solutions is restored through the first discovered one and never twice.
+ */
+async function groupProjectsBySolutionAsync(uniquePaths: string[]): Promise<{
+  projectsBySolution: Map<string, string[]>;
+  projectsWithoutSolution: string[];
+}> {
+  const solutionFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
+
+  const solutionByProject = new Map<string, string>();
+  for (const solution of solutionFiles) {
+    const members = await parseSolutionProjectPathsAsync(solution.fsPath);
+    if (!members) continue;
+    for (const member of members) {
+      const normalized = path.normalize(member);
+      if (!solutionByProject.has(normalized)) solutionByProject.set(normalized, solution.fsPath);
+    }
+  }
+
+  const projectsBySolution = new Map<string, string[]>();
+  const projectsWithoutSolution: string[] = [];
+  for (const projectPath of uniquePaths) {
+    const solutionPath = solutionByProject.get(path.normalize(projectPath));
+    if (!solutionPath) {
+      projectsWithoutSolution.push(projectPath);
+      continue;
+    }
+    const group = projectsBySolution.get(solutionPath) ?? [];
+    group.push(projectPath);
+    projectsBySolution.set(solutionPath, group);
+  }
+
+  return { projectsBySolution, projectsWithoutSolution };
+}
+
 async function restoreProjectsInternalAsync(
   projectPaths: string[],
   signal: AbortSignal | undefined,
@@ -3596,6 +4060,22 @@ async function restoreProjectsInternalAsync(
   const summaries: string[] = [];
   const failures: DotnetFailure[] = [];
   const uniquePaths = [...new Set(projectPaths)];
+
+  // Restoring the solution that owns a set of projects is one process instead of one per project.
+  // The per-project loop below stays the fallback, so a failure is still attributed to a project
+  // and conflict resolution runs exactly as it did before.
+  if (uniquePaths.length > 1) {
+    const outcome = await restoreViaSolutionsAsync(uniquePaths, signal, onProgress);
+    if (outcome === "restored") {
+      Logger.info(
+        `restoreProjects: Restored ${uniquePaths.length} project(s) through their solution(s)`
+      );
+      return null;
+    }
+    Logger.info(
+      `restoreProjects: Batched solution restore did not complete; restoring ${uniquePaths.length} project(s) individually`
+    );
+  }
 
   for (const [index, projectPath] of uniquePaths.entries()) {
     if (signal?.aborted) break;
@@ -3691,11 +4171,7 @@ function FormatRestoreConflictInfo(conflicts: RestoreConflictInfo[]): string {
  */
 async function buildCleanupReportAsync(signal?: AbortSignal): Promise<CleanupReport> {
   const settings = getCpmSettings();
-  const projectFiles = applyExcludeGlobs(
-    await vscode.workspace.findFiles("**/*.{csproj,fsproj,vbproj}", "**/node_modules/**"),
-    settings.excludeGlobs
-  );
-  const used = await collectUsedPackagesAsync(projectFiles, signal);
+  const used = await collectUsedPackagesAsync(undefined, signal);
 
   const propsFiles = applyExcludeGlobs(
     await vscode.workspace.findFiles(
@@ -3714,19 +4190,22 @@ async function buildCleanupReportAsync(signal?: AbortSignal): Promise<CleanupRep
   };
 }
 
+/** Package ids in use, read from the shared snapshot so cleanup does not re-parse the workspace. */
 async function collectUsedPackagesAsync(
-  projectFiles: Array<{ fsPath: string }>,
+  projectPaths: string[] | undefined,
   signal?: AbortSignal
 ): Promise<Map<string, string>> {
   const used = new Map<string, string>();
-  const projects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
+  const { projects, projectFiles, failedPaths } = await loadSnapshotProjectsAsync({
+    ...(projectPaths?.length ? { projectPaths } : {}),
+    ...(signal !== undefined && { signal }),
+  });
 
   // Do not produce a report that could delete a used package because one project could not be
   // read: the core skipping a project is a gap, so refuse to answer.
-  if (projects.length !== projectFiles.length) {
-    throw new Error(
-      `Failed to scan ${projectFiles.length - projects.length} of ${projectFiles.length} project(s)`
-    );
+  const missing = Math.max(failedPaths.length, projectFiles.length - projects.length);
+  if (missing > 0) {
+    throw new Error(`Failed to scan ${missing} of ${projectFiles.length} project(s)`);
   }
 
   for (const project of projects) {
@@ -3788,42 +4267,103 @@ function collectMissing(used: Map<string, string>, defined: Map<string, string>)
 }
 
 async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSignal): Promise<void> {
-  const settings = getCpmSettings();
-  let projectFiles = await vscode.workspace.findFiles(
-    "**/*.{csproj,fsproj,vbproj}",
-    "**/node_modules/**"
-  );
-  projectFiles = applyExcludeGlobs(projectFiles, settings.excludeGlobs);
+  // The package reference this prune follows was just removed, so any earlier snapshot predates
+  // the write; re-reading is the only way to see whether the entry is now unused.
+  invalidateAfterMutation();
 
-  const cpmFiles = new Set<string>();
-  const referencedCpmFiles = new Set<string>();
+  // The pruned CPM file must never lose an entry a project still uses, so a project the core
+  // could not read counts as referencing it.
+  const snapshot = await loadSnapshotProjectsAsync({
+    ...(signal !== undefined && { signal }),
+  });
+  const projectFiles = snapshot.projectFiles.map((fsPath) => ({ fsPath }));
 
-  // Parse once, up front: the loop below needs each project's package ids and must stay
-  // conservative about projects the core could not read.
-  const parsedProjects = await parseProjectsAsync(projectFiles.map((file) => file.fsPath), signal);
-  const packagesByPath = new Map(
-    parsedProjects.map((project) => [path.normalize(project.Path), project.Packages] as const)
-  );
+  const packagesByPath = await loadPackagesByProjectPathAsync(projectFiles, signal);
+  const usage = await collectCpmPackageUsageAsync(projectFiles, packagesByPath, packageId, signal);
+  if (usage.aborted) return;
+
+  await removeUnusedCpmVersionsAsync(usage.cpmFiles, usage.referencedCpmFiles, packageId);
+  invalidateAfterMutation();
+}
+
+type CpmPackageUsage = {
+  /** Set when the caller cancelled; the CPM files must then be left untouched. */
+  aborted: boolean;
+  /** Every CPM file that governs at least one project. */
+  cpmFiles: Set<string>;
+  /** CPM files that must keep the entry: still referenced, or unreadable project. */
+  referencedCpmFiles: Set<string>;
+};
+
+/** Reads each project's packages from the shared snapshot, keyed by normalized path. */
+async function loadPackagesByProjectPathAsync(
+  projectFiles: Array<{ fsPath: string }>,
+  signal?: AbortSignal
+): Promise<Map<string, Project["Packages"]>> {
+  const { projects, failedPaths } = await loadSnapshotProjectsAsync({
+    projectPaths: projectFiles.map((file) => file.fsPath),
+    ...(signal !== undefined && { signal }),
+  });
+
+  if (failedPaths.length > 0) {
+    // Conservative: a project that timed out keeps its CPM entries, see collectCpmPackageUsageAsync.
+    Logger.warn(
+      `cleanupUnusedCpmPackage: ${failedPaths.length} of ${projectFiles.length} project(s) timed out while parsing`
+    );
+  }
+
+  return new Map(projects.map((project) => [path.normalize(project.Path), project.Packages] as const));
+}
+
+/**
+ * Maps each project to the CPM file that governs it and records which of those files still
+ * reference the package. A project the core could not read counts as referencing it.
+ */
+async function collectCpmPackageUsageAsync(
+  projectFiles: Array<{ fsPath: string }>,
+  packagesByPath: Map<string, Project["Packages"]>,
+  packageId: string,
+  signal?: AbortSignal
+): Promise<CpmPackageUsage> {
+  const usage: CpmPackageUsage = {
+    aborted: false,
+    cpmFiles: new Set<string>(),
+    referencedCpmFiles: new Set<string>(),
+  };
+  const wantedId = packageId.toLowerCase();
 
   for (const file of projectFiles) {
-    if (signal?.aborted) return;
+    if (signal?.aborted) {
+      usage.aborted = true;
+      return usage;
+    }
+
     const cpmFile = await CpmReader.FindCpmFilePathAsync(file.fsPath);
     if (!cpmFile) continue;
-    cpmFiles.add(cpmFile);
+    usage.cpmFiles.add(cpmFile);
 
     const packages = packagesByPath.get(path.normalize(file.fsPath));
     if (!packages) {
       // Be conservative: if a project cannot be parsed, never delete its CPM entry.
       Logger.warn(`cleanupUnusedCpmPackage: Could not parse ${file.fsPath}`);
-      referencedCpmFiles.add(cpmFile);
+      usage.referencedCpmFiles.add(cpmFile);
       continue;
     }
 
-    if (packages.some((pkg) => pkg.Id.toLowerCase() === packageId.toLowerCase())) {
-      referencedCpmFiles.add(cpmFile);
+    if (packages.some((pkg) => pkg.Id.toLowerCase() === wantedId)) {
+      usage.referencedCpmFiles.add(cpmFile);
     }
   }
 
+  return usage;
+}
+
+/** Removes the package from every CPM file no project references any more. */
+async function removeUnusedCpmVersionsAsync(
+  cpmFiles: Set<string>,
+  referencedCpmFiles: Set<string>,
+  packageId: string
+): Promise<void> {
   for (const cpmFile of cpmFiles) {
     if (referencedCpmFiles.has(cpmFile)) continue;
     try {

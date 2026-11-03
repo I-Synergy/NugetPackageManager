@@ -2,8 +2,12 @@ import * as assert from 'assert';
 import * as sinon from 'sinon';
 import { JobRegistry, OperationJobs } from '@/host/utilities/operation-jobs';
 import { Logger } from '@/common/logger';
-import { ok, fail } from '@/common/rpc/result';
-import type { BatchUpdateResponse, CleanupUnusedResponse } from '@/common/rpc/types';
+import { ok, fail, CANCELLED_ERROR } from '@/common/rpc/result';
+import type {
+    BatchUpdateResponse,
+    CleanupUnusedResponse,
+    GetOutdatedPackagesResponse,
+} from '@/common/rpc/types';
 
 suite('OperationJobs', () => {
     let sandbox: sinon.SinonSandbox;
@@ -144,6 +148,104 @@ suite('OperationJobs', () => {
 
     test('returns null for an unknown job', () => {
         assert.strictEqual(OperationJobs.Get('nope'), null);
+    });
+
+    test('tracks and cancels the workspace scan kind', async () => {
+        const gate = blockingRunner();
+        let observedAbort = false;
+
+        OperationJobs.Workspace.Start('scan-1', async (signal, report) => {
+            report('Parsing projects (1/2)…', 50);
+            signal.addEventListener('abort', () => {
+                observedAbort = true;
+                gate.open();
+            }, { once: true });
+            await gate.wait;
+            return fail('The workspace scan was cancelled');
+        });
+
+        const running = OperationJobs.Get('scan-1');
+        assert.ok(running);
+        assert.strictEqual(running.Kind, 'workspaceScan');
+        assert.strictEqual(running.State, 'running');
+        assert.strictEqual(running.Stage, 'Parsing projects (1/2)…');
+        assert.strictEqual(running.Percent, 50);
+
+        assert.strictEqual(OperationJobs.Cancel('scan-1'), true);
+        await OperationJobs.Workspace.WaitAsync('scan-1');
+
+        assert.strictEqual(observedAbort, true);
+        const finished = OperationJobs.Get('scan-1');
+        assert.strictEqual(finished?.Kind, 'workspaceScan');
+        assert.strictEqual(finished?.State, 'cancelled');
+    });
+
+    test('tracks and cancels the outdated scan kind', async () => {
+        const gate = blockingRunner();
+        let observedAbort = false;
+
+        OperationJobs.OutdatedScan.Start('outdated-1', async (signal, report) => {
+            report('Checking latest versions (3/10)…', 48);
+            signal.addEventListener('abort', () => {
+                observedAbort = true;
+                gate.open();
+            }, { once: true });
+            await gate.wait;
+            return fail(CANCELLED_ERROR);
+        });
+
+        const running = OperationJobs.Get('outdated-1');
+        assert.ok(running);
+        assert.strictEqual(running.Kind, 'outdatedScan');
+        assert.strictEqual(running.State, 'running');
+        assert.strictEqual(running.Stage, 'Checking latest versions (3/10)…');
+        assert.strictEqual(running.Percent, 48);
+
+        assert.strictEqual(OperationJobs.Cancel('outdated-1'), true);
+        await OperationJobs.OutdatedScan.WaitAsync('outdated-1');
+
+        assert.strictEqual(observedAbort, true);
+        const finished = OperationJobs.Get('outdated-1');
+        assert.strictEqual(finished?.Kind, 'outdatedScan');
+        assert.strictEqual(finished?.State, 'cancelled');
+    });
+
+    test('keeps the outdated scan response on a completed job', async () => {
+        const scanResponse: GetOutdatedPackagesResponse = {
+            Packages: [{
+                Id: 'Pkg.Shared',
+                InstalledVersion: '1.0.0',
+                LatestVersion: '2.0.0',
+                Projects: [{ Name: 'A', Path: '/ws/A.csproj', Version: '1.0.0' }],
+                SourceUrl: 'https://api.nuget.org/v3/index.json',
+                SourceName: 'nuget.org',
+            }],
+        };
+
+        OperationJobs.OutdatedScan.Start('outdated-2', async () => ok(scanResponse));
+        await OperationJobs.OutdatedScan.WaitAsync('outdated-2');
+
+        const finished = OperationJobs.Get('outdated-2');
+        assert.strictEqual(finished?.Kind, 'outdatedScan');
+        assert.strictEqual(finished?.State, 'completed');
+        assert.deepStrictEqual(
+            finished?.Kind === 'outdatedScan' ? finished.Response : undefined,
+            scanResponse
+        );
+
+        OperationJobs.Reset();
+        assert.strictEqual(OperationJobs.Get('outdated-2'), null);
+    });
+
+    test('Reset drops a finished workspace scan', async () => {        OperationJobs.Workspace.Start('scan-2', async () => ok({ Projects: [] }));
+        await OperationJobs.Workspace.WaitAsync('scan-2');
+
+        const finished = OperationJobs.Get('scan-2');
+        assert.strictEqual(finished?.Kind, 'workspaceScan');
+        assert.strictEqual(finished?.State, 'completed');
+
+        OperationJobs.Reset();
+        assert.strictEqual(OperationJobs.Get('scan-2'), null);
     });
 
     test('clamps reported percentages and ignores reports after completion', async () => {

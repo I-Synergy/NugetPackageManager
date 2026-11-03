@@ -9,6 +9,7 @@ const FakeSidecar = String.raw`
 process.stdin.setEncoding("utf8");
 process.stdout.write(JSON.stringify({ ready: true, protocol: 1, version: "test" }) + "\n");
 let buffer = "";
+let trickle = null;
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
   let index = buffer.indexOf("\n");
@@ -27,11 +28,37 @@ function handle(request) {
     return;
   }
   if (request.method === "cancel") {
+    if (trickle !== null) {
+      clearInterval(trickle);
+      trickle = null;
+    }
     process.stderr.write("cancel:" + request.params.target + "\n");
     reply({ id: request.id, ok: true, value: { cancelled: request.params.target } });
     return;
   }
   if (request.method === "hang") {
+    return;
+  }
+  if (request.method === "progress") {
+    const total = request.params.total;
+    for (let completed = 1; completed <= total; completed += 1) {
+      reply(progressFor(request.id, completed, total));
+    }
+    reply({ id: request.id, ok: true, value: { completed: total } });
+    return;
+  }
+  if (request.method === "stall") {
+    // One progress line proves the sidecar is alive, then it goes quiet without ever answering.
+    reply(progressFor(request.id, 1, 2));
+    return;
+  }
+  if (request.method === "trickle") {
+    // Progress keeps flowing forever and the request is never answered.
+    let completed = 0;
+    trickle = setInterval(() => {
+      completed += 1;
+      reply(progressFor(request.id, completed, 1000));
+    }, 25);
     return;
   }
   if (request.method === "crash") {
@@ -42,6 +69,16 @@ function handle(request) {
     return;
   }
   reply({ id: request.id, ok: false, error: { code: "unknownMethod", message: "no such method" } });
+}
+function progressFor(id, completed, total) {
+  return {
+    type: "progress",
+    id,
+    stage: "Parsing projects (" + completed + "/" + total + ")…",
+    percent: Math.round((completed / total) * 100),
+    completed,
+    total,
+  };
 }
 function reply(message) {
   process.stdout.write(JSON.stringify(message) + "\n");
@@ -103,6 +140,85 @@ suite("CoreClient", () => {
     );
 
     await WaitForAsync(() => canceled.some((line) => line.startsWith("cancel:")));
+  });
+
+  test("delivers progress to onProgress without settling the call", async () => {
+    const seen: Array<string> = [];
+    client = new CoreClient(CreateOptions());
+
+    const result = await client.CallAsync<{ completed: number }>(
+      "progress",
+      { total: 3 },
+      undefined,
+      {
+        onProgress: (progress) => seen.push(`${progress.completed}/${progress.total}`),
+      }
+    );
+
+    assert.deepStrictEqual(seen, ["1/3", "2/3", "3/3"]);
+    assert.deepStrictEqual(result, { completed: 3 });
+  });
+
+  test("rejects with timeout and cancels when progress stops", async () => {
+    const canceled: Array<string> = [];
+    client = new CoreClient(
+      CreateOptions({ requestTimeoutMs: 60_000, onStderr: (line) => canceled.push(line) })
+    );
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      () =>
+        client!.CallAsync("stall", {}, undefined, {
+          timeoutMs: 60_000,
+          stallTimeoutMs: 300,
+          onProgress: () => undefined,
+        }),
+      (error: unknown) =>
+        error instanceof CoreError &&
+        error.code === "timeout" &&
+        error.message === "The .NET sidecar stopped reporting progress for stall after 300ms."
+    );
+    // The stall guard, not the 60 s cap, is what failed the call.
+    assert.ok(Date.now() - startedAt < 30_000);
+
+    await WaitForAsync(() => canceled.some((line) => line.startsWith("cancel:")));
+  });
+
+  test("still applies the overall cap while progress is flowing", async () => {
+    client = new CoreClient(CreateOptions({ requestTimeoutMs: 60_000 }));
+    let reports = 0;
+
+    await assert.rejects(
+      () =>
+        client!.CallAsync("trickle", {}, undefined, {
+          timeoutMs: 600,
+          stallTimeoutMs: 400,
+          onProgress: () => {
+            reports += 1;
+          },
+        }),
+      (error: unknown) =>
+        error instanceof CoreError &&
+        error.code === "timeout" &&
+        /did not answer request \d+ in time/.test(error.message)
+    );
+
+    assert.ok(reports > 0, "progress should have been delivered before the cap fired");
+  });
+
+  test("a three-argument call keeps the client deadline and ignores progress", async () => {
+    client = new CoreClient(CreateOptions({ requestTimeoutMs: 300 }));
+
+    await assert.rejects(
+      () => client!.CallAsync("trickle", {}),
+      (error: unknown) =>
+        error instanceof CoreError &&
+        error.code === "timeout" &&
+        /did not answer request \d+ in time/.test(error.message)
+    );
+
+    const result = await client.CallAsync<{ completed: number }>("progress", { total: 2 });
+    assert.deepStrictEqual(result, { completed: 2 });
   });
 
   test("rejects with cancelled when the signal aborts", async () => {

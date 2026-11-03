@@ -6,12 +6,13 @@ import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
-import { buildFrameworkOptions, getFrameworkGroupKey, getFrameworkLabel, matchesFrameworkSelection, SHARED_FRAMEWORK } from "@/common/framework";
+import { buildFrameworkOptions, getFrameworkGroupKey, getFrameworkLabel, matchesFrameworkSelection, SHARED_FRAMEWORK, shouldShowFrameworkGroups } from "@/common/framework";
 import { OutdatedPackageViewModel, PackageViewModel } from "../types";
 import type { GetOutdatedPackagesRequest, GetOutdatedPackagesResponse, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateConflict, DotnetFailureInfo } from "@/common/rpc/types";
 import { RangeLowerBound } from "@/common/package-range";
 import type { Result } from "@/common/rpc/result";
-import { runBatchUpdateJobAsync } from "@/web/jobs";
+import { CANCELLED_ERROR, isCancelledMessage } from "@/common/rpc/result";
+import { runBatchUpdateJobAsync, runOutdatedScanJobAsync } from "@/web/jobs";
 import "./package-row";
 import "./actionable-error";
 
@@ -403,6 +404,22 @@ export class UpdatesView extends LitElement {
   @property({ attribute: false }) availableFrameworks: Array<{ value: string; label: string }> = [];
 
   private _activeScanId: string = "";
+  /**
+   * The next run must bypass the host's cache.
+   *
+   * It travels through a field, not through the task's `args()`: `@lit/task` compares `args()`
+   * against the arguments a run started with and aborts the in-flight run when they differ, so a
+   * `forceReload` that lives in the args aborts every forced load on the next host update.
+   */
+  private _forceReloadNext = false;
+  /**
+   * Bumped by every successful update.
+   *
+   * A scan that was already in flight when the update landed holds the pre-update list; when it
+   * comes back its result is discarded instead of repainted. The forced reload that follows the
+   * `packages-updated` event repopulates the list.
+   */
+  private _mutationEpoch = 0;
   private _progressTimer: ReturnType<typeof setInterval> | undefined;
   private _progressPollInFlight = false;
   private _jobAbort: AbortController | undefined;
@@ -551,7 +568,12 @@ export class UpdatesView extends LitElement {
 
   private readonly _loadTask = new Task(this, {
 
-    task: async ([projectPaths, sourceUrl, prerelease, forceReload], { signal }) => {
+    task: async ([projectPaths, sourceUrl, prerelease], { signal }) => {
+      // Read and clear before the first await: a re-render during this run must not reset it for
+      // the run that is already in flight.
+      const forceReload = this._forceReloadNext;
+      this._forceReloadNext = false;
+      const epoch = this._mutationEpoch;
       const scanId = globalThis.crypto.randomUUID();
       this._activeScanId = scanId;
       this.scanProgress = {
@@ -562,11 +584,38 @@ export class UpdatesView extends LitElement {
       };
       this.startProgressPolling(scanId);
       try {
-        const result = await hostApi.getOutdatedPackagesAsync(
+        // The scan runs as a host job: a cold parse of a large repository (and the feed walk that
+        // follows) outgrows the RPC deadline, and a client deadline must never turn a healthy scan
+        // into "Failed to check for updates". `signal` only stops this view waiting.
+        const result = await runOutdatedScanJobAsync(
           this.buildRequest(projectPaths, sourceUrl, prerelease, forceReload, false, scanId),
-          signal
+          {
+            signal,
+            // The job's stage/percent feed the same banner the `ScanId` polling fills; the polling
+            // keeps the finer counts, so one banner is written, never two copies of the text.
+            onProgress: (progress) => {
+              if (this._activeScanId !== scanId) return;
+              this.scanProgress = {
+                Stage: progress.Stage,
+                Percent: progress.Percent,
+                Completed: this.scanProgress?.Completed ?? 0,
+                Total: this.scanProgress?.Total ?? 0,
+              };
+            },
+          }
         );
-        if (!result.ok) throw new Error("Failed to check for updates");
+        if (!result.ok) {
+          // A superseded run, a closed view or a cancelled job is not a scan failure: the host
+          // keeps scanning, and the next run paints its result.
+          if (isCancelledMessage(result.error)) throw new Error(CANCELLED_ERROR);
+          throw new Error(result.error);
+        }
+        // An update landed while this scan was running, so what it found describes the workspace
+        // as it was before the write. Publish nothing: the forced reload repopulates the list.
+        if (epoch !== this._mutationEpoch) {
+            const discarded: GetOutdatedPackagesResponse = { Packages: [] };
+            return discarded;
+        }
         return result.value;
       } finally {
         if (this._activeScanId === scanId) {
@@ -577,7 +626,7 @@ export class UpdatesView extends LitElement {
         }
       }
     },
-    args: () => [this.projectPaths, this.sourceUrl, this.prerelease, false] as [string[], string, boolean, boolean],
+    args: () => [this.projectPaths, this.sourceUrl, this.prerelease] as [string[], string, boolean],
     onComplete: (response) => {
       this.applyScan(response, false);
     },
@@ -707,7 +756,8 @@ export class UpdatesView extends LitElement {
     }
 
     try {
-      await this._loadTask.run([this.projectPaths, this.sourceUrl, this.prerelease, forceReload]);
+      this._forceReloadNext = forceReload;
+      await this._loadTask.run();
     } catch (err) {
       this.isRefreshing = false;
       if (this.packages.length > 0) {
@@ -765,6 +815,9 @@ export class UpdatesView extends LitElement {
   }
 
   private async handleSingleSuccessAsync(pkg: OutdatedPackageViewModel, version: string): Promise<void> {
+    // Bumped before `packages-updated`: a scan still in flight from before the write must not
+    // paint the pre-update list when it lands.
+    this._mutationEpoch += 1;
     // Condition + TFM identify a framework-scoped row, so updating the net10.0
     // line does not also remove the net11.0 entry.
     this.packages = this.packages.filter(
@@ -1109,6 +1162,8 @@ export class UpdatesView extends LitElement {
   }
 
   private async handleSelectedSuccessAsync(packages: OutdatedPackageViewModel[]): Promise<void> {
+    // See `handleSingleSuccessAsync`: any scan in flight predates this write.
+    this._mutationEpoch += 1;
     // The transaction succeeded, so every selected row can be removed.
     this.packages = this.packages.filter((pkg) => !packages.includes(pkg));
     this.dispatchEvent(new CustomEvent<number>("count-changed", {
@@ -1403,12 +1458,22 @@ export class UpdatesView extends LitElement {
     `;
   }
 
+  private get loadErrorMessage(): string {
+    const error = this._loadTask.error;
+    if (error instanceof Error) return error.message;
+    return typeof error === "string" ? error : "";
+  }
+
   private renderError(): unknown {
     if (this._loadTask.status !== TaskStatus.ERROR) return nothing;
+    const message = this.loadErrorMessage;
+    // An aborted run is the view's own doing (a superseded request), not a failure to report.
+    if (isCancelledMessage(message)) return nothing;
     return html`
       <div class="error" role="alert">
         <span class="codicon codicon-error"></span>
-        Failed to check for updates
+        <div class="empty-title">Failed to check for updates</div>
+        ${message ? html`<div class="empty-hint">${message}</div>` : nothing}
       </div>
     `;
   }
@@ -1425,26 +1490,33 @@ export class UpdatesView extends LitElement {
     const visible = this.visiblePackages;
     const show = this._loadTask.status !== TaskStatus.PENDING && visible.length > 0;
     if (!show) return nothing;
+    const groups = this.groupedVisiblePackages;
+    // A single framework line has nothing to separate, so it gets no header.
+    const showGroupHeaders = shouldShowFrameworkGroups(groups);
     return html`
       <div class="package-list" role="list" aria-label="Outdated packages">
-        ${this.groupedVisiblePackages.map(
+        ${groups.map(
           (group) => html`
-            <label class="group-header">
-              <input
-                type="checkbox"
-                class="group-select"
-                aria-label="Select all ${group.label} updates"
-                .checked=${group.packages.length > 0 && group.packages.every((pkg) => pkg.Selected)}
-                .indeterminate=${group.packages.some((pkg) => pkg.Selected) && !group.packages.every((pkg) => pkg.Selected)}
-                @change=${(e: Event) =>
-                  this.toggleGroupSelection(
-                    group.packages,
-                    (e.target as HTMLInputElement).checked
-                  )}
-              />
-              <span>${group.label}</span>
-              <span class="group-count">${group.packages.length}</span>
-            </label>
+            ${showGroupHeaders
+              ? html`
+                  <label class="group-header">
+                    <input
+                      type="checkbox"
+                      class="group-select"
+                      aria-label="Select all ${group.label} updates"
+                      .checked=${group.packages.length > 0 && group.packages.every((pkg) => pkg.Selected)}
+                      .indeterminate=${group.packages.some((pkg) => pkg.Selected) && !group.packages.every((pkg) => pkg.Selected)}
+                      @change=${(e: Event) =>
+                        this.toggleGroupSelection(
+                          group.packages,
+                          (e.target as HTMLInputElement).checked
+                        )}
+                    />
+                    <span>${group.label}</span>
+                    <span class="group-count">${group.packages.length}</span>
+                  </label>
+                `
+              : nothing}
             ${group.packages.map((pkg) => this.renderPackageRow(pkg))}
           `
         )}
