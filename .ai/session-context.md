@@ -1,12 +1,62 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-11-03
+**Last Updated:** 2026-11-04
 **Project Version:** 2.2.0
 **Branch:** main
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
 
 ---
+
+## Completed: repo-level .NET tools under Toolchain (2026-11-03)
+
+Request: the extension only managed NuGet packages; local tools in `.config/dotnet-tools.json` are
+NuGet-resolvable too, so should they be updatable under Toolchain? Answer: yes, but as its own
+domain surface — detect + explicit per-tool update + health, never folded into Installed/Updates.
+Plan `.ai/plans/local-tools.md`; record `.ai/completed/local-tools.md`.
+
+- **Core**: `Core.Workspace/Tools/` — `LocalToolManifestLocator` (nested manifests, skips
+  `bin`/`obj`/`node_modules`/`.git`, dedupe by real path), `LocalToolManifestReader`,
+  `LocalToolManifestWriter` (targeted byte edit of one tool's `version`, whole-document parse first,
+  `ExpectedVersion` + last-write guard, BOM/CRLF/unknown fields preserved), and
+  `LocalToolOutdatedResolver` (no downgrade, prerelease on request). Handlers `readLocalTools` /
+  `updateLocalTool` in `ToolHandlers.cs`; `evaluateToolchain` gained an optional `localTools` slice
+  and the findings `LocalToolManifestInvalid` / `LocalToolNotRestored`.
+- **Host**: `utilities/local-tools.ts`; `HostAPI.getLocalToolsAsync` / `updateLocalToolAsync`;
+  `getToolchainHealthAsync` merges the tool health slice with `ResolveLatest: false` (health stays
+  offline); the diagnostics report gained `--- local tools ---`. `NotRestored` is a best-effort
+  global-packages-folder probe (`NUGET_PACKAGES` or `~/.nuget/packages`); `dotnet tool list --local`
+  cannot prove a download, so it is not used. An update writes the manifest, then runs
+  `dotnet tool restore` with cwd = the manifest folder and reports a failed/timed-out restore
+  without rolling back.
+- **Webview**: "Repo tools" card in `toolchain-view` — manifest groups with relative paths,
+  per-tool rows with commands/id/`current → latest`, pinned badge, per-row Update only, per-row
+  status, empty state; no "update all"; refreshes on Re-check and does not touch the workspace
+  snapshot. The webview sends `WorkspaceRoots: []` because it cannot know the folders; the host
+  resolves them.
+- **Verification**: `dotnet build` clean; C# tests 57 + 108 + 222 passed; typecheck/lint clean;
+  focused TS suites 24 + 6 + 16 passed; `npm run quality` **PASS 8/8** (522 TS tests).
+- Out of scope by design: global tools, manifest creation/removal, tool vulnerability badges,
+  cross-manifest consolidation. `.ai/plans/local-tools.md` lists them as follow-ups.
+
+### Follow-up fix (2026-11-04): cached manifests under `.ai/tmp`
+
+User report: the Repo tools list showed
+`.ai/tmp/catalog-cache/maui-labs-main-260043eb/.config/dotnet-tools.json`. The locator only skipped
+`bin`/`obj`/`node_modules`/`.git`/`.vs`, so a cached checkout inside the workspace was walked.
+Plan `.ai/plans/local-tools-exclusions.md`; record `.ai/completed/local-tools-exclusions.md`.
+
+- `LocalToolManifestLocator` now skips every hidden directory during traversal (the direct
+  `<dir>/.config/dotnet-tools.json` check still runs, so real manifests are found), and the
+  project walk-up skips candidates whose owner directory is under a hidden segment. The whole
+  `.ai` tree is ignored, matching the rule project discovery already used.
+- `isInternalExcludedPath` / `applyExcludeGlobs` moved to
+  `utilities/workspace-exclusions.ts`; `ReadLocalToolsAsync` applies both to the manifest's owner
+  directory (not the manifest path, since `.config` is hidden and the default `**/.*/**` would
+  otherwise drop everything), so `nugetpackagemanager.excludeGlobs` is honoured too.
+- Verified: `dotnet build` clean, 17 + 38 focused C# tests, typecheck/lint clean, 43 focused TS
+  tests, `npm run quality` **PASS 8/8** (525 TS tests).
+- Local test artifact: `releases/nugetpackagemanager-2026.11103.12309.vsix`.
 
 ## Completed: Installed row update arrow (2026-11-03)
 

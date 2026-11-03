@@ -9,7 +9,7 @@
 
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
-import type { ToolchainHealth } from "@/common/rpc/types";
+import type { LocalToolManifest, ToolchainHealth } from "@/common/rpc/types";
 import type { DotnetContext } from "./dotnet-context";
 import {
     FindGlobalJsonUpwards,
@@ -30,9 +30,26 @@ export interface ToolchainProbeInput {
     ExtensionVersion?: string;
     /** Bypass the `dotnet sdk check` cache (an explicit Re-check). */
     ForceRefresh?: boolean;
+    /**
+     * The local tool manifests the host already read, with this machine's restore probe.
+     * Omitted when no manifest exists (or the probe failed), and then nothing changes.
+     */
+    LocalTools?: ToolchainLocalToolProbe[];
 }
 
-interface CommandResult {
+/**
+ * One manifest as `evaluateToolchain` reads it (`localTools` in the request).
+ *
+ * The host owns the filesystem and the machine state, so it hands the evaluator facts instead of
+ * the evaluator reading anything itself.
+ */
+export interface ToolchainLocalToolProbe {
+    manifestPath: string;
+    problems?: string[];
+    tools?: Array<{ id: string; version: string; restored?: boolean }>;
+}
+
+export interface CommandResult {
     Code: number | null;
     Stdout: string;
     Stderr: string;
@@ -154,9 +171,22 @@ export async function ProbeToolchainAsync(input: ToolchainProbeInput): Promise<T
         sdkList: ToWire(listed),
         ...(evaluation ? { evaluation: ToWire(evaluation) } : {}),
         ...(sdkCheckOutput !== undefined ? { sdkCheckOutput } : {}),
+        ...LocalToolProbeParams(input.LocalTools),
         privateSdkVersions: GetPrivateSdkVersions(),
         checkedAt: new Date().toISOString(),
     });
+}
+
+/**
+ * The optional `localTools` slice of the `evaluateToolchain` request.
+ *
+ * Nothing is sent when the workspace has no manifest (or the host could not read it), so the
+ * evaluator adds no local tool findings and behaves exactly as it did before this slice existed.
+ */
+export function LocalToolProbeParams(
+    localTools: ToolchainLocalToolProbe[] | undefined
+): { localTools: ToolchainLocalToolProbe[] } | Record<string, never> {
+    return localTools !== undefined && localTools.length > 0 ? { localTools } : {};
 }
 
 function ToWire(result: CommandResult): CommandOutputWire {
@@ -198,8 +228,33 @@ export function RedactDiagnostics(text: string): string {
 }
 
 /**
+ * The two host capabilities the diagnostics report needs, behind one seam so the report can be
+ * rendered in a unit test without spawning `dotnet`. Production never replaces it.
+ */
+export interface DiagnosticsRuntime {
+    ProbeToolchainAsync(input: ToolchainProbeInput): Promise<ToolchainHealth>;
+    RunCapturedAsync(
+        command: string,
+        args: string[],
+        cwd: string,
+        timeoutMs: number
+    ): Promise<CommandResult>;
+}
+
+const productionDiagnosticsRuntime: DiagnosticsRuntime = { ProbeToolchainAsync, RunCapturedAsync };
+
+let activeDiagnosticsRuntime: DiagnosticsRuntime = productionDiagnosticsRuntime;
+
+/** Replaces the spawns for one test; pass `null` to restore the production behaviour. */
+export function SetDiagnosticsRuntimeForTests(runtime: Partial<DiagnosticsRuntime> | null): void {
+    activeDiagnosticsRuntime = runtime === null
+        ? productionDiagnosticsRuntime
+        : { ...productionDiagnosticsRuntime, ...runtime };
+}
+
+/**
  * Clipboard-ready diagnostics: the resolved toolchain, the pins, per-project
- * contexts and the last health issues.
+ * contexts, the local tool manifests and the last health issues.
  */
 function FormatInstalledSdk(sdk: { Version: string; Source: string }): string {
     return `${sdk.Version} (${sdk.Source})`;
@@ -215,13 +270,65 @@ function SdkStatusText(health: ToolchainHealth): string {
     return "unknown";
 }
 
-export async function BuildToolchainDiagnosticsAsync(input: ToolchainProbeInput): Promise<string> {
+/**
+ * The `--- local tools ---` section: every manifest the host found, with its tools and this
+ * machine's restore probe.
+ *
+ * `localTools` is omitted when the caller never read the manifests, and an empty list means no
+ * manifest was found (or the read failed — the caller says which in its log). The section is
+ * rendered into the report *before* `RedactDiagnostics`, so a manifest path carrying
+ * credentials-looking text is redacted like every other line.
+ */
+function LocalToolsSection(localTools: LocalToolManifest[] | undefined): string[] {
+    const manifests = localTools ?? [];
+    if (manifests.length === 0) return ["  no .config/dotnet-tools.json found"];
+
+    return manifests.flatMap((manifest) => {
+        const problems = (manifest.Problems ?? []).filter((problem) => problem.trim().length > 0);
+        const tools = manifest.Tools ?? [];
+        const toolLines = tools.length > 0
+            ? tools.map((tool) => {
+                const commands = (tool.Commands ?? []).join(", ") || "none";
+                const pinned = tool.Pinned ? " pinned" : "";
+                const restore = tool.NotRestored
+                    ? "NOT restored (best effort)"
+                    : "restored";
+                return `    ${tool.Id} ${tool.Version} [${commands}]${pinned} ${restore}`;
+            })
+            : ["    no tools declared"];
+        return [
+            `  ${manifest.Path || "<unknown manifest path>"}`,
+            `    isRoot: ${manifest.IsRoot}`,
+            `    problems: ${problems.length > 0 ? problems.join("; ") : "none"}`,
+            ...toolLines,
+        ];
+    });
+}
+
+export async function BuildToolchainDiagnosticsAsync(
+    input: ToolchainProbeInput,
+    /**
+     * The manifests `ReadLocalToolsAsync` already returned, so the report lists them without
+     * importing `local-tools` (which imports this module).
+     */
+    localTools?: LocalToolManifest[]
+): Promise<string> {
     const projectPaths = (input.ProjectPaths ?? []).filter((projectPath) => fs.existsSync(projectPath));
-    const health = await ProbeToolchainAsync(input);
+    const health = await activeDiagnosticsRuntime.ProbeToolchainAsync(input);
     const command = ResolveDotnetCommand(input.WorkspaceRoot);
 
-    const info = await RunCapturedAsync(command, ["--info"], input.WorkspaceRoot, VERSION_TIMEOUT_MS);
-    const sdks = await RunCapturedAsync("dotnet", ["--list-sdks"], input.WorkspaceRoot, VERSION_TIMEOUT_MS);
+    const info = await activeDiagnosticsRuntime.RunCapturedAsync(
+        command,
+        ["--info"],
+        input.WorkspaceRoot,
+        VERSION_TIMEOUT_MS
+    );
+    const sdks = await activeDiagnosticsRuntime.RunCapturedAsync(
+        "dotnet",
+        ["--list-sdks"],
+        input.WorkspaceRoot,
+        VERSION_TIMEOUT_MS
+    );
 
     const projects = projectPaths.slice(0, MAX_DIAGNOSTIC_PROJECTS).map((projectPath) => {
         const context = ResolveDotnetContext(projectPath);
@@ -259,6 +366,9 @@ export async function BuildToolchainDiagnosticsAsync(input: ToolchainProbeInput)
         "",
         "--- projects ---",
         ...(projects.length > 0 ? projects : ["  none"]),
+        "",
+        "--- local tools ---",
+        ...LocalToolsSection(localTools),
         "",
         "--- dotnet --list-sdks ---",
         sdks.Stdout.trim() || sdks.Stderr.trim() || "  unavailable",

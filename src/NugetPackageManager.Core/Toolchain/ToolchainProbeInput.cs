@@ -25,6 +25,12 @@ public sealed record ToolchainProbeInput
 
     public IReadOnlyList<string> PrivateSdkVersions { get; init; } = [];
 
+    /// <summary>
+    /// The local tool manifests the host read for this probe, with its best-effort restore
+    /// check. Empty when the host did not look, and then the evaluation says nothing about them.
+    /// </summary>
+    public IReadOnlyList<LocalToolProbe> LocalTools { get; init; } = [];
+
     /// <summary>ISO timestamp supplied by the host so the result is deterministic.</summary>
     public required string CheckedAt { get; init; }
 }

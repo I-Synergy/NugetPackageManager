@@ -38,6 +38,14 @@ public sealed record ToolchainHealthInfo
     [JsonPropertyName("ProjectEvaluationFailed")]
     public required bool ProjectEvaluationFailed { get; init; }
 
+    /// <summary>Absolute paths of the local tool manifests the workspace declares.</summary>
+    [JsonPropertyName("LocalToolManifests")]
+    public IReadOnlyList<string>? LocalToolManifests { get; init; }
+
+    /// <summary>Tool ids a manifest declares that this machine has not restored (best effort).</summary>
+    [JsonPropertyName("LocalToolsNotRestored")]
+    public IReadOnlyList<string>? LocalToolsNotRestored { get; init; }
+
     [JsonPropertyName("CheckedAt")]
     public required string CheckedAt { get; init; }
 
