@@ -1225,7 +1225,7 @@ export class PackagesView extends LitElement {
       if (pkg.CpmFramework !== "") {
         const resolution = resolutions.find((r) => r.Tfm === pkg.CpmFramework);
         // A framework-scoped row must never fall through to an unconditional write.
-        if (!resolution || !resolution.Condition) continue;
+        if (!resolution?.Condition) continue;
         const paths = groups.get(resolution.Condition) ?? [];
         paths.push(project.Path);
         groups.set(resolution.Condition, paths);
