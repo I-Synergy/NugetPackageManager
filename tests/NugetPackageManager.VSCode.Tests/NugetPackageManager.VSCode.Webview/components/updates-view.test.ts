@@ -517,6 +517,36 @@ suite('UpdatesView', () => {
         assert.strictEqual(groups[0]!.packages.length, 1);
     });
 
+    test('renders no group header when every update belongs to one framework line', () => {
+        view.packages = [makePackage('', ''), makePackage('', '')];
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+
+        assert.strictEqual(
+            host.querySelectorAll('.group-header').length,
+            0,
+            'a single framework line has nothing to separate, so it gets no header'
+        );
+        assert.strictEqual(host.querySelectorAll('.outdated-row').length, 2, 'the rows still render');
+    });
+
+    test('renders one group header per framework line when two groups are present', () => {
+        view.packages = [makePackage('', ''), makePackage("$(TargetFramework.StartsWith('net10.0'))", 'net10.0')];
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+
+        const headers = Array.from(host.querySelectorAll('.group-header'));
+        assert.deepStrictEqual(
+            headers.map((header) => header.querySelector('span')?.textContent?.trim()),
+            ['Shared', 'net10.0'],
+            'each framework line keeps its own header'
+        );
+        assert.strictEqual(host.querySelectorAll('.group-select').length, 2, 'each header keeps its select-all box');
+        assert.strictEqual(host.querySelectorAll('.outdated-row').length, 2);
+    });
+
     test('includes installed framework lines even when they have no outdated row', () => {
         const net10 = makePackage("$(TargetFramework.StartsWith('net10.0'))", 'net10.0');
         view.packages = [net10];

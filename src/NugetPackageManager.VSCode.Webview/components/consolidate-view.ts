@@ -10,7 +10,7 @@ import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
 import { runConsolidateJobAsync } from "@/web/jobs";
-import { buildFrameworkOptions, getBaseTargetFramework, getFrameworkGroupKey, matchesFrameworkSelection } from "@/common/framework";
+import { buildFrameworkOptions, getBaseTargetFramework, getFrameworkGroupKey, matchesFrameworkSelection, shouldShowFrameworkGroups } from "@/common/framework";
 import { InconsistentPackageViewModel, PackageViewModel } from "../types";
 
 @customElement("consolidate-view")
@@ -384,6 +384,9 @@ export class ConsolidateView extends LitElement {
     const isLoading = this._loadTask.status === TaskStatus.PENDING;
     const hasError = this._loadTask.status === TaskStatus.ERROR;
     const visible = this.visiblePackages;
+    const groups = this.groupedVisiblePackages;
+    // A single framework line has nothing to separate, so it gets no header.
+    const showGroupHeaders = shouldShowFrameworkGroups(groups);
 
     return html`
       <div class="consolidate-container" aria-busy=${isLoading}>
@@ -438,12 +441,16 @@ export class ConsolidateView extends LitElement {
         ${!isLoading && visible.length > 0
           ? html`
               <div class="package-list" role="list" aria-label="Inconsistent packages">
-                ${this.groupedVisiblePackages.map(
+                ${groups.map(
                   (group) => html`
-                    <div class="group-header">
-                      ${group.label}
-                      <span class="group-count">${group.packages.length}</span>
-                    </div>
+                    ${showGroupHeaders
+                      ? html`
+                          <div class="group-header">
+                            ${group.label}
+                            <span class="group-count">${group.packages.length}</span>
+                          </div>
+                        `
+                      : nothing}
                     ${group.packages.map((pkg) => this.renderPackageRow(pkg))}
                   `
                 )}

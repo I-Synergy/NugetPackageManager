@@ -48,3 +48,15 @@ export function matchesFrameworkSelection(selected: string, tfm: string): boolea
 export function getFrameworkGroupKey(selected: string, tfm: string): string {
   return selected === SHARED_FRAMEWORK ? "" : getBaseTargetFramework(tfm);
 }
+
+/**
+ * Whether a framework-grouped list should render its group headers.
+ * <p>
+ * A single framework line has nothing to separate — every row belongs to the same line — so the
+ * header (and its select-all control) would be pure noise. Headers are only rendered once there
+ * are at least two framework groups.
+ * </p>
+ */
+export function shouldShowFrameworkGroups(groups: readonly unknown[]): boolean {
+  return groups.length > 1;
+}

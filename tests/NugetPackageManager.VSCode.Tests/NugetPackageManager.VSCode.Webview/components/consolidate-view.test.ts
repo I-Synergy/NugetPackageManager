@@ -72,6 +72,20 @@ suite('ConsolidateView', () => {
         assert.deepStrictEqual(groups.map((group) => group.label), ['Shared', 'net10.0', 'net11.0']);
     });
 
+    test('renders no group header when every card belongs to one framework line', () => {
+        view.packages = [packageModel('', ''), packageModel('', '')];
+
+        const host = document.createElement('div');
+        render(view.render() as TemplateResult, host);
+
+        assert.strictEqual(
+            host.querySelectorAll('.group-header').length,
+            0,
+            'a single framework line has nothing to separate, so it gets no header'
+        );
+        assert.strictEqual(host.querySelectorAll('.package-list package-row').length, 2, 'the cards still render');
+    });
+
     test('sends only the selected framework line when a card contains two lines', async () => {
         const calls: Array<{ CpmCondition?: string; Scope?: string; ProjectPaths: string[] }> = [];
         mockHostApi.startConsolidateAsync = async (req) => {

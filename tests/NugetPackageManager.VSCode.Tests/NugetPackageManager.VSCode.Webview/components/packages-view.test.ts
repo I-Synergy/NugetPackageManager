@@ -6,6 +6,7 @@ import { ok, fail } from '@/common/rpc/result';
 import type { GetJobResponse, HostAPI } from '@/common/rpc/types';
 import { PackagesView } from '@/web/components/packages-view';
 import { PackageViewModel, ProjectViewModel } from '@/web/types';
+import { render, type TemplateResult } from 'lit';
 
 // Helper to create mock Package data
 function createMockPackage(overrides: Partial<Package> = {}): Package {
@@ -932,6 +933,31 @@ suite('PackagesView Component', () => {
             }).handleTabKeydownAsync(event);
 
             assert.deepStrictEqual(visited, ['toolchain']);
+        });
+    });
+
+    suite('Installed framework groups', () => {
+        function renderInstalledTab(): HTMLElement {
+            const template = (packagesView as unknown as { renderInstalledTab(): unknown }).renderInstalledTab();
+            const host = document.createElement('div');
+            render(template as TemplateResult, host);
+            return host;
+        }
+
+        test('renders no group header when every installed package is in one framework line', () => {
+            packagesView.projectsPackages = [
+                new PackageViewModel(createMockPackage({ Id: 'Pkg.A', Name: 'Pkg.A', InstalledVersion: '1.0.0' })),
+                new PackageViewModel(createMockPackage({ Id: 'Pkg.B', Name: 'Pkg.B', InstalledVersion: '1.0.0' })),
+            ];
+
+            const host = renderInstalledTab();
+
+            assert.strictEqual(
+                host.querySelectorAll('.group-header').length,
+                0,
+                'a single framework line has nothing to separate, so it gets no header'
+            );
+            assert.strictEqual(host.querySelectorAll('.installed-package-row').length, 2, 'the rows still render');
         });
     });
 });

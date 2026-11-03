@@ -5,7 +5,7 @@ import Split from "split.js";
 import debounce from "lodash/debounce";
 import { hostApi, configuration } from "@/web/registrations";
 import { runOutdatedScanJobAsync, runProjectUpdateJobAsync, runWorkspaceScanJobAsync } from "@/web/jobs";
-import { buildFrameworkOptions, getFrameworkGroupKey, matchesFrameworkSelection } from "@/common/framework";
+import { buildFrameworkOptions, getFrameworkGroupKey, matchesFrameworkSelection, shouldShowFrameworkGroups } from "@/common/framework";
 import { IsPrereleaseVersion } from "@/common/package-display";
 import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
@@ -1188,6 +1188,8 @@ export class PackagesView extends LitElement {
   private renderInstalledTab(): unknown {
     const packages = this.filteredInstalledPackages;
     const groups = this.groupedInstalledPackages;
+    // A single framework line has nothing to separate, so it gets no header.
+    const showGroupHeaders = shouldShowFrameworkGroups(groups);
 
     return html`
       <div class="packages-container installed-packages">
@@ -1214,10 +1216,14 @@ export class PackagesView extends LitElement {
             `
           : groups.map(
               (group) => html`
-                <div class="group-header">
-                  ${group.label}
-                  <span class="group-count">${group.packages.length}</span>
-                </div>
+                ${showGroupHeaders
+                  ? html`
+                      <div class="group-header">
+                        ${group.label}
+                        <span class="group-count">${group.packages.length}</span>
+                      </div>
+                    `
+                  : nothing}
                 ${group.packages.map(
                   (pkg) => html`
                     <package-row

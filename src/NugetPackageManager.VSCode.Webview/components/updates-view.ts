@@ -6,7 +6,7 @@ import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
-import { buildFrameworkOptions, getFrameworkGroupKey, getFrameworkLabel, matchesFrameworkSelection, SHARED_FRAMEWORK } from "@/common/framework";
+import { buildFrameworkOptions, getFrameworkGroupKey, getFrameworkLabel, matchesFrameworkSelection, SHARED_FRAMEWORK, shouldShowFrameworkGroups } from "@/common/framework";
 import { OutdatedPackageViewModel, PackageViewModel } from "../types";
 import type { GetOutdatedPackagesRequest, GetOutdatedPackagesResponse, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateConflict, DotnetFailureInfo } from "@/common/rpc/types";
 import { RangeLowerBound } from "@/common/package-range";
@@ -1490,26 +1490,33 @@ export class UpdatesView extends LitElement {
     const visible = this.visiblePackages;
     const show = this._loadTask.status !== TaskStatus.PENDING && visible.length > 0;
     if (!show) return nothing;
+    const groups = this.groupedVisiblePackages;
+    // A single framework line has nothing to separate, so it gets no header.
+    const showGroupHeaders = shouldShowFrameworkGroups(groups);
     return html`
       <div class="package-list" role="list" aria-label="Outdated packages">
-        ${this.groupedVisiblePackages.map(
+        ${groups.map(
           (group) => html`
-            <label class="group-header">
-              <input
-                type="checkbox"
-                class="group-select"
-                aria-label="Select all ${group.label} updates"
-                .checked=${group.packages.length > 0 && group.packages.every((pkg) => pkg.Selected)}
-                .indeterminate=${group.packages.some((pkg) => pkg.Selected) && !group.packages.every((pkg) => pkg.Selected)}
-                @change=${(e: Event) =>
-                  this.toggleGroupSelection(
-                    group.packages,
-                    (e.target as HTMLInputElement).checked
-                  )}
-              />
-              <span>${group.label}</span>
-              <span class="group-count">${group.packages.length}</span>
-            </label>
+            ${showGroupHeaders
+              ? html`
+                  <label class="group-header">
+                    <input
+                      type="checkbox"
+                      class="group-select"
+                      aria-label="Select all ${group.label} updates"
+                      .checked=${group.packages.length > 0 && group.packages.every((pkg) => pkg.Selected)}
+                      .indeterminate=${group.packages.some((pkg) => pkg.Selected) && !group.packages.every((pkg) => pkg.Selected)}
+                      @change=${(e: Event) =>
+                        this.toggleGroupSelection(
+                          group.packages,
+                          (e.target as HTMLInputElement).checked
+                        )}
+                    />
+                    <span>${group.label}</span>
+                    <span class="group-count">${group.packages.length}</span>
+                  </label>
+                `
+              : nothing}
             ${group.packages.map((pkg) => this.renderPackageRow(pkg))}
           `
         )}
