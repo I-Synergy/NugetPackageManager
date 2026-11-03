@@ -17,7 +17,7 @@ import { outdatedScans } from '@/host/utilities/outdated-scan-coordinator';
 import { workspaceSnapshot } from '@/host/utilities/workspace-snapshot';
 import { ScanProgress } from '@/host/utilities/scan-progress';
 import type { Result } from '@/common/rpc/result';
-import type { GetJobResponse } from '@/common/rpc/types';
+import type { BatchUpdateResponse, GetJobResponse } from '@/common/rpc/types';
 import { Logger } from '@/common/logger';
 
 function fixturesRoot(): string {
@@ -2809,6 +2809,206 @@ suite('HostAPI Tests', () => {
 
             const cancelled = await api.cancelJobAsync({ JobId: 'missing' });
             assert.strictEqual(cancelled.ok, false);
+        });
+    });
+
+    // ----------------------------------------------------------------
+    // Batched solution restore
+    // ----------------------------------------------------------------
+    suite('batched solution restore', () => {
+        let workspaceDir: string;
+        /** Every `dotnet` invocation, so the tests can count restores and name their target. */
+        let commands: string[][];
+
+        setup(() => {
+            workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-solution-restore-'));
+            commands = [];
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+            fs.writeFileSync(
+                path.join(workspaceDir, 'Directory.Packages.props'),
+                [
+                    '<Project>',
+                    '  <PropertyGroup>',
+                    '    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>',
+                    '  </PropertyGroup>',
+                    '  <ItemGroup>',
+                    '    <PackageVersion Include="Pkg.Shared" Version="1.0.0" />',
+                    '  </ItemGroup>',
+                    '</Project>',
+                ].join('\n'),
+                'utf8'
+            );
+            stubCpmReader(
+                sandbox,
+                cpmMap({ unconditional: { 'Pkg.Shared': '1.0.0' } }),
+                path.join(workspaceDir, 'Directory.Packages.props')
+            );
+        });
+
+        teardown(() => {
+            if (workspaceDir) {
+                fs.rmSync(workspaceDir, { recursive: true, force: true });
+            }
+        });
+
+        function writeProject(fileName: string): string {
+            const projectPath = path.join(workspaceDir, fileName);
+            fs.writeFileSync(
+                projectPath,
+                '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally></PropertyGroup><ItemGroup><PackageReference Include="Pkg.Shared" /></ItemGroup></Project>',
+                'utf8'
+            );
+            return projectPath;
+        }
+
+        /** A real `.slnx` naming the given project files, relative to the workspace directory. */
+        function writeSolution(fileName: string, projectFileNames: string[]): string {
+            const solutionPath = path.join(workspaceDir, fileName);
+            fs.writeFileSync(
+                solutionPath,
+                [
+                    '<Solution>',
+                    ...projectFileNames.map((name) => `  <Project Path="${name}" />`),
+                    '</Solution>',
+                ].join('\n'),
+                'utf8'
+            );
+            return solutionPath;
+        }
+
+        /** Answers solution discovery with exactly these files, the way the workspace roots do. */
+        function stubSolutions(...solutionPaths: string[]): void {
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(
+                (async (include: vscode.GlobPattern) => (
+                    include === '*.{sln,slnx}'
+                        ? solutionPaths.map((fsPath) => ({ fsPath } as vscode.Uri))
+                        : []
+                )) as typeof vscode.workspace.findFiles
+            );
+        }
+
+        function stubDotnet(behaviour?: (args: string[]) => Promise<void>): void {
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').callsFake(
+                async (_command: string, args: string[]) => {
+                    commands.push(args);
+                    await behaviour?.(args);
+                }
+            );
+        }
+
+        /** The target of every `dotnet restore`, in the order they ran. */
+        function restores(): string[] {
+            return commands
+                .filter((args) => args[0] === 'restore')
+                .map((args) => (args[1] ?? '').replace(/\\/g, '/'));
+        }
+
+        function runTransactionalBatchAsync(projectPaths: string[]): Promise<Result<BatchUpdateResponse>> {
+            const api = createHostAPI();
+            return api.batchUpdatePackagesAsync({
+                Updates: [{
+                    PackageId: 'Pkg.Shared',
+                    Version: '1.5.0',
+                    ProjectPaths: projectPaths,
+                    Scope: 'unconditional',
+                }],
+                Transactional: true,
+                SkipRestore: false,
+            });
+        }
+
+        test('restores the owning solution once for a batch across its projects', async () => {
+            const projects = ['A.csproj', 'B.csproj', 'C.csproj'].map((name) => writeProject(name));
+            const solutionPath = writeSolution('App.slnx', ['A.csproj', 'B.csproj', 'C.csproj']);
+            stubSolutions(solutionPath);
+            stubDotnet();
+
+            const result = await runTransactionalBatchAsync(projects);
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.RolledBack, undefined);
+            assert.deepStrictEqual(
+                restores(),
+                [solutionPath.replace(/\\/g, '/')],
+                'one solution restore covers every project of that solution'
+            );
+        });
+
+        test('restores each of two solutions once when the batch spans both', async () => {
+            const projects = ['A.csproj', 'B.csproj', 'C.csproj', 'D.csproj']
+                .map((name) => writeProject(name));
+            const first = writeSolution('First.slnx', ['A.csproj', 'B.csproj']);
+            const second = writeSolution('Second.slnx', ['C.csproj', 'D.csproj']);
+            stubSolutions(first, second);
+            stubDotnet();
+
+            const result = await runTransactionalBatchAsync(projects);
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.deepStrictEqual(restores(), [
+                first.replace(/\\/g, '/'),
+                second.replace(/\\/g, '/'),
+            ]);
+        });
+
+        test('restores a project outside every solution on its own', async () => {
+            const inSolution = writeProject('A.csproj');
+            const outside = writeProject('Outside.csproj');
+            const solutionPath = writeSolution('App.slnx', ['A.csproj']);
+            stubSolutions(solutionPath);
+            stubDotnet();
+
+            const result = await runTransactionalBatchAsync([inSolution, outside]);
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.deepStrictEqual(restores(), [
+                solutionPath.replace(/\\/g, '/'),
+                outside.replace(/\\/g, '/'),
+            ]);
+        });
+
+        test('falls back to per-project restores when the solution restore fails', async () => {
+            const first = writeProject('A.csproj');
+            const second = writeProject('B.csproj');
+            const solutionPath = writeSolution('App.slnx', ['A.csproj', 'B.csproj']);
+            stubSolutions(solutionPath);
+            const failureOutput = `${first.replace(/\\/g, '/')} : error NU1101: Unable to find package Pkg.Shared.`;
+            stubDotnet(async () => {
+                throw new DotnetError('dotnet restore failed', failureOutput);
+            });
+
+            const api = createHostAPI();
+            const result = await api.restoreProjectsAsync({ ProjectPaths: [first, second] });
+
+            assert.strictEqual(result.ok, false);
+            assert.deepStrictEqual(
+                restores(),
+                [
+                    solutionPath.replace(/\\/g, '/'),
+                    first.replace(/\\/g, '/'),
+                    second.replace(/\\/g, '/'),
+                ],
+                'the failed solution restore is followed by one restore per project'
+            );
+            const error = result.ok ? '' : result.error;
+            assert.match(error, /Restore failed for 2 project\(s\)/);
+            assert.ok(
+                error.includes(path.basename(first)),
+                `the failing project is named: ${error}`
+            );
+        });
+
+        test('a single-project request restores that project instead of its solution', async () => {
+            const projectPath = writeProject('A.csproj');
+            const solutionPath = writeSolution('App.slnx', ['A.csproj']);
+            stubSolutions(solutionPath);
+            stubDotnet();
+
+            const api = createHostAPI();
+            const result = await api.restoreProjectsAsync({ ProjectPaths: [projectPath] });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.deepStrictEqual(restores(), [projectPath.replace(/\\/g, '/')]);
         });
     });
 

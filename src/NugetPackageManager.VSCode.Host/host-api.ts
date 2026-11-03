@@ -1482,21 +1482,10 @@ async function restoreConsolidatedProjectsAsync(
   if (getSetting<boolean>("skipRestore", false)) return;
 
   report("Restoring projects…", 70);
-  for (const [i, projectPath] of request.ProjectPaths.entries()) {
-    report(
-      `Restoring project ${i + 1}/${request.ProjectPaths.length}…`,
-      70 + (i / Math.max(1, request.ProjectPaths.length)) * 25
-    );
-    await TaskExecutor.ExecuteCommandAsync(
-      "dotnet",
-      ["restore", projectPath.replace(/\\/g, "/")],
-      `restore-${request.PackageId}`,
-      undefined,
-      undefined,
-      undefined,
-      CreateDotnetOptions(projectPath)
-    );
-  }
+  // The result is ignored on purpose: consolidation reports its own stages, and a restore failure
+  // surfaces through the consolidated packages rather than the job state. Batching is shared with
+  // the batch update path, so a consolidation restores each owning solution once.
+  await restoreProjectsInternalAsync(request.ProjectPaths, undefined, false);
 }
 
 /**
@@ -3943,6 +3932,123 @@ async function rollbackFilesAsync(
   return errors.length > 0 ? errors.join("; ") : undefined;
 }
 
+type RestoreBatchOutcome = "restored" | "fallback";
+
+/**
+ * Restores each requested project through the solution that owns it, one process per solution.
+ *
+ * A batch update hands this helper every affected project — a 152-project solution used to become
+ * 152 sequential `dotnet restore <project>` runs. Restoring the solution once covers all of them.
+ * Grouping is deliberately first-wins: a project listed by two solutions is restored through the
+ * first discovered one, so no project is restored twice.
+ *
+ * Returns `"fallback"` when the batch could not be used (no solution covers the requested paths,
+ * a restore failed, or the operation was cancelled). The caller then runs its per-project loop,
+ * which attributes the failure and applies conflict resolution exactly as before.
+ */
+async function restoreViaSolutionsAsync(
+  projectPaths: string[],
+  signal: AbortSignal | undefined,
+  onProgress?: (progress: RestoreProgress) => void
+): Promise<RestoreBatchOutcome> {
+  const uniquePaths = [...new Set(projectPaths)];
+  const { projectsBySolution, projectsWithoutSolution } = await groupProjectsBySolutionAsync(uniquePaths);
+
+  // Nothing to batch: let the caller's per-project loop run rather than restoring twice over.
+  if (projectsBySolution.size === 0) return "fallback";
+
+  // One restore per owning solution, then one per project no solution covers.
+  const units: RestoreUnit[] = [
+    ...[...projectsBySolution].map(([solutionPath, members]) => ({
+      path: solutionPath,
+      stage: `Restoring ${path.basename(solutionPath)} (${members.length} project(s))…`,
+    })),
+    ...projectsWithoutSolution.map((projectPath) => ({
+      path: projectPath,
+      stage: `Restoring ${path.basename(projectPath)}…`,
+    })),
+  ];
+
+  try {
+    for (const [index, unit] of units.entries()) {
+      if (signal?.aborted) return "fallback";
+      await restoreUnitAsync(unit, index, units.length, signal, onProgress);
+    }
+  } catch (err) {
+    Logger.warn(`restoreProjects: Batched restore failed, falling back to per-project restores`, err);
+    return "fallback";
+  }
+
+  return "restored";
+}
+
+type RestoreUnit = {
+  path: string;
+  stage: string;
+};
+
+/** Restores one unit — a solution, or a project no solution covers — reporting its stage. */
+async function restoreUnitAsync(
+  unit: RestoreUnit,
+  index: number,
+  total: number,
+  signal: AbortSignal | undefined,
+  onProgress: ((progress: RestoreProgress) => void) | undefined
+): Promise<void> {
+  const reportProgress = (progress: { stage: string; percent: number }): void => {
+    onProgress?.({ projectPath: unit.path, index, total, stage: progress.stage, percent: progress.percent });
+  };
+  onProgress?.({ projectPath: unit.path, index, total, stage: unit.stage, percent: 0 });
+  await TaskExecutor.ExecuteCommandAsync(
+    "dotnet",
+    ["restore", unit.path.replace(/\\/g, "/")],
+    `restore-${path.basename(unit.path)}`,
+    signal,
+    undefined,
+    reportProgress,
+    CreateDotnetOptions(unit.path)
+  );
+}
+
+/**
+ * Groups the requested projects by the solution that owns them.
+ *
+ * Discovery matches `findSolutionProjectPathsAsync`: only the workspace roots are searched, so a
+ * nested sample solution cannot claim a workspace project. Ownership is first-wins, so a project
+ * listed by two solutions is restored through the first discovered one and never twice.
+ */
+async function groupProjectsBySolutionAsync(uniquePaths: string[]): Promise<{
+  projectsBySolution: Map<string, string[]>;
+  projectsWithoutSolution: string[];
+}> {
+  const solutionFiles = await vscode.workspace.findFiles("*.{sln,slnx}", "**/node_modules/**");
+
+  const solutionByProject = new Map<string, string>();
+  for (const solution of solutionFiles) {
+    const members = await parseSolutionProjectPathsAsync(solution.fsPath);
+    if (!members) continue;
+    for (const member of members) {
+      const normalized = path.normalize(member);
+      if (!solutionByProject.has(normalized)) solutionByProject.set(normalized, solution.fsPath);
+    }
+  }
+
+  const projectsBySolution = new Map<string, string[]>();
+  const projectsWithoutSolution: string[] = [];
+  for (const projectPath of uniquePaths) {
+    const solutionPath = solutionByProject.get(path.normalize(projectPath));
+    if (!solutionPath) {
+      projectsWithoutSolution.push(projectPath);
+      continue;
+    }
+    const group = projectsBySolution.get(solutionPath) ?? [];
+    group.push(projectPath);
+    projectsBySolution.set(solutionPath, group);
+  }
+
+  return { projectsBySolution, projectsWithoutSolution };
+}
+
 async function restoreProjectsInternalAsync(
   projectPaths: string[],
   signal: AbortSignal | undefined,
@@ -3954,6 +4060,22 @@ async function restoreProjectsInternalAsync(
   const summaries: string[] = [];
   const failures: DotnetFailure[] = [];
   const uniquePaths = [...new Set(projectPaths)];
+
+  // Restoring the solution that owns a set of projects is one process instead of one per project.
+  // The per-project loop below stays the fallback, so a failure is still attributed to a project
+  // and conflict resolution runs exactly as it did before.
+  if (uniquePaths.length > 1) {
+    const outcome = await restoreViaSolutionsAsync(uniquePaths, signal, onProgress);
+    if (outcome === "restored") {
+      Logger.info(
+        `restoreProjects: Restored ${uniquePaths.length} project(s) through their solution(s)`
+      );
+      return null;
+    }
+    Logger.info(
+      `restoreProjects: Batched solution restore did not complete; restoring ${uniquePaths.length} project(s) individually`
+    );
+  }
 
   for (const [index, projectPath] of uniquePaths.entries()) {
     if (signal?.aborted) break;

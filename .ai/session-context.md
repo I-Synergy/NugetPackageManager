@@ -132,6 +132,17 @@ memo / persisted `ScanCacheStore`, both still holding the old scan.
   (snapshot + scan memo + persisted scan).
 - `updates-view.ts`: `_mutationEpoch` discards a scan that finishes after a mutation.
 
+### Batch restore (2026-11-03)
+
+`.ai/plans/batch-restore-single-invocation.md`: a 51-package batch on a 152-project solution ran
+152 sequential `dotnet restore <csproj>` (~25 min) because `restoreProjectsInternalAsync` loops per
+path. It now groups the requested projects by owning solution (discovered `.sln`/`.slnx`) and runs
+one `dotnet restore <solution>` per solution; a failure falls back to the per-project loop so the
+offending project and its conflicts are still named. `runConsolidateAsync` uses the same helper.
+
+Follow-up to consider: the badge scans the whole workspace (162 projects) while the views scan the
+solution (152), so their scan cache keys differ and the single-flight does not merge them.
+
 ---
 
 ## Current state (2026-11-01) — read this first
