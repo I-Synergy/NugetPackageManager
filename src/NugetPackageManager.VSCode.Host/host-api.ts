@@ -64,6 +64,11 @@ import type {
   DependencyIssue,
   RestoreConflictInfo,
   ToolchainHealth,
+  GetLocalToolsRequest,
+  GetLocalToolsResponse,
+  UpdateLocalToolRequest,
+  UpdateLocalToolResponse,
+  LocalToolManifest,
 } from "@/common/rpc/types";
 import type { Result } from "@/common/rpc/result";
 import { ok, fail, CANCELLED_ERROR } from "@/common/rpc/result";
@@ -79,8 +84,18 @@ import { SetUpdateBadge } from "./view-badge";
 import NuGetConfigResolver from "./utilities/nuget-config-resolver";
 import TaskExecutor, { CreateDotnetOptions, DotnetError } from "./utilities/task-executor";
 import { ClassifyDotnetFailureAsync, type DotnetFailure } from "./utilities/dotnet-failure";
-import { BuildToolchainDiagnosticsAsync, ProbeToolchainAsync } from "./utilities/toolchain-health";
+import {
+  BuildToolchainDiagnosticsAsync,
+  ProbeToolchainAsync,
+  type ToolchainLocalToolProbe,
+} from "./utilities/toolchain-health";
+import {
+  BuildLocalToolProbeSlice,
+  ReadLocalToolsAsync,
+  UpdateLocalToolAsync,
+} from "./utilities/local-tools";
 import { GetSdkInstallRoot } from "./utilities/sdk-locations";
+import { applyExcludeGlobs } from "./utilities/workspace-exclusions";
 import {
   IsValidSdkVersion as IsValidGlobalJsonSdkVersion,
   UpdateGlobalJsonSdkVersionAsync,
@@ -310,44 +325,6 @@ async function parseProjectAsync(projectPath: string, signal?: AbortSignal): Pro
   }
 
   return project;
-}
-
-/** Keeps hidden/scratch directories out of every package and project scan. */
-function isInternalExcludedPath(fsPath: string): boolean {
-  const normalized = fsPath.replace(/\\/g, "/").toLowerCase();
-  const workspaceRoots = (vscode.workspace.workspaceFolders ?? [])
-    .map((folder) => folder.uri.fsPath.replace(/\\/g, "/").toLowerCase().replace(/\/$/, ""))
-    .filter(Boolean);
-  const root = workspaceRoots.find(
-    (candidate) => normalized === candidate || normalized.startsWith(`${candidate}/`)
-  );
-  const relative = root ? normalized.slice(root.length).replace(/^\/+/, "") : normalized;
-  const segments = relative.split("/");
-  // The final segment is the file; any hidden directory above it is excluded.
-  return segments.slice(0, -1).some((segment) => segment.startsWith("."));
-}
-
-/** Excludes configured globs (for example bin and obj folders) from project discovery. */
-function applyExcludeGlobs<T extends { fsPath: string }>(files: T[], excludeGlobs: string[]): T[] {
-  const visibleFiles = files.filter((file) => !isInternalExcludedPath(file.fsPath));
-  if (excludeGlobs.length === 0) return visibleFiles;
-  const patterns = excludeGlobs.map(
-    (glob) =>
-      new RegExp(
-        `^${glob
-          .replace(/\\/g, "/")
-          .replace(/[.+?^${}()|[\]\\]/g, String.raw`\$&`)
-          .replace(/\*\*/g, "\0")
-          .replace(/\*/g, "[^/]*")
-          .replace(/\0/g, ".*")
-          .replace(/\/$/, "")}$`,
-        "i"
-      )
-  );
-  return visibleFiles.filter((file) => {
-    const normalized = file.fsPath.replace(/\\/g, "/");
-    return !patterns.some((pattern) => pattern.test(normalized));
-  });
 }
 
 /**
@@ -3652,6 +3629,59 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       }
     },
 
+    async getLocalToolsAsync(
+      request: GetLocalToolsRequest,
+      signal?: AbortSignal
+    ): Promise<Result<GetLocalToolsResponse>> {
+      try {
+        // The webview cannot know the workspace folders, so it sends an empty list and the
+        // host answers with the same roots every other path uses.
+        const response = await ReadLocalToolsAsync(
+          {
+            ...request,
+            WorkspaceRoots: request.WorkspaceRoots?.length ? request.WorkspaceRoots : getWorkspaceRoots(),
+          },
+          signal
+        );
+        Logger.info(
+          `getLocalTools: ${response.Manifests.length} manifest(s), ` +
+            `${response.Manifests.reduce((count, manifest) => count + manifest.Tools.length, 0)} tool(s)`
+        );
+        return ok(response);
+      } catch (err) {
+        Logger.error("getLocalTools: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    async updateLocalToolAsync(
+      request: UpdateLocalToolRequest,
+      signal?: AbortSignal
+    ): Promise<Result<UpdateLocalToolResponse>> {
+      try {
+        const result = await UpdateLocalToolAsync(
+          {
+            ...request,
+            WorkspaceRoots: request.WorkspaceRoots?.length ? request.WorkspaceRoots : getWorkspaceRoots(),
+          },
+          signal
+        );
+        // The manifest changed and the restore may have downloaded packages: force the next
+        // health read to look again instead of serving the pre-update probe.
+        toolchainHealthCache = null;
+        if (result.Restore && !result.Restore.Ok) {
+          Logger.warn(
+            `updateLocalTool: ${result.ToolId} updated to ${result.Version} but the restore failed ` +
+              `(timedOut=${result.Restore.TimedOut}): ${result.Restore.Message ?? "no output"}`
+          );
+        }
+        return ok(result);
+      } catch (err) {
+        Logger.error("updateLocalTool: failed", err);
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+    },
+
     async setWorkspaceSdkAsync(
       request: SetWorkspaceSdkRequest
     ): Promise<Result<SetWorkspaceSdkResponse>> {
@@ -3780,11 +3810,15 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
           : await findProjectFilesForDiagnosticsAsync();
         const extensionVersion: string | undefined = vscode.extensions
           .getExtension("i-synergy.nugetpackagemanager")?.packageJSON?.version;
-        const report = await BuildToolchainDiagnosticsAsync({
-          WorkspaceRoot: workspaceRoot,
-          ProjectPaths: projectPaths,
-          ...(extensionVersion ? { ExtensionVersion: extensionVersion } : {}),
-        });
+        const localTools = await readLocalToolManifestsForDiagnosticsAsync(request.ProjectPaths ?? []);
+        const report = await BuildToolchainDiagnosticsAsync(
+          {
+            WorkspaceRoot: workspaceRoot,
+            ProjectPaths: projectPaths,
+            ...(extensionVersion ? { ExtensionVersion: extensionVersion } : {}),
+          },
+          localTools
+        );
         Logger.info(`Toolchain diagnostics requested\n${report}`);
         return ok({ Report: report });
       } catch (err) {
@@ -3800,6 +3834,51 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
 // ============================================================
 
 let toolchainHealthCache: { Key: string; Health: ToolchainHealth } | null = null;
+
+/**
+ * The local tool slice for `evaluateToolchain`, or nothing when the workspace has no manifest.
+ *
+ * `ResolveLatest: false` keeps the health path offline: the probe only needs the declared ids and
+ * versions, not the latest ones. A failure here must not fail the health check — a broken core
+ * read says nothing about the SDK — so it degrades to "no local tool findings".
+ */
+/**
+ * The local tool manifests the clipboard diagnostics report lists.
+ *
+ * `ResolveLatest: false` keeps the report offline (the report shows the declared versions, and
+ * the latest-version lookup is the Repo tools card's job). A failed read must not fail the report
+ * — a broken core says nothing about the SDK — so the failure is logged and the report renders
+ * with no manifests instead.
+ */
+async function readLocalToolManifestsForDiagnosticsAsync(
+  projectPaths: string[]
+): Promise<LocalToolManifest[]> {
+  try {
+    const { Manifests } = await ReadLocalToolsAsync({
+      WorkspaceRoots: [],
+      ProjectPaths: projectPaths,
+      ResolveLatest: false,
+    });
+    return Manifests;
+  } catch (err) {
+    Logger.warn("runToolchainDiagnostics: local tool manifests could not be read", err);
+    return [];
+  }
+}
+
+async function probeLocalToolsAsync(): Promise<{ LocalTools?: ToolchainLocalToolProbe[] }> {
+  try {
+    const { Manifests } = await ReadLocalToolsAsync({
+      WorkspaceRoots: getWorkspaceRoots(),
+      ResolveLatest: false,
+    });
+    const localTools = BuildLocalToolProbeSlice(Manifests);
+    return localTools.length > 0 ? { LocalTools: localTools } : {};
+  } catch (err) {
+    Logger.warn("getToolchainHealth: local tool manifests could not be read", err);
+    return {};
+  }
+}
 
 async function readToolchainHealthAsync(
   requestedProjects: string[],
@@ -3819,6 +3898,7 @@ async function readToolchainHealthAsync(
     WorkspaceRoot: workspaceRoot,
     ProjectPaths: projectPaths,
     ForceRefresh: forceRefresh,
+    ...(await probeLocalToolsAsync()),
   });
   toolchainHealthCache = { Key: key, Health: health };
   if (health.Issues.length > 0) {

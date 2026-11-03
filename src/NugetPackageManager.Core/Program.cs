@@ -41,6 +41,11 @@ foreach (var (name, handler) in ToolchainHandlers.Create())
     handlers[name] = handler;
 }
 
+foreach (var (name, handler) in new ToolHandlers(sources).Create())
+{
+    handlers[name] = handler;
+}
+
 foreach (var (name, handler) in ConfigurationHandlers.Create())
 {
     handlers[name] = handler;

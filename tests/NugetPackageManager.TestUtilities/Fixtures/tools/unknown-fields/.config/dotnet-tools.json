@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "$schema": "https://example.invalid/dotnet-tools.schema.json",
+  "comment": "Fields .NET ignores must survive a rewrite.",
+  "tools": {
+    "dotnet-ef": {
+      "version": "8.0.10",
+      "commands": [
+        "dotnet-ef"
+      ],
+      "description": "Entity Framework Core CLI",
+      "extra": {
+        "owner": "data-team",
+        "tags": [
+          "ef",
+          "migrations"
+        ]
+      }
+    }
+  }
+}

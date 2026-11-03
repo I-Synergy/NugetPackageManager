@@ -8,12 +8,21 @@ import { hostApi } from "@/web/registrations";
 import { CopyTextAsync, CopyToolchainDiagnosticsAsync } from "@/web/utilities/diagnostics";
 import { RecommendedSdkVersion } from "@/web/utilities/toolchain";
 import type {
+  LocalTool,
+  LocalToolManifest,
   RunWorkloadCommandResponse,
   ToolchainHealth,
   ToolchainIssue,
   WorkloadAction,
 } from "@/common/rpc/types";
 import "./sdk-select";
+
+/** Inline result of one tool update, rendered under its row. */
+type ToolRowStatus = { readonly text: string; readonly bad: boolean };
+
+/** `dotnet tool restore` was attempted, killed after the host timeout, and the
+ * manifest keeps the new version: the row must say both things at once. */
+const MANIFEST_UPDATED_TIMED_OUT = "manifest updated - restore timed out";
 
 /**
  * Toolchain tab: which .NET SDK the extension will use for this workspace, how
@@ -217,6 +226,119 @@ export class ToolchainView extends LitElement {
         color: var(--vscode-descriptionForeground);
         font-size: 0.9em;
       }
+
+      /* Repo tools card */
+
+      .tool-group {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        border-top: 1px solid var(--npm-border, var(--vscode-panelSection-border));
+        padding-top: 8px;
+      }
+
+      .tool-group:first-of-type {
+        border-top: none;
+        padding-top: 0;
+      }
+
+      .tool-group-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.95em;
+      }
+
+      .tool-path {
+        font-family: var(--vscode-editor-font-family, monospace);
+        font-size: var(--vscode-editor-font-size, 12px);
+        overflow-wrap: anywhere;
+      }
+
+      .badge {
+        border: 1px solid var(--vscode-descriptionForeground);
+        border-radius: 999px;
+        padding: 0 6px;
+        font-size: 0.8em;
+        color: var(--vscode-descriptionForeground);
+      }
+
+      .badge-root {
+        border-color: var(--vscode-focusBorder);
+        color: var(--vscode-focusBorder);
+      }
+
+      .tool-problem {
+        display: flex;
+        align-items: flex-start;
+        gap: 5px;
+        color: var(--vscode-editorWarning-foreground);
+        font-size: 0.9em;
+        overflow-wrap: anywhere;
+      }
+
+      .tool-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .tool-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) max-content max-content;
+        align-items: center;
+        gap: 2px 10px;
+        padding: 4px 0;
+      }
+
+      .tool-main {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .tool-command {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .tool-id {
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.88em;
+        overflow-wrap: anywhere;
+      }
+
+      .tool-version {
+        color: var(--vscode-descriptionForeground);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .tool-version-latest {
+        color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+      }
+
+      .tool-status {
+        grid-column: 1 / -1;
+        font-size: 0.88em;
+        color: var(--vscode-descriptionForeground);
+        overflow-wrap: anywhere;
+      }
+
+      .tool-status-bad {
+        color: var(--vscode-errorForeground);
+      }
+
+      .tools-empty {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        color: var(--vscode-descriptionForeground);
+        font-size: 0.92em;
+      }
     `,
   ];
 
@@ -229,6 +351,9 @@ export class ToolchainView extends LitElement {
   @state() private workloadResult: RunWorkloadCommandResponse | null = null;
   @state() private workloadFeedback = "";
   @state() private cleanupFeedback = "";
+  @state() private toolsRefreshToken = 0;
+  @state() private toolsBusyKeys = new Set<string>();
+  @state() private toolStatuses = new Map<string, ToolRowStatus>();
 
   private readonly _healthTask = new Task(this, {
     args: () => [this.projectPaths.join("|"), this.refreshToken] as const,
@@ -241,6 +366,25 @@ export class ToolchainView extends LitElement {
       if (!result.ok) throw new Error(result.error);
       this.reportCount(result.value.Health);
       return result.value.Health;
+    },
+  });
+
+  /**
+   * Local tools are read per render of the tab; the card re-runs whenever the
+   * project list or the tab-level refresh token changes. The workspace folders
+   * are unknown to the webview, so `WorkspaceRoots` stays empty and the host
+   * resolves them itself.
+   */
+  private readonly _toolsTask = new Task(this, {
+    args: () => [this.projectPaths.join("|"), this.toolsRefreshToken] as const,
+    task: async ([paths], { signal }) => {
+      const projectPaths = paths ? paths.split("|") : [];
+      const result = await hostApi.getLocalToolsAsync(
+        { WorkspaceRoots: [], ProjectPaths: projectPaths, ResolveLatest: true },
+        signal
+      );
+      if (!result.ok) throw new Error(result.error);
+      return result.value.Manifests;
     },
   });
 
@@ -281,6 +425,7 @@ export class ToolchainView extends LitElement {
     this.copyFeedback = "";
     this.expandedIssue = null;
     this.refreshToken += 1;
+    this.toolsRefreshToken += 1;
   }
 
   /** Re-runs the toolchain probe, e.g. when the tab becomes active. */
@@ -450,6 +595,223 @@ export class ToolchainView extends LitElement {
     return html`<span class="feedback" role="status">${this.cleanupFeedback}</span>`;
   }
 
+  /**
+   * The webview never receives the workspace folders — the host resolves the
+   * empty `WorkspaceRoots` request itself — so the workspace root is inferred as
+   * the deepest folder that still contains every project path. A manifest that
+   * lives outside that folder keeps its absolute path.
+   */
+  private inferWorkspaceRoot(): string {
+    const folders: string[] = [];
+    for (const projectPath of this.projectPaths) {
+      const normalised = projectPath.replace(/\\/g, "/");
+      const index = normalised.lastIndexOf("/");
+      folders.push(index > 0 ? normalised.slice(0, index) : "");
+    }
+    const candidates = folders.filter((folder) => folder.length > 0);
+    const [first] = candidates;
+    if (first === undefined) return "";
+    let root = first;
+    for (const folder of candidates.slice(1)) {
+      while (root.length > 0 && !folder.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+        const index = root.lastIndexOf("/");
+        root = index > 0 ? root.slice(0, index) : "";
+      }
+    }
+    return root;
+  }
+
+  private manifestDisplayPath(manifestPath: string): string {
+    const normalised = manifestPath.replace(/\\/g, "/");
+    const root = this.inferWorkspaceRoot();
+    if (!root) return manifestPath;
+    const prefix = `${root.toLowerCase()}/`;
+    if (!normalised.toLowerCase().startsWith(prefix)) return manifestPath;
+    const relative = normalised.slice(prefix.length);
+    return relative.length > 0 ? relative : manifestPath;
+  }
+
+  private toolKey(manifestPath: string, toolId: string): string {
+    return `${manifestPath}|${toolId}`;
+  }
+
+  private setToolStatus(key: string, text: string, bad = false): void {
+    const next = new Map(this.toolStatuses);
+    next.set(key, { text, bad });
+    this.toolStatuses = next;
+  }
+
+  private markToolBusy(key: string, busy: boolean): void {
+    const next = new Set(this.toolsBusyKeys);
+    if (busy) next.add(key);
+    else next.delete(key);
+    this.toolsBusyKeys = next;
+  }
+
+  /**
+   * Updates exactly one tool, then verifies with `dotnet tool restore` on the
+   * host. The manifest write is optimistic-locked on the rendered version, and a
+   * failed restore leaves the manifest updated — the row reports both facts.
+   */
+  private async onUpdateToolAsync(manifest: LocalToolManifest, tool: LocalTool): Promise<void> {
+    const key = this.toolKey(manifest.Path, tool.Id);
+    const target = tool.LatestVersion;
+    if (this.toolsBusyKeys.has(key) || !target) return;
+
+    this.markToolBusy(key, true);
+    this.setToolStatus(key, `Updating ${tool.Id} to ${target}…`);
+    try {
+      const result = await hostApi.updateLocalToolAsync({
+        ManifestPath: manifest.Path,
+        ToolId: tool.Id,
+        ExpectedVersion: tool.Version,
+        Version: target,
+        WorkspaceRoots: [],
+      });
+
+      if (!result.ok) {
+        this.setToolStatus(
+          key,
+          /cancel/i.test(result.error) ? "Update cancelled." : `Could not update ${tool.Id}: ${result.error}`,
+          !/cancel/i.test(result.error)
+        );
+        return;
+      }
+
+      const response = result.value;
+      const restore = response.Restore;
+      if (!restore) {
+        this.setToolStatus(key, `Updated ${tool.Id} to ${response.Version}.`);
+      } else if (restore.Ok) {
+        this.setToolStatus(key, `Updated ${tool.Id} to ${response.Version} — dotnet tool restore succeeded.`);
+      } else if (restore.TimedOut) {
+        this.setToolStatus(key, MANIFEST_UPDATED_TIMED_OUT, true);
+      } else {
+        this.setToolStatus(
+          key,
+          `manifest updated - restore failed: ${restore.Message ?? "unknown error"}`,
+          true
+        );
+      }
+      this.toolsRefreshToken += 1;
+    } finally {
+      this.markToolBusy(key, false);
+    }
+  }
+
+  private renderToolsCard(): unknown {
+    const status = this._toolsTask.status;
+    const manifests = this._toolsTask.value ?? [];
+    return html`
+      <div class="card">
+        <div class="header">
+          <div>
+            <div class="list-title">Repo tools</div>
+            <div class="list-subtitle">
+              Local .NET tools pinned in <code>.config/dotnet-tools.json</code>. Each update
+              is one tool at a time and is verified with <code>dotnet tool restore</code>.
+            </div>
+          </div>
+        </div>
+        ${status === TaskStatus.PENDING ? this.renderToolsLoading() : nothing}
+        ${status === TaskStatus.ERROR ? this.renderToolsError() : nothing}
+        ${status === TaskStatus.COMPLETE && manifests.length === 0 ? this.renderToolsEmpty() : nothing}
+        ${manifests.map((manifest) => this.renderManifestGroup(manifest))}
+      </div>
+    `;
+  }
+
+  private renderToolsLoading(): unknown {
+    return html`
+      <div class="feedback" role="status">
+        <span class="codicon codicon-loading codicon-modifier-spin"></span>
+        Reading local tool manifests…
+      </div>
+    `;
+  }
+
+  private renderToolsError(): unknown {
+    const error = this._toolsTask.error;
+    const message = error instanceof Error ? error.message : String(error);
+    return html`<div class="bad" role="status">Could not read local tool manifests: ${message}</div>`;
+  }
+
+  private renderToolsEmpty(): unknown {
+    return html`
+      <div class="tools-empty">
+        <div>No local tool manifest in this workspace.</div>
+        <div>
+          Add tools with <code>dotnet tool install --local</code>, which creates
+          <code>.config/dotnet-tools.json</code>.
+        </div>
+      </div>
+    `;
+  }
+
+  private renderManifestGroup(manifest: LocalToolManifest): unknown {
+    const count = manifest.Tools.length;
+    return html`
+      <div class="tool-group">
+        <div class="tool-group-header">
+          <span class="tool-path">${this.manifestDisplayPath(manifest.Path)}</span>
+          ${manifest.IsRoot ? html`<span class="badge badge-root">isRoot</span>` : nothing}
+          <span class="list-subtitle">${count === 1 ? "1 tool" : `${count} tools`}</span>
+        </div>
+        ${manifest.Problems.map(
+          (problem) => html`
+            <div class="tool-problem">
+              <span class="codicon codicon-warning"></span>
+              <span>${problem}</span>
+            </div>
+          `
+        )}
+        <div class="tool-rows">
+          ${manifest.Tools.map((tool) => this.renderToolRow(manifest, tool))}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderToolRow(manifest: LocalToolManifest, tool: LocalTool): unknown {
+    const key = this.toolKey(manifest.Path, tool.Id);
+    const busy = this.toolsBusyKeys.has(key);
+    const commands = tool.Commands.length > 0 ? tool.Commands.join(", ") : tool.Id;
+    const showUpdate = tool.UpdateAvailable && Boolean(tool.LatestVersion);
+    return html`
+      <div class="tool-row">
+        <div class="tool-main">
+          <span class="tool-command">${commands}</span>
+          <span class="tool-id">${tool.Id}</span>
+          ${tool.Pinned ? html`<span class="badge">pinned</span>` : nothing}
+        </div>
+        <span class="tool-version">
+          ${showUpdate
+            ? html`${tool.Version} <span class="tool-version-latest">→ ${tool.LatestVersion}</span>`
+            : tool.Version}
+        </span>
+        ${showUpdate
+          ? html`
+              <button
+                ?disabled=${busy}
+                @click=${async () => await this.onUpdateToolAsync(manifest, tool)}
+              >Update</button>
+            `
+          : html`<span></span>`}
+        ${this.renderToolStatus(key)}
+      </div>
+    `;
+  }
+
+  private renderToolStatus(key: string): unknown {
+    const entry = this.toolStatuses.get(key);
+    if (!entry) return nothing;
+    return html`
+      <div class="tool-status ${entry.bad ? "tool-status-bad" : ""}" role="status">
+        ${entry.text}
+      </div>
+    `;
+  }
+
   private renderHealthy(): unknown {
     return html`<div class="card">
       <div class="ok">
@@ -485,6 +847,7 @@ export class ToolchainView extends LitElement {
           ? html`<div class="card bad">Could not check the .NET toolchain.</div>`
           : nothing}
         ${health ? this.renderSummary(health) : nothing}
+        ${this.renderToolsCard()}
       </div>
     `;
   }

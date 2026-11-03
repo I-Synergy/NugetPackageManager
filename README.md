@@ -59,7 +59,7 @@
 | 🛡️ | **Vulnerability Scanning** | Critical / High / Medium / Low severity, advisory links, transitive dependencies and a yellow banner across every tab |
 | 🗑️ | **Remove from Solution** | Remove a package reference from one project or from every project in the solution at once |
 | 🔀 | **Version Consolidation** | Finds and fixes version inconsistencies per framework line, never merging netX versions |
-| 🧰 | **Toolchain** | Selected SDK, `global.json` pin, workload repair, `dotnet sdk check` status, install and diagnostics — with a toolchain problem banner across every tab |
+| 🧰 | **Toolchain** | Selected SDK, `global.json` pin, workload repair, `dotnet sdk check` status, install and diagnostics — plus the workspace's local tools (`.config/dotnet-tools.json`) with per-tool updates and a toolchain problem banner across every tab |
 | 🧭 | **Update plan** | The preflight explains which package versions must move, in dependency order, and writes per-TFM `PackageVersion` groups when target frameworks disagree |
 | 🧹 | **Cleanup** | Find and remove unused `PackageVersion` entries from `Directory.Packages.props`, with automatic backups — plus direct references that the graph already provides transitively |
 | 🌲 | **Project Tree** | Checkbox-based project selector — scope every operation to exactly the projects you want |
@@ -239,7 +239,8 @@ The last tab reports the .NET SDK the extension will actually use, and lets you 
 - Installed SDKs in a selector — pick one to pin it for this workspace, or **Automatic** to follow the project's `global.json`
 - **Install `<version>`** when the pinned SDK is missing
 - Per-issue cause + hint, with the raw `dotnet` output behind **Show output**
-- **Re-check** and **Copy diagnostics**
+- **Repo tools** — every `.config/dotnet-tools.json` in the workspace, grouped by manifest, with each tool's command names, pinned version and the latest available version. **Update** bumps one tool at a time and then runs `dotnet tool restore` in that manifest's folder; a failed restore keeps the manifest change and says so. Deliberate pins (`rollForward: false`) are marked, malformed manifests and tools missing from the global packages folder are reported as toolchain issues, and there is no "update all". Hidden folders (the whole `.ai` tree, `.git`, …) and paths matching your `excludeGlobs` are skipped, so cached checkouts under `.ai/tmp` never appear
+- **Re-check** and **Copy diagnostics** (the report includes the manifests, tool versions and restore state)
 
 The same selector is available in *Settings → dotnet toolchain* and in a warning banner that appears above the package list whenever the toolchain cannot serve a restore.
 

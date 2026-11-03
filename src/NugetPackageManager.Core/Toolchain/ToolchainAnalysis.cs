@@ -18,6 +18,7 @@ public static partial class ToolchainAnalysis
 
         var installedSdks = MergeInstalledSdks(ParseSdkList(input.SdkList.Stdout), input.PrivateSdkVersions);
         var issues = new List<ToolchainIssueInfo>();
+        var localTools = EvaluateLocalTools(input.LocalTools);
         var sdkVersion = ReadCommandVersion(input.Version);
 
         if (sdkVersion is null)
@@ -31,6 +32,7 @@ public static partial class ToolchainAnalysis
                     SpawnFailed: input.Version.SpawnError is not null));
 
             issues.Add(ToIssue(failure));
+            issues.AddRange(localTools.Issues);
 
             return new ToolchainHealthInfo
             {
@@ -41,6 +43,8 @@ public static partial class ToolchainAnalysis
                 ProjectEvaluationFailed = false,
                 CheckedAt = input.CheckedAt,
                 InstalledSdks = installedSdks,
+                LocalToolManifests = localTools.Manifests,
+                LocalToolsNotRestored = localTools.NotRestored,
                 Issues = issues,
             };
         }
@@ -48,6 +52,7 @@ public static partial class ToolchainAnalysis
         var sdkMatchesPin = CheckPinMatch(input, sdkVersion, issues);
         var evaluation = EvaluateProject(input, sdkVersion, issues);
         var orphanedBands = DetectBands(installedSdks, issues);
+        issues.AddRange(localTools.Issues);
 
         var sdkCheck = ParseSdkCheck(input.SdkCheckOutput ?? string.Empty);
         var sdkStatus = FindSdkStatus(sdkCheck, sdkVersion);
@@ -69,6 +74,8 @@ public static partial class ToolchainAnalysis
             ProjectEvaluationFailed = evaluation.Failed,
             CheckedAt = input.CheckedAt,
             InstalledSdks = installedSdks,
+            LocalToolManifests = localTools.Manifests,
+            LocalToolsNotRestored = localTools.NotRestored,
             Issues = issues,
         };
     }
@@ -239,6 +246,106 @@ public static partial class ToolchainAnalysis
 
     private static string? DotnetPath(ToolchainProbeInput input) =>
         input.Command == "dotnet" ? null : input.Command;
+
+    /// <summary>
+    /// The two local-tool findings. The host reads the manifests and probes the machine; this
+    /// method only decides what counts as a problem, so the evaluator keeps its no-I/O guarantee.
+    /// </summary>
+    private static LocalToolFindings EvaluateLocalTools(IReadOnlyList<LocalToolProbe> localTools)
+    {
+        var issues = new List<ToolchainIssueInfo>();
+        var manifests = new List<string>();
+        var notRestored = new List<string>();
+
+        foreach (var manifest in localTools)
+        {
+            if (string.IsNullOrWhiteSpace(manifest.ManifestPath))
+            {
+                continue;
+            }
+
+            if (!manifests.Contains(manifest.ManifestPath, StringComparer.OrdinalIgnoreCase))
+            {
+                manifests.Add(manifest.ManifestPath);
+            }
+
+            if (manifest.Problems.Count > 0)
+            {
+                AddInvalidManifestIssue(manifest, issues);
+            }
+
+            var missing = CollectMissingTools(manifest, notRestored);
+            if (missing.Count > 0)
+            {
+                AddNotRestoredIssue(manifest, missing, issues);
+            }
+        }
+
+        return new LocalToolFindings(
+            manifests.Count > 0 ? manifests : null,
+            notRestored.Count > 0 ? notRestored : null,
+            issues);
+    }
+
+    private static void AddInvalidManifestIssue(LocalToolProbe manifest, List<ToolchainIssueInfo> issues)
+    {
+        issues.Add(new ToolchainIssueInfo
+        {
+            Kind = LocalToolManifestInvalidKind,
+            Summary =
+                $"{manifest.ManifestPath} is not a usable tool manifest: {manifest.Problems[0]}",
+            Hint =
+                "Fix the manifest and run `dotnet tool restore` in that folder: every local tool command there fails until it parses.",
+            Detail = string.Join("\n", manifest.Problems),
+        });
+    }
+
+    /// <summary>The <c>id (version)</c> entries this manifest declares but the probe did not restore.</summary>
+    private static List<string> CollectMissingTools(LocalToolProbe manifest, List<string> notRestored)
+    {
+        var missing = new List<string>();
+
+        foreach (var tool in manifest.Tools)
+        {
+            // Only a completed probe says anything: an unprobed tool is unknown, not missing.
+            if (tool.Restored != false || string.IsNullOrWhiteSpace(tool.Id))
+            {
+                continue;
+            }
+
+            missing.Add($"{tool.Id} ({tool.Version})");
+
+            if (!notRestored.Contains(tool.Id, StringComparer.OrdinalIgnoreCase))
+            {
+                notRestored.Add(tool.Id);
+            }
+        }
+
+        return missing;
+    }
+
+    private static void AddNotRestoredIssue(
+        LocalToolProbe manifest,
+        List<string> missing,
+        List<ToolchainIssueInfo> issues)
+    {
+        issues.Add(new ToolchainIssueInfo
+        {
+            Kind = LocalToolNotRestoredKind,
+            Summary =
+                $"{missing.Count} local tool(s) in {manifest.ManifestPath} are not restored on this machine: " +
+                $"{string.Join(", ", missing)}.",
+            Hint =
+                "Run `dotnet tool restore` in that folder. This is a best-effort check of the global packages folder on this machine, not proof the tool runs on every platform.",
+            Detail =
+                "`dotnet tool list --local` reads the manifest and does not prove the package was downloaded; " +
+                "the probe looks for the package version in the global packages folder.",
+        });
+    }
+
+    private const string LocalToolManifestInvalidKind = "LocalToolManifestInvalid";
+
+    private const string LocalToolNotRestoredKind = "LocalToolNotRestored";
 
     private static string? ReadCommandVersion(CommandOutput result)
     {
@@ -495,6 +602,12 @@ public static partial class ToolchainAnalysis
     }
 
     public sealed record OrphanedManifestBand(string Band, string Path, IReadOnlyList<string> Manifests);
+
+    /// <summary>The local-tool slices of a health result plus the issues they produced.</summary>
+    private sealed record LocalToolFindings(
+        IReadOnlyList<string>? Manifests,
+        IReadOnlyList<string>? NotRestored,
+        List<ToolchainIssueInfo> Issues);
 
     [GeneratedRegex(@"^(\S+)\s+\[(.+)\]\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex SdkListLine();

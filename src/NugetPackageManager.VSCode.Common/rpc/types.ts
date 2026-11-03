@@ -395,6 +395,8 @@ export type DotnetFailureKind =
   | "SourceUnavailable"
   | "PasswordScriptFailed"
   | "DotnetMissing"
+  | "LocalToolManifestInvalid"
+  | "LocalToolNotRestored"
   | "Unknown";
 
 export interface DotnetFailureInfo {
@@ -528,6 +530,10 @@ export type ToolchainHealth = {
   CheckedAt: string;
   InstalledSdks: InstalledSdkInfo[];
   Issues: ToolchainIssue[];
+  /** Absolute paths of the local tool manifests the workspace declares, when any exist. */
+  LocalToolManifests?: string[];
+  /** Tool ids a manifest declares that this machine has not restored (best effort). */
+  LocalToolsNotRestored?: string[];
 };
 
 export type GetToolchainHealthRequest = {
@@ -595,6 +601,63 @@ export type InstallSdkResponse = {
 };
 
 // ============================================================
+// Local .NET tools (`.config/dotnet-tools.json`)
+// ============================================================
+
+/** One tool a local manifest pins, with the latest eligible version. */
+export type LocalTool = {
+  Id: string;
+  /** Command names the manifest declares; the id is not what users type. */
+  Commands: string[];
+  Version: string;
+  /** `rollForward: false` in the manifest — a deliberate pin. */
+  Pinned: boolean;
+  LatestVersion?: string;
+  UpdateAvailable: boolean;
+  /** Best-effort: the package is missing from the global packages folder. */
+  NotRestored: boolean;
+};
+
+export type LocalToolManifest = {
+  /** Absolute path; the webview renders it relative to the workspace root. */
+  Path: string;
+  /** `isRoot` from the manifest. */
+  IsRoot: boolean;
+  Tools: LocalTool[];
+  /** Parse errors, duplicate ids or duplicate commands. */
+  Problems: string[];
+};
+
+export type GetLocalToolsRequest = {
+  WorkspaceRoots: string[];
+  ProjectPaths?: string[];
+  Prerelease?: boolean;
+  /** Skip the NuGet lookup (offline / quick re-render). */
+  ResolveLatest?: boolean;
+  ForceRefresh?: boolean;
+};
+
+export type GetLocalToolsResponse = { Manifests: LocalToolManifest[] };
+
+export type UpdateLocalToolRequest = {
+  ManifestPath: string;
+  ToolId: string;
+  /** Optimistic concurrency: the version the row was rendered from. */
+  ExpectedVersion: string;
+  Version: string;
+  WorkspaceRoots: string[];
+};
+
+export type UpdateLocalToolResponse = {
+  ManifestPath: string;
+  ToolId: string;
+  PreviousVersion: string;
+  Version: string;
+  /** Null when `dotnet tool restore` was not attempted. */
+  Restore: { Ok: boolean; TimedOut: boolean; Message?: string } | null;
+};
+
+// ============================================================
 // Host API Contract
 // ============================================================
 
@@ -632,6 +695,10 @@ export interface HostAPI {
   getOutdatedScanProgressAsync(req: GetOutdatedScanProgressRequest): Promise<Result<GetOutdatedScanProgressResponse>>;
   getToolchainHealthAsync(req: GetToolchainHealthRequest, signal?: AbortSignal): Promise<Result<GetToolchainHealthResponse>>;
   runToolchainDiagnosticsAsync(req: RunToolchainDiagnosticsRequest): Promise<Result<RunToolchainDiagnosticsResponse>>;
+  /** Every local tool manifest in the workspace, with this machine's restore state. */
+  getLocalToolsAsync(req: GetLocalToolsRequest, signal?: AbortSignal): Promise<Result<GetLocalToolsResponse>>;
+  /** Pins one local tool at a new version, then restores it in the manifest's folder. */
+  updateLocalToolAsync(req: UpdateLocalToolRequest, signal?: AbortSignal): Promise<Result<UpdateLocalToolResponse>>;
   setWorkspaceSdkAsync(req: SetWorkspaceSdkRequest): Promise<Result<SetWorkspaceSdkResponse>>;
   installSdkAsync(req: InstallSdkRequest): Promise<Result<InstallSdkResponse>>;
   runWorkloadCommandAsync(req: RunWorkloadCommandRequest): Promise<Result<RunWorkloadCommandResponse>>;
