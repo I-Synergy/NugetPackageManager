@@ -40,7 +40,6 @@ Plan `.ai/plans/local-tools.md`; record `.ai/completed/local-tools.md`.
   cross-manifest consolidation. `.ai/plans/local-tools.md` lists them as follow-ups.
 
 ### Follow-up fix (2026-11-04): cached manifests under `.ai/tmp`
-
 User report: the Repo tools list showed
 `.ai/tmp/catalog-cache/maui-labs-main-260043eb/.config/dotnet-tools.json`. The locator only skipped
 `bin`/`obj`/`node_modules`/`.git`/`.vs`, so a cached checkout inside the workspace was walked.
@@ -57,6 +56,18 @@ Plan `.ai/plans/local-tools-exclusions.md`; record `.ai/completed/local-tools-ex
 - Verified: `dotnet build` clean, 17 + 38 focused C# tests, typecheck/lint clean, 43 focused TS
   tests, `npm run quality` **PASS 8/8** (525 TS tests).
 - Local test artifact: `releases/nugetpackagemanager-2026.11103.12309.vsix`.
+
+### Follow-up (2026-11-04): SonarCloud findings on PR #56
+
+PR #56 (`feat/local-dotnet-tools` → `main`) opened with 5 leak-period issues, all in the new C#:
+S3776 on `LocalToolManifestReader.ReadTools`, `LocalToolManifestWriter.LocateVersion` and
+`Compare`, and `ToolchainAnalysis.EvaluateLocalTools`, plus S1066 in the writer. Each method was
+split into named helpers (`ReadTool`/`RecordCommands`, `TryReadContainerToken`/`PopContainer`,
+`CompareObject`/`CompareArray`, `AddInvalidManifestIssue`/`CollectMissingTools`/
+`AddNotRestoredIssue`) with no behaviour change and no suppressions. `npm run quality` PASS 8/8
+(57 + 108 + 225 C# tests, 525 TS tests); commit `438943d` pushed and SonarCloud re-analysis
+reports **0 open issues** for the PR. Plan `.ai/plans/local-tools-sonar.md`; record
+`.ai/completed/local-tools-sonar.md`.
 
 ## Completed: Installed row update arrow (2026-11-03)
 
