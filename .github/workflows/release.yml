@@ -24,12 +24,22 @@ on:
 
 permissions:
   contents: write
+  # Required for Open VSX trusted publishing: the job exchanges a GitHub OIDC ID
+  # token for a short-lived Open VSX token. Do not add a personal access token
+  # based secret here instead; it would take precedence and silently disable
+  # trusted publishing.
+  id-token: write
 
 concurrency:
   group: release-main
   cancel-in-progress: false
 
 jobs:
+  # Open VSX trusted publishing: the publisher registration on open-vsx.org must name this
+  # repository (I-Synergy/nugetpackagemanager) and the workflow filename `release.yml`. If
+  # that registration pins a deployment environment, this job must declare
+  # `environment: <name>` below (job level) so the OIDC ID token's environment claim
+  # matches the registration; otherwise the token exchange is rejected.
   release:
     name: Version, publish and tag
     runs-on: ubuntu-latest
@@ -115,6 +125,12 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           VERSION: ${{ steps.build.outputs.build_number }}
         run: npm run publish:vsix -- "nugetpackagemanager-${VERSION}.vsix"
+
+      - name: Publish to Open VSX
+        if: steps.check.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.build.outputs.build_number }}
+        run: npx --yes ovsx@1.3.0 publish "nugetpackagemanager-${VERSION}.vsix" --trusted-publishing --skip-duplicate
 
       - name: Generate release notes
         id: notes
