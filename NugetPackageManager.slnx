@@ -9,6 +9,9 @@
     <File Path="Directory.Build.props" />
     <File Path="Directory.Packages.props" />
   </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/NugetPackageManager.Common/NugetPackageManager.Common.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NugetPackageManager.Core.Tests/NugetPackageManager.Core.Tests.csproj" />
     <Project Path="tests/NugetPackageManager.Core.NuGet.Tests/NugetPackageManager.Core.NuGet.Tests.csproj" />

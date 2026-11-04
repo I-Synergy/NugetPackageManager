@@ -132,7 +132,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.build.outputs.build_number }}
-        run: npx --yes ovsx@1.3.0 publish "nugetpackagemanager-${VERSION}.vsix" --trusted-publishing --skip-duplicate
+        run: npx --yes --ignore-scripts ovsx@1.3.0 publish "nugetpackagemanager-${VERSION}.vsix" --trusted-publishing --skip-duplicate
 
       - name: Generate release notes
         id: notes

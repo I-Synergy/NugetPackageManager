@@ -39,4 +39,9 @@ Plan: `.ai/plans/openvsx-publishing.md`
   (registrations cannot be edited — delete and recreate).
 - Re-validated the workflow with the `yaml` package: `environment: production`, permissions and
   step order unchanged.
+- SonarCloud flagged the npx invocation (`githubactions:S6505`, on-demand install can run package
+  lifecycle scripts). The step now runs
+  `npx --yes --ignore-scripts ovsx@1.3.0 publish ...`, matching the AIWorkspaceManager workflow.
+  Verified locally that `npx --yes --ignore-scripts ovsx@1.3.0 --version` works.
+
 
