@@ -8,6 +8,25 @@
 
 ---
 
+## Completed: Open VSX releases (2026-11-04)
+
+Request: publish to open-vsx.org as well as the Marketplace; the GitHub trusted publisher is
+registered. PR #57 (`chore/openvsx-publishing`). Plan `.ai/plans/openvsx-publishing.md`; record
+`.ai/completed/openvsx-publishing.md`.
+
+- `.github/workflows/release.yml`: `permissions` gains `id-token: write`; a "Publish to Open VSX"
+  step follows the Marketplace publish and runs
+  `npx --yes ovsx@1.3.0 publish "nugetpackagemanager-${VERSION}.vsix" --trusted-publishing --skip-duplicate`.
+  No token secret — a stored `OVSX_PAT`/`--pat` would take precedence and silently disable trusted
+  publishing. A job comment documents the registration fields and the environment caveat.
+- The extension already has an active Open VSX version, so the first-publication PAT precondition is
+  met. If the trusted-publisher registration pins a deployment environment, the `release` job must
+  declare the same `environment:`.
+- `docs/publishing.md` rewritten for both registries (setup, no-PAT rule, manual PAT publishing);
+  README → Releasing mentions both.
+- Verified by parsing the workflow (`yaml`) and `ovsx@1.3.0 publish --help`; the OIDC exchange is
+  only observable on the next release run from `main`.
+
 ## Completed: repo-level .NET tools under Toolchain (2026-11-03)
 
 Request: the extension only managed NuGet packages; local tools in `.config/dotnet-tools.json` are
