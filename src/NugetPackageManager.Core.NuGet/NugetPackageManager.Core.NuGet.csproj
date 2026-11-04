@@ -11,10 +11,7 @@
 
   <!-- Versions come from Directory.Packages.props. -->
   <ItemGroup>
-    <PackageReference Include="NuGet.Configuration" />
-    <PackageReference Include="NuGet.Frameworks" />
     <PackageReference Include="NuGet.Protocol" />
-    <PackageReference Include="NuGet.Versioning" />
   </ItemGroup>
 
 </Project>

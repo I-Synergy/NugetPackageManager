@@ -18,18 +18,16 @@
 
   <ItemGroup Condition="'$(IsSidecarProject)' == 'true'">
     <!-- NuGet client libraries: the reason this project exists. -->
-    <PackageVersion Include="NuGet.Configuration" Version="7.9.0" />
     <PackageVersion Include="NuGet.Frameworks" Version="7.9.0" />
     <PackageVersion Include="NuGet.Protocol" Version="7.9.0" />
     <PackageVersion Include="NuGet.Versioning" Version="7.9.0" />
 
     <!-- Test stack: MSTest is the project standard (.ai/reference/forbidden-tech.md
          forbids xUnit and NUnit); Moq for isolation. -->
-    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
     <PackageVersion Include="Moq" Version="4.21.0" />
     <PackageVersion Include="MSTest.TestAdapter" Version="4.5.2" />
-    <PackageVersion Include="MSTest.TestFramework" Version="4.5.2" />
   </ItemGroup>
 
 </Project>

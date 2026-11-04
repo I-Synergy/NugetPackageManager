@@ -639,9 +639,10 @@ npm run package
 Versions are automatic — do not bump `package.json` by hand. Every push to `main`
 runs `.github/workflows/release.yml`, which derives `YYYY.1MMdd.1HHmm` from the UTC
 build time (the same scheme as the AI repo), sets it for the build only, runs the
-quality gate, publishes the `.vsix`, and creates a tag (no `v` prefix) plus a GitHub
-Release with generated notes. `main` is never modified and no changelog or
-release-notes file is committed. See [`docs/publishing.md`](docs/publishing.md).
+quality gate, publishes the same `.vsix` to the **VS Code Marketplace** and to
+**Open VSX** (GitHub trusted publishing, no stored token), and creates a tag (no `v`
+prefix) plus a GitHub Release with generated notes. `main` is never modified and no
+changelog or release-notes file is committed. See [`docs/publishing.md`](docs/publishing.md).
 
 ### Pull Request Guidelines
 
