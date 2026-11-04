@@ -19,13 +19,15 @@ Before the first trusted release:
 1. The `I-Synergy` namespace must be verified and owned on [open-vsx.org](https://open-vsx.org)
    (the extension must already have an active version — the very first publication needs a PAT).
 2. Register the workflow under **Settings → Trusted Publishers**: owner `I-Synergy`, repository
-   `NugetPackageManager`, workflow filename `release.yml`, and an optional deployment environment.
+   `NugetPackageManager`, workflow filename `release.yml`, and environment `production`.
 3. Do **not** add an `OVSX_PAT` secret or pass `--pat`. A token takes precedence and would silently
    disable trusted publishing.
 
-If the registration pins a deployment environment, the `release` job in
-`.github/workflows/release.yml` must declare that same `environment:` so the OIDC token's
-environment claim matches; otherwise the exchange is rejected.
+The release job runs in the GitHub environment `production`, which is restricted to the `main`
+branch: a feature branch cannot reach the publishing steps even if it runs this workflow. The
+Open VSX registration must name that same environment, otherwise the OIDC token's environment
+claim does not match and the exchange is rejected. Registrations cannot be edited — delete and
+recreate yours if it was registered without an environment.
 
 Trusted publishing is bound to the repository ID and the workflow filename, not to a branch or
 tag. Anyone who can change `release.yml` can publish — keep branch protection and workflow review

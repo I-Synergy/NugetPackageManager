@@ -35,12 +35,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Open VSX trusted publishing: the publisher registration on open-vsx.org must name this
-  # repository (I-Synergy/nugetpackagemanager) and the workflow filename `release.yml`. If
-  # that registration pins a deployment environment, this job must declare
-  # `environment: <name>` below (job level) so the OIDC ID token's environment claim
-  # matches the registration; otherwise the token exchange is rejected.
+  # Open VSX trusted publishing: this job runs in the GitHub environment `production`, and
+  # the publisher registration on open-vsx.org must name that same environment so the OIDC
+  # ID token's environment claim matches the registration; otherwise the token exchange is
+  # rejected. `production` is restricted to the `main` branch, so a feature branch cannot
+  # publish even if it runs this workflow. The registration must also name this repository
+  # (I-Synergy/nugetpackagemanager) and the workflow filename `release.yml`.
   release:
+    environment: production
     name: Version, publish and tag
     runs-on: ubuntu-latest
     env:

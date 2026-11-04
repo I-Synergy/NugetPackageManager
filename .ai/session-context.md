@@ -22,6 +22,9 @@ registered. PR #57 (`chore/openvsx-publishing`). Plan `.ai/plans/openvsx-publish
 - The extension already has an active Open VSX version, so the first-publication PAT precondition is
   met. If the trusted-publisher registration pins a deployment environment, the `release` job must
   declare the same `environment:`.
+- Follow-up: the GitHub environment `production` now exists and is restricted to `main`; the
+  `release` job declares `environment: production`. The Open VSX registration must be recreated
+  with environment `production` (registrations cannot be edited).
 - `docs/publishing.md` rewritten for both registries (setup, no-PAT rule, manual PAT publishing);
   README → Releasing mentions both.
 - Verified by parsing the workflow (`yaml`) and `ovsx@1.3.0 publish --help`; the OIDC exchange is

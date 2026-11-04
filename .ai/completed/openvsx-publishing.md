@@ -28,3 +28,15 @@ Plan: `.ai/plans/openvsx-publishing.md`
 - `git diff --check` clean.
 - The OIDC exchange itself can only be exercised by a release run on `main`. If the trusted-publisher
   registration pins a deployment environment, add the same `environment:` to the `release` job.
+
+### Follow-up: production environment (same day)
+
+- Created the GitHub environment `production` and restricted it to the `main` branch (custom branch
+  policy, no required reviewers), so releases stay automatic while another ref cannot use the
+  environment.
+- The `release` job now declares `environment: production`; workflow comment and
+  `docs/publishing.md` state that the Open VSX registration must name the same environment
+  (registrations cannot be edited — delete and recreate).
+- Re-validated the workflow with the `yaml` package: `environment: production`, permissions and
+  step order unchanged.
+
