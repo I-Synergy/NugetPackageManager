@@ -43,5 +43,7 @@ Plan: `.ai/plans/openvsx-publishing.md`
   lifecycle scripts). The step now runs
   `npx --yes --ignore-scripts ovsx@1.3.0 publish ...`, matching the AIWorkspaceManager workflow.
   Verified locally that `npx --yes --ignore-scripts ovsx@1.3.0 --version` works.
+- SonarCloud re-analysis of PR 57 (2026-11-04T10:09:51Z) reports `total: 0` open
+  leak-period issues; the S6505 vulnerability is gone.
 
 
