@@ -102,6 +102,7 @@ type Configuration = {
   Prerelease: boolean;
   Sources: Array<Source>;
   StatusBarLoadingIndicator: boolean;
+  AllowMajorVersionOverride: boolean;
 };
 
 type OutdatedPackage = {

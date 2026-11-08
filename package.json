@@ -199,6 +199,11 @@
           ],
           "description": "Package patterns whose major version follows the target framework (net10.0 to 10.x). Used to keep framework-scoped update suggestions on the matching major line."
         },
+        "nugetpackagemanager.allowMajorVersionOverride": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow framework-aligned packages to be updated across their target framework's major version in multi-.NET-major workspaces."
+        },
         "nugetpackagemanager.extraTargetFrameworks": {
           "type": "array",
           "items": {

@@ -254,11 +254,13 @@ function getCpmSettings(): {
   alignedPatterns: string[];
   extraTargetFrameworks: string[];
   excludeGlobs: string[];
+  allowMajorOverride: boolean;
 } {
   return {
     alignedPatterns: getSetting<string[]>("frameworkAlignedPackages", DEFAULT_FRAMEWORK_ALIGNED_PATTERNS),
     extraTargetFrameworks: getSetting<string[]>("extraTargetFrameworks", []),
     excludeGlobs: getSetting<string[]>("excludeGlobs", []),
+    allowMajorOverride: getSetting<boolean>("allowMajorVersionOverride", false),
   };
 }
 
@@ -2107,17 +2109,27 @@ async function parseOutdatedProjectsAsync(
 type InstalledState = {
   installedMap: Map<string, InstalledPackageEntry>;
   groups: Map<string, InstalledPackageGroup>;
+  multiMajor: boolean;
 };
 
 function buildInstalledState(projects: Project[]): InstalledState {
   const installedMap = new Map<string, InstalledPackageEntry>();
   const groups = new Map<string, InstalledPackageGroup>();
+  const majors = new Set<number>();
   for (const project of projects) {
+    for (const tfm of project.TargetFrameworks ?? []) {
+      const major = getTfmMajorVersion(tfm);
+      if (major !== null) majors.add(major);
+    }
     for (const pkg of project.Packages) {
+      for (const resolution of pkg.CpmResolutions ?? []) {
+        const major = getTfmMajorVersion(resolution.Tfm);
+        if (major !== null) majors.add(major);
+      }
       addInstalledPackage(project, pkg, installedMap, groups);
     }
   }
-  return { installedMap, groups };
+  return { installedMap, groups, multiMajor: majors.size > 1 };
 }
 
 function addInstalledPackage(
@@ -2147,6 +2159,15 @@ function addInstalledPackage(
   }
 }
 
+/** The row's lane major: TFM when present, else the lowest major of the project's TFMs. */
+function computeLaneMajor(project: Project, tfm: string): number | null {
+  const frameworks = tfm ? [tfm] : (project.TargetFrameworks ?? []);
+  const majors = frameworks
+    .map((framework) => getTfmMajorVersion(framework))
+    .filter((major): major is number => major !== null);
+  return majors.length > 0 ? Math.min(...majors) : null;
+}
+
 function mergeInstalledEntry(
   project: Project,
   pkg: ProjectPackage,
@@ -2163,6 +2184,10 @@ function mergeInstalledEntry(
     if (compareVersions(resolution.Version, existing.version) < 0) {
       existing.version = resolution.Version;
     }
+    const incomingLane = computeLaneMajor(project, resolution.Tfm);
+    if (incomingLane !== null && (existing.laneMajor === null || incomingLane < existing.laneMajor)) {
+      existing.laneMajor = incomingLane;
+    }
     return;
   }
 
@@ -2170,6 +2195,7 @@ function mergeInstalledEntry(
     version: resolution.Version,
     condition: resolution.Condition,
     framework: resolution.Tfm,
+    laneMajor: computeLaneMajor(project, resolution.Tfm),
     conditionLabel: resolution.ConditionLabel,
     matched: resolution.Matched,
     projects: [projectInfo],
@@ -2205,6 +2231,7 @@ type OutdatedCandidateParams = {
   sources: Array<{ Name: string; Url: string; Patterns?: string[] }>;
   request: GetOutdatedPackagesRequest;
   settings: ReturnType<typeof getCpmSettings>;
+  multiMajor: boolean;
   signal: AbortSignal | undefined;
   report: (stage: string, percent: number, completed?: number, total?: number) => void;
 };
@@ -2265,30 +2292,48 @@ async function buildOutdatedCandidateAsync(
   if (params.signal?.aborted) return;
   if (!latest || compareVersions(latest.version, installed.version) <= 0) return;
 
-  const available = selectAvailableVersions(latest, installed, packageId, params.settings);
+  const available = selectAvailableVersions(latest, installed, packageId, params.settings, params.multiMajor);
   if (available.length === 0) return;
-  candidates.push({ packageId, installed, latest, available });
+  const suppressOverall = params.multiMajor
+    && !params.settings.allowMajorOverride
+    && installed.laneMajor !== null
+    && isFrameworkAlignedPackage(packageId, params.settings.alignedPatterns);
+  candidates.push({
+    packageId,
+    installed,
+    latest,
+    available,
+    ...(suppressOverall ? {} : { overallVersion: latest.version }),
+  });
 }
 
 function selectAvailableVersions(
   latest: { version: string; versions: string[] },
   installed: InstalledPackageEntry,
   packageId: string,
-  settings: ReturnType<typeof getCpmSettings>
+  settings: ReturnType<typeof getCpmSettings>,
+  multiMajor: boolean
 ): string[] {
-  const tfmMajor = installed.framework ? getTfmMajorVersion(installed.framework) : null;
-  const aligned = tfmMajor !== null && isFrameworkAlignedPackage(packageId, settings.alignedPatterns);
+  const laneMajor = installed.laneMajor;
+  const aligned = laneMajor !== null && isFrameworkAlignedPackage(packageId, settings.alignedPatterns);
   // Search results occasionally omit the version list; the reported latest
   // version must still be considered.
   const allVersions = latest.versions.length > 0 ? latest.versions : [latest.version];
-  const alignedVersions = tfmMajor !== null && aligned
-    ? allVersions.filter((version) => getVersionMajor(version) === tfmMajor)
-    : allVersions;
-  // Keep the historical fallback: when the TFM's major line has no newer
-  // version, the overall latest is still offered instead of hiding the update.
-  const pool = alignedVersions.some((version) => compareVersions(version, installed.version) > 0)
-    ? alignedVersions
-    : allVersions;
+  if (!aligned) {
+    return allVersions
+      .filter((version) => compareVersions(version, installed.version) > 0)
+      .sort(compareVersions);
+  }
+  const laneVersions = allVersions.filter((version) => getVersionMajor(version) === laneMajor);
+  const newerLane = laneVersions.filter((version) => compareVersions(version, installed.version) > 0);
+  // Strict lanes: in a multi-.NET-major scope with no override, only the row's
+  // own major line is offered - no fallback to the overall latest.
+  if (multiMajor && !settings.allowMajorOverride) {
+    return newerLane.sort(compareVersions);
+  }
+  // Single-major scope or explicit override: keep the historical fallback - when
+  // the lane has no newer version, the overall latest is still offered.
+  const pool = newerLane.length > 0 ? laneVersions : allVersions;
   return pool
     .filter((version) => compareVersions(version, installed.version) > 0)
     .sort(compareVersions);
@@ -2418,19 +2463,21 @@ function buildOutdatedEntry(
   if (installed.framework) entry.CpmFramework = installed.framework;
   if (installed.conditionLabel) entry.CpmConditionLabel = installed.conditionLabel;
   if (!installed.matched) entry.CpmMatched = false;
-  if (compareVersions(candidate.latest.version, satisfying) > 0) {
-    entry.LatestOverallVersion = candidate.latest.version;
+  if (candidate.overallVersion !== undefined && compareVersions(candidate.overallVersion, satisfying) > 0) {
+    entry.LatestOverallVersion = candidate.overallVersion;
   }
 
-  const violated = constraints.filter(
-    (constraint) => !satisfiesVersionRange(candidate.latest.version, constraint.Range)
-  );
-  if (violated.length > 0) {
-    entry.BlockedBy = violated.map((constraint) => ({
-      PackageId: constraint.PackageId,
-      InstalledVersion: constraint.InstalledVersion,
-      Range: constraint.Range,
-    }));
+  if (candidate.overallVersion !== undefined) {
+    const violated = constraints.filter(
+      (constraint) => !satisfiesVersionRange(candidate.overallVersion!, constraint.Range)
+    );
+    if (violated.length > 0) {
+      entry.BlockedBy = violated.map((constraint) => ({
+        PackageId: constraint.PackageId,
+        InstalledVersion: constraint.InstalledVersion,
+        Range: constraint.Range,
+      }));
+    }
   }
   return entry;
 }
@@ -2483,6 +2530,7 @@ async function runOutdatedScanAsync(
     sources: prepared.sources,
     request,
     settings: prepared.settings,
+    multiMajor: state.multiMajor,
     signal,
     report,
   });
@@ -3009,17 +3057,22 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
     },
 
     async getPackageAsync(request: GetPackageRequest, signal?: AbortSignal): Promise<Result<GetPackageResponse>> {
+      let result: Result<GetPackageResponse>;
       if (request.Url === "") {
-        return fetchPackageFromAnySourceAsync(request, signal);
+        result = await fetchPackageFromAnySourceAsync(request, signal);
+      } else {
+        try {
+          result = await fetchPackageFromSourceAsync(request.Url, request, signal);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          Logger.error(`getPackage: Exception for ${request.Id}`, err);
+          return fail(`Failed to fetch package: ${message}`);
+        }
       }
-
-      try {
-        return await fetchPackageFromSourceAsync(request.Url, request, signal);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        Logger.error(`getPackage: Exception for ${request.Id}`, err);
-        return fail(`Failed to fetch package: ${message}`);
+      if (result.ok) {
+        return ok({ ...result.value, Package: applyLaneCap(result.value.Package, request) });
       }
+      return result;
     },
 
     async getPackageDetailsAsync(request: GetPackageDetailsRequest, signal?: AbortSignal): Promise<Result<GetPackageDetailsResponse>> {
@@ -3094,6 +3147,7 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
           Prerelease: getSetting<boolean>("prerelease", false),
           Sources: sources,
           StatusBarLoadingIndicator: getSetting<boolean>("statusBarLoadingIndicator", false),
+          AllowMajorVersionOverride: getSetting<boolean>("allowMajorVersionOverride", false),
         },
       });
     },
@@ -3118,6 +3172,9 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       }
       if (getSetting<boolean>("prerelease", false) !== request.Configuration.Prerelease) {
         await config.update("prerelease", request.Configuration.Prerelease, vscode.ConfigurationTarget.Global);
+      }
+      if (getSetting<boolean>("allowMajorVersionOverride", false) !== request.Configuration.AllowMajorVersionOverride) {
+        await config.update("allowMajorVersionOverride", request.Configuration.AllowMajorVersionOverride, vscode.ConfigurationTarget.Global);
       }
       const currentSources = getSetting<string[]>("sources", []);
       if (JSON.stringify(currentSources) !== JSON.stringify(sources)) {
@@ -4684,6 +4741,37 @@ function getTfmMajorVersion(tfm: string): number | null {
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
+/**
+ * Caps the recommended version of an Installed-row package to its TFM's major line.
+ * Applied only when the row carries a framework and installed version, the package is
+ * framework-aligned, the scope targets more than one .NET major, the override is off and the
+ * row's framework parses to a major. `Versions` is left intact for the version picker.
+ */
+function applyLaneCap(packageObj: Package, request: GetPackageRequest): Package {
+  const { Framework, InstalledVersion, ScopeTargetFrameworks } = request;
+  if (!Framework || !InstalledVersion) return packageObj;
+  const settings = getCpmSettings();
+  if (settings.allowMajorOverride) return packageObj;
+  if (!isFrameworkAlignedPackage(packageObj.Id, settings.alignedPatterns)) return packageObj;
+  const scopeMajors = new Set<number>();
+  for (const tfm of ScopeTargetFrameworks ?? []) {
+    const major = getTfmMajorVersion(tfm);
+    if (major !== null) scopeMajors.add(major);
+  }
+  if (scopeMajors.size <= 1) return packageObj;
+  const laneMajor = getTfmMajorVersion(Framework);
+  if (laneMajor === null) return packageObj;
+  const allVersions = [...packageObj.Versions.map((entry) => entry.Version), packageObj.Version];
+  const laneVersions = allVersions.filter((version) => getVersionMajor(version) === laneMajor);
+  if (laneVersions.length === 0) return packageObj;
+  const newestLane = laneVersions.reduce(
+    (best, version) => (compareVersions(version, best) > 0 ? version : best),
+    laneVersions[0]!
+  );
+  const recommended = compareVersions(newestLane, InstalledVersion) > 0 ? newestLane : InstalledVersion;
+  return { ...packageObj, Version: recommended };
+}
+
 // ============================================================
 // Update-suggestion constraints
 // ============================================================
@@ -4692,6 +4780,7 @@ type InstalledPackageEntry = {
   version: string;
   condition: string;
   framework: string;
+  laneMajor: number | null;
   conditionLabel: string;
   matched: boolean;
   projects: Array<{ Name: string; Path: string; Version: string }>;
@@ -4715,6 +4804,8 @@ type OutdatedCandidate = {
     totalDownloads?: number | null;
     verified?: boolean | null;
   };
+  /** Overall latest version for the secondary action; absent when cross-major is not allowed. */
+  overallVersion?: string;
   available: string[];
 };
 

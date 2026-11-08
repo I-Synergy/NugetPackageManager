@@ -141,6 +141,7 @@ export class SettingsView extends LitElement {
 
   @state() private skipRestore: boolean = false;
   @state() private enablePackageVersionInlineInfo: boolean = false;
+  @state() private allowMajorVersionOverride: boolean = false;
   @state() private newSource: SourceViewModel | null = null;
   @state() private sources: SourceViewModel[] = [];
 
@@ -149,6 +150,7 @@ export class SettingsView extends LitElement {
     const config = configuration.Configuration;
     this.skipRestore = config?.SkipRestore ?? false;
     this.enablePackageVersionInlineInfo = config?.EnablePackageVersionInlineInfo ?? false;
+    this.allowMajorVersionOverride = config?.AllowMajorVersionOverride ?? false;
     this.sources = config?.Sources.map((x) => new SourceViewModel(x)) ?? [];
   }
 
@@ -158,6 +160,7 @@ export class SettingsView extends LitElement {
       SkipRestore: this.skipRestore,
       EnablePackageVersionInlineInfo: this.enablePackageVersionInlineInfo,
       Sources: sources,
+      AllowMajorVersionOverride: this.allowMajorVersionOverride,
     });
     await hostApi.updateConfigurationAsync({
       Configuration: {
@@ -167,6 +170,7 @@ export class SettingsView extends LitElement {
         Sources: sources,
         StatusBarLoadingIndicator:
           configuration.Configuration?.StatusBarLoadingIndicator ?? false,
+        AllowMajorVersionOverride: this.allowMajorVersionOverride,
       },
     });
   }
@@ -343,6 +347,21 @@ export class SettingsView extends LitElement {
               />
               Show inline information about newer package versions in project files
             </label>
+          </div>
+
+          <div class="section">
+            <label class="title">
+              <input
+                type="checkbox"
+                .checked=${this.allowMajorVersionOverride}
+                @change=${async (e: Event) => {
+                  this.allowMajorVersionOverride = (e.target as HTMLInputElement).checked;
+                  await this.updateConfigurationAsync();
+                }}
+              />
+              Allow framework-aligned packages to cross their target framework's major version
+            </label>
+            <div class="subtitle">Only applies when the workspace targets more than one .NET major.</div>
           </div>
 
           <div class="section">

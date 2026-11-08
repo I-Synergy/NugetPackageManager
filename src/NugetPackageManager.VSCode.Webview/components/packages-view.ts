@@ -31,6 +31,27 @@ const NUGET_ORG_PREFIX = "https://api.nuget.org";
 /** Shown until the workspace scan job reports its first stage. */
 const PROJECTS_LOADING_MESSAGE = "Discovering projects and resolving target frameworks…";
 
+/** Major of a `net<major>.<minor>` TFM, or null when unparseable (e.g. netstandard2.0). */
+function parseTfmMajor(tfm: string): number | null {
+  const match = /^net(\d+)\.\d+/i.exec(tfm.trim());
+  return match ? Number.parseInt(match[1]!, 10) : null;
+}
+
+/** Lowest-major TFM in a set, ignoring unparseable entries; empty when none parse. */
+function pickLowestMajorTfm(tfms: Iterable<string>): string {
+  let best: string = "";
+  let bestMajor: number | null = null;
+  for (const tfm of tfms) {
+    const major = parseTfmMajor(tfm);
+    if (major === null) continue;
+    if (bestMajor === null || major < bestMajor) {
+      best = tfm;
+      bestMajor = major;
+    }
+  }
+  return best;
+}
+
 @customElement("packages-view")
 export class PackagesView extends LitElement {
   static override readonly styles = [
@@ -444,6 +465,7 @@ export class PackagesView extends LitElement {
   @state() private installedUpdateError = "";
   private _removeJobId = "";
   private _removeCancelled = false;
+  private _installedScopeTfms: string[] = [];
   @state() private removeError = "";
   @state() private projectsLoading = false;
   @state() private projectsLoadingMessage = PROJECTS_LOADING_MESSAGE;
@@ -641,6 +663,11 @@ export class PackagesView extends LitElement {
     const source = configuration.Configuration?.Sources.find((s) => s.Url === sourceUrl);
     if (source?.Name !== undefined) request.SourceName = source.Name;
     if (source?.PasswordScriptPath !== undefined) request.PasswordScriptPath = source.PasswordScriptPath;
+    if (installed.LaneFramework) request.Framework = installed.LaneFramework;
+    if (this._installedScopeTfms.length > 0) request.ScopeTargetFrameworks = this._installedScopeTfms;
+    if (installed.InstalledVersion && installed.InstalledVersion !== "Multiple") {
+      request.InstalledVersion = installed.InstalledVersion;
+    }
 
     const result = await hostApi.getPackageAsync(request);
     if (!result.ok || !result.value.Package) return;
@@ -737,6 +764,7 @@ export class PackagesView extends LitElement {
   async LoadProjectsPackagesAsync(forceReload: boolean = false, _signal?: AbortSignal): Promise<void> {
     this._projectsPackagesAc?.abort();
     this._installedFramework = "";
+    this._installedScopeTfms = [];
     const ac = new AbortController();
     this._projectsPackagesAc = ac;
     const projectsToUse =
@@ -746,31 +774,40 @@ export class PackagesView extends LitElement {
           )
         : this.projects;
 
+    const scopeTfms = new Set<string>();
+    for (const project of projectsToUse ?? []) {
+      for (const tfm of project.TargetFrameworks ?? []) scopeTfms.add(tfm);
+    }
+    this._installedScopeTfms = [...scopeTfms];
+
     const packages = projectsToUse
-      ?.flatMap((p) =>
-        p.Packages.flatMap((pkg) => {
+      ?.flatMap((p) => {
+        const projectTfms = p.TargetFrameworks ?? [];
+        return p.Packages.flatMap((pkg) => {
           if (!pkg.CpmResolutions || pkg.CpmResolutions.length === 0) {
-            return [pkg];
+            return [{ ...pkg, ProjectTfms: projectTfms }];
           }
 
           const conditional = pkg.CpmResolutions.filter((r) => r.Tfm !== "");
           const unconditional = pkg.CpmResolutions.find((r) => r.Tfm === "");
 
           if (conditional.length === 0) {
-            return [unconditional ? { ...pkg, Version: unconditional.Version } : pkg];
+            const base = unconditional ? { ...pkg, Version: unconditional.Version } : pkg;
+            return [{ ...base, ProjectTfms: projectTfms }];
           }
 
           const entries = conditional.map((r) => ({
             ...pkg,
             Version: r.Version,
             CpmFramework: r.Tfm,
+            ProjectTfms: projectTfms,
           }));
           if (unconditional) {
-            entries.push({ ...pkg, Version: unconditional.Version, CpmFramework: "" });
+            entries.push({ ...pkg, Version: unconditional.Version, CpmFramework: "", ProjectTfms: projectTfms });
           }
           return entries;
-        })
-      )
+        });
+      })
       .filter((x) =>
         x.Id.toLowerCase().includes(this.filters.Query?.toLowerCase())
       );
@@ -778,7 +815,13 @@ export class PackagesView extends LitElement {
     const grouped = packages.reduce(
       (
         acc: {
-          [key: string]: { id: string; framework: string; versions: string[]; allowsUpdate: boolean };
+          [key: string]: {
+            id: string;
+            framework: string;
+            versions: string[];
+            allowsUpdate: boolean;
+            tfms: Set<string>;
+          };
         },
         item
       ) => {
@@ -789,7 +832,15 @@ export class PackagesView extends LitElement {
         const key = framework ? `${Id}\0${framework}` : Id;
 
         if (!acc[key]) {
-          acc[key] = { id: Id, framework, versions: [], allowsUpdate: false };
+          acc[key] = { id: Id, framework, versions: [], allowsUpdate: false, tfms: new Set() };
+        }
+
+        // The row's lane is its CpmFramework when it has one; a shared row uses the
+        // TFMs of the projects that carry it.
+        if (framework) {
+          acc[key].tfms.add(framework);
+        } else {
+          for (const tfm of item.ProjectTfms ?? []) acc[key].tfms.add(tfm);
         }
 
         if (acc[key].versions.indexOf(Version) < 0) {
@@ -811,6 +862,7 @@ export class PackagesView extends LitElement {
       pkg.InstalledVersion = data.versions.length > 1 ? "Multiple" : (data.versions[0] ?? "");
       pkg.AllowsUpdate = data.allowsUpdate;
       pkg.CpmFramework = data.framework;
+      pkg.LaneFramework = pickLowestMajorTfm(data.tfms);
       return pkg;
     });
 
@@ -874,6 +926,11 @@ export class PackagesView extends LitElement {
     };
     if (this.CurrentSource?.Name !== undefined) updatePkgReq.SourceName = this.CurrentSource.Name;
     if (this.CurrentSource?.PasswordScriptPath !== undefined) updatePkgReq.PasswordScriptPath = this.CurrentSource.PasswordScriptPath;
+    if (projectPackage.LaneFramework) updatePkgReq.Framework = projectPackage.LaneFramework;
+    if (this._installedScopeTfms.length > 0) updatePkgReq.ScopeTargetFrameworks = this._installedScopeTfms;
+    if (projectPackage.InstalledVersion && projectPackage.InstalledVersion !== "Multiple") {
+      updatePkgReq.InstalledVersion = projectPackage.InstalledVersion;
+    }
     const result = await hostApi.getPackageAsync(updatePkgReq, signal);
 
     if (signal?.aborted) return;
