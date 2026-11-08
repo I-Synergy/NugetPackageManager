@@ -52,6 +52,18 @@ function pickLowestMajorTfm(tfms: Iterable<string>): string {
   return best;
 }
 
+/** Adds every distinct .NET major from a project's TFMs and per-framework CPM resolutions. */
+function collectTfmMajors(project: ProjectViewModel, majors: Set<number>): void {
+  const tfms = [
+    ...(project.TargetFrameworks ?? []),
+    ...project.Packages.flatMap((pkg) => pkg.CpmResolutions.map((resolution) => resolution.Tfm)),
+  ];
+  for (const tfm of tfms) {
+    const major = parseTfmMajor(tfm);
+    if (major !== null) majors.add(major);
+  }
+}
+
 @customElement("packages-view")
 export class PackagesView extends LitElement {
   static override readonly styles = [
@@ -559,6 +571,17 @@ export class PackagesView extends LitElement {
     // When the project tree is hidden, still scope to the solution-filtered project list
     // so that updates/consolidate/vulnerabilities don't scan non-solution projects.
     return this._allProjectPaths;
+  }
+
+  private get hasMultipleFrameworkMajors(): boolean {
+    const paths = new Set(this.effectiveProjectPaths);
+    const majors = new Set<number>();
+    for (const project of this.projects) {
+      if (paths.size > 0 && !paths.has(project.Path)) continue;
+      collectTfmMajors(project, majors);
+    }
+    // A single .NET major has no lane to explain, so the banner is noise.
+    return majors.size > 1;
   }
 
   private get filteredProjects(): Array<ProjectViewModel> {
@@ -1842,6 +1865,7 @@ export class PackagesView extends LitElement {
     return html`<div class="tab-content" role="tabpanel" aria-label="updates tab">
       <updates-view
         .prerelease=${this.filters.Prerelease}
+        .multiFramework=${this.hasMultipleFrameworkMajors}
         .projectPaths=${this.effectiveProjectPaths}
         .sourceUrl=${this.filters.SourceUrl}
         .filterQuery=${this.filters.Query}

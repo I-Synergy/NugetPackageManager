@@ -1185,6 +1185,43 @@ suite('PackagesView Component', () => {
         });
     });
 
+    suite('Framework majors', () => {
+        const readHasMultipleFrameworkMajors = (): boolean =>
+            (packagesView as unknown as { hasMultipleFrameworkMajors: boolean }).hasMultipleFrameworkMajors;
+
+        test('is true when the scan scope spans more than one .NET major', () => {
+            packagesView.projects = [
+                new ProjectViewModel({ Name: 'A', Path: '/ws/A.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+                new ProjectViewModel({ Name: 'B', Path: '/ws/B.csproj', CpmEnabled: false, TargetFrameworks: ['net10.0'], Packages: [] }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), true);
+        });
+
+        test('is false when every project targets the same .NET major', () => {
+            packagesView.projects = [
+                new ProjectViewModel({ Name: 'A', Path: '/ws/A.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+                new ProjectViewModel({ Name: 'B', Path: '/ws/B.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), false);
+        });
+
+        test('is false when a single project only lists TFMs of one major (net10.0 and net10.0-windows)', () => {
+            packagesView.projects = [
+                new ProjectViewModel({
+                    Name: 'A',
+                    Path: '/ws/A.csproj',
+                    CpmEnabled: false,
+                    TargetFrameworks: ['net10.0', 'net10.0-windows'],
+                    Packages: [],
+                }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), false);
+        });
+    });
+
     suite('Installed framework groups', () => {
         test('renders no group header when every installed package is in one framework line', () => {
             packagesView.projectsPackages = [
