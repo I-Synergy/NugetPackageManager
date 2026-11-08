@@ -890,6 +890,63 @@ suite('PackagesView Component', () => {
             const lastCall = statusBarCalls[statusBarCalls.length - 1]!;
             assert.strictEqual(lastCall.args[0].Percentage, null);
         });
+        test('carries the lowest-major lane and scope context for installed rows', async () => {
+            const project: Project = {
+                Name: 'Shared',
+                Path: '/path/to/Shared.csproj',
+                CpmEnabled: false,
+                TargetFrameworks: ['net8.0', 'net10.0'],
+                Packages: [{
+                    Id: 'Microsoft.Extensions.Logging',
+                    Version: '8.0.5',
+                    IsPinned: false,
+                    VersionSource: 'project',
+                }],
+            };
+            packagesView.projects = [new ProjectViewModel(project)];
+
+            const getPackageStub = mockHostApi.getPackageAsync as sinon.SinonStub;
+            getPackageStub.resolves(
+                ok({ Package: createMockPackage({ Id: 'Microsoft.Extensions.Logging', Version: '8.0.6' }), SourceUrl: '' })
+            );
+
+            await packagesView.LoadProjectsPackagesAsync();
+
+            const row = packagesView.projectsPackages.find((p) => p.Id === 'Microsoft.Extensions.Logging');
+            assert.ok(row, 'row exists');
+            assert.strictEqual(row!.LaneFramework, 'net8.0', 'shared row uses the lowest project major');
+
+            const req = getPackageStub.firstCall.args[0];
+            assert.strictEqual(req.Framework, 'net8.0');
+            assert.deepStrictEqual(req.ScopeTargetFrameworks, ['net8.0', 'net10.0']);
+            assert.strictEqual(req.InstalledVersion, '8.0.5');
+        });
+
+        test('hides the update arrow when the recommended version equals the installed version', async () => {
+            const project: Project = {
+                Name: 'Shared',
+                Path: '/path/to/Shared.csproj',
+                CpmEnabled: false,
+                TargetFrameworks: ['net8.0', 'net10.0'],
+                Packages: [{
+                    Id: 'Microsoft.Extensions.Logging',
+                    Version: '8.0.5',
+                    IsPinned: false,
+                    VersionSource: 'project',
+                }],
+            };
+            packagesView.projects = [new ProjectViewModel(project)];
+
+            (mockHostApi.getPackageAsync as sinon.SinonStub).resolves(
+                ok({ Package: createMockPackage({ Id: 'Microsoft.Extensions.Logging', Version: '8.0.5' }), SourceUrl: '' })
+            );
+
+            await packagesView.LoadProjectsPackagesAsync();
+
+            const row = packagesView.projectsPackages.find((p) => p.Id === 'Microsoft.Extensions.Logging');
+            assert.ok(row, 'row exists');
+            assert.strictEqual(row!.Version, row!.InstalledVersion, 'no arrow when recommended equals installed');
+        });
     });
     suite('Package deletion and tab order', () => {
         test('removes a package from every project and restores once', async () => {
@@ -1125,6 +1182,43 @@ suite('PackagesView Component', () => {
                 [freeProject.Path],
                 'a pinned [x.y.z] reference is left alone'
             );
+        });
+    });
+
+    suite('Framework majors', () => {
+        const readHasMultipleFrameworkMajors = (): boolean =>
+            (packagesView as unknown as { hasMultipleFrameworkMajors: boolean }).hasMultipleFrameworkMajors;
+
+        test('is true when the scan scope spans more than one .NET major', () => {
+            packagesView.projects = [
+                new ProjectViewModel({ Name: 'A', Path: '/ws/A.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+                new ProjectViewModel({ Name: 'B', Path: '/ws/B.csproj', CpmEnabled: false, TargetFrameworks: ['net10.0'], Packages: [] }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), true);
+        });
+
+        test('is false when every project targets the same .NET major', () => {
+            packagesView.projects = [
+                new ProjectViewModel({ Name: 'A', Path: '/ws/A.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+                new ProjectViewModel({ Name: 'B', Path: '/ws/B.csproj', CpmEnabled: false, TargetFrameworks: ['net8.0'], Packages: [] }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), false);
+        });
+
+        test('is false when a single project only lists TFMs of one major (net10.0 and net10.0-windows)', () => {
+            packagesView.projects = [
+                new ProjectViewModel({
+                    Name: 'A',
+                    Path: '/ws/A.csproj',
+                    CpmEnabled: false,
+                    TargetFrameworks: ['net10.0', 'net10.0-windows'],
+                    Packages: [],
+                }),
+            ];
+
+            assert.strictEqual(readHasMultipleFrameworkMajors(), false);
         });
     });
 

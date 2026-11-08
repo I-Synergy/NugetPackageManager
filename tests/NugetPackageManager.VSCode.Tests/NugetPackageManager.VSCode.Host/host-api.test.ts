@@ -1578,6 +1578,78 @@ suite('HostAPI Tests', () => {
     // CPM multi-framework projects
     // ----------------------------------------------------------------
     suite('CPM multi-framework projects', () => {
+        /** Points findFiles at the given csproj paths, ignoring solution files. */
+        function stubProjectFiles(paths: string[]): void {
+            const uris = paths.map((fsPath) => ({ fsPath }) as vscode.Uri);
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) =>
+                String(pattern).includes('sln') ? [] : uris
+            );
+        }
+
+        /** Stubs a single configured source. */
+        function stubSingleSource(): void {
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
+                { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
+            ]);
+        }
+
+        /** Stubs the outdated feed to publish the given versions (any order) for one package. */
+        function stubOutdatedFeed(packageId: string, versions: string[]): void {
+            const highest = [...versions].sort().slice(-1)[0]!;
+            const mockApi = {
+                GetPackagesAsync: sandbox.stub().resolves({
+                    data: [{
+                        Name: packageId,
+                        Id: packageId,
+                        Version: highest,
+                        Versions: versions.map((version) => ({ Version: version, Id: '' })),
+                    }],
+                }),
+            };
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+        }
+
+        /** Stubs workspace.configuration so getSetting returns the given overrides. */
+        function stubConfig(overrides: Record<string, unknown> = {}): void {
+            const get = sandbox.stub().callsFake((key: string) => overrides[key]);
+            sandbox.stub(vscode.workspace, 'getConfiguration').returns(
+                { get } as unknown as vscode.WorkspaceConfiguration
+            );
+        }
+
+        /** Two projects, net10 and net11, each resolving Microsoft.Extensions.Logging on its line. */
+        function stubNet10Net11Logging(): void {
+            stubProjectFiles(['/ws/net10.csproj', '/ws/net11.csproj']);
+            stubProjectParsing((projectPath) => {
+                const net11 = projectPath.includes('net11');
+                const tfm = net11 ? 'net11.0' : 'net10.0';
+                const version = net11 ? '11.0.0-rc.2.26504.105' : '10.0.13';
+                return {
+                    Path: projectPath,
+                    Name: path.basename(projectPath),
+                    CpmEnabled: true,
+                    TargetFrameworks: [tfm],
+                    TfmSource: 'msbuild',
+                    Packages: [{
+                        Id: 'Microsoft.Extensions.Logging',
+                        Version: version,
+                        IsPinned: false,
+                        VersionSource: 'central',
+                        CpmFramework: net11 ? undefined : 'not net11.0',
+                        CpmResolutions: [{
+                            Tfm: tfm,
+                            Version: version,
+                            Condition: net11 ? "$(TargetFramework.StartsWith('net11.0'))" : "!$(TargetFramework.StartsWith('net11.0'))",
+                            ConditionLabel: net11 ? 'net11.0' : 'not net11.0',
+                            Matched: true,
+                        }],
+                    }],
+                } as Project;
+            });
+        }
+
         test('keeps framework lines separate when grouping inconsistencies', async () => {
             const projects = [
                 { name: 'net10-a', condition: "net", tfm: 'net10.0', version: '1.0.0' },
@@ -1701,7 +1773,7 @@ suite('HostAPI Tests', () => {
             assert.ok(net10Row);
             assert.strictEqual(net10Row.InstalledVersion, '10.0.13');
             assert.strictEqual(net10Row.LatestVersion, '10.0.14', 'stays on the net10 major line');
-            assert.strictEqual(net10Row.LatestOverallVersion, '11.0.0-rc.3');
+            assert.strictEqual(net10Row.LatestOverallVersion, undefined, 'multi-major + override off suppresses the overall version');
             assert.strictEqual(net10Row.CpmConditionLabel, 'not net11.0');
 
             const net11Row = loggingRows.find((pkg) => pkg.CpmFramework === 'net11.0')!;
@@ -1710,7 +1782,194 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(net11Row.LatestVersion, '11.0.0-rc.3');
             assert.strictEqual(net11Row.LatestOverallVersion, undefined);
         });
+        test('offers the overall latest as the secondary action when the major override is enabled', async () => {
+            stubNet10Net11Logging();
+            stubSingleSource();
+            stubOutdatedFeed('Microsoft.Extensions.Logging', ['10.0.14', '11.0.0-rc.3']);
+            stubConfig({ allowMajorVersionOverride: true });
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: true });
+            assert.ok(result.ok);
+
+            const net10Row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'Microsoft.Extensions.Logging' && pkg.CpmFramework === 'net10.0'
+            )!;
+            assert.ok(net10Row);
+            assert.strictEqual(net10Row.LatestVersion, '10.0.14');
+            assert.strictEqual(net10Row.LatestOverallVersion, '11.0.0-rc.3');
+        });
+
+        test('hides the net10 update row when only a cross-major version is newer and the override is off', async () => {
+            stubNet10Net11Logging();
+            stubSingleSource();
+            stubOutdatedFeed('Microsoft.Extensions.Logging', ['10.0.13', '11.0.0-rc.3']);
+            stubConfig();
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: true });
+            assert.ok(result.ok);
+
+            const net10Row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'Microsoft.Extensions.Logging' && pkg.CpmFramework === 'net10.0'
+            );
+            assert.strictEqual(net10Row, undefined, 'no net10 row and no LatestOverallVersion');
+        });
+
+        test('caps a shared unconditional resolution to the lowest major of its projects', async () => {
+            stubProjectFiles(['/ws/shared.csproj']);
+            stubProjectParsing(() => ({
+                Path: '/ws/shared.csproj',
+                Name: 'shared',
+                CpmEnabled: true,
+                TargetFrameworks: ['net8.0', 'net10.0'],
+                TfmSource: 'msbuild',
+                Packages: [{
+                    Id: 'Microsoft.Extensions.Logging',
+                    Version: '8.0.5',
+                    IsPinned: false,
+                    VersionSource: 'central',
+                    CpmResolutions: [{
+                        Tfm: '',
+                        Version: '8.0.5',
+                        Condition: '',
+                        ConditionLabel: '',
+                        Matched: true,
+                    }],
+                }],
+            } as Project));
+            stubSingleSource();
+            stubOutdatedFeed('Microsoft.Extensions.Logging', ['8.0.6', '10.0.1', '11.0.0-rc.1']);
+            stubConfig();
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: true });
+            assert.ok(result.ok);
+
+            const row = result.value.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
+            assert.ok(row);
+            assert.strictEqual(row.LatestVersion, '8.0.6', 'stays on the net8 lane of a shared row');
+        });
+
+        test('keeps the cross-major fallback in a single-major scope', async () => {
+            stubProjectFiles(['/ws/app.csproj']);
+            stubProjectParsing(() => ({
+                Path: '/ws/app.csproj',
+                Name: 'app',
+                CpmEnabled: false,
+                TargetFrameworks: ['net8.0'],
+                Packages: [{ Id: 'Microsoft.Extensions.Logging', Version: '8.0.5', IsPinned: false }],
+            } as unknown as Project));
+            stubSingleSource();
+            stubOutdatedFeed('Microsoft.Extensions.Logging', ['8.0.5', '10.0.0']);
+            stubConfig();
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(result.ok);
+
+            const row = result.value.Packages.find((pkg) => pkg.Id === 'Microsoft.Extensions.Logging')!;
+            assert.ok(row);
+            assert.strictEqual(row.LatestVersion, '10.0.0', 'single-major scope may still cross majors');
+        });
     });
+
+    // ----------------------------------------------------------------
+    // getPackage lane cap
+    // ----------------------------------------------------------------
+    suite('getPackage lane cap', () => {
+        function stubSinglePackageFeed(packageObj: Package): void {
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
+            sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
+                { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
+            ]);
+            const api = {
+                GetPackageAsync: sandbox.stub().resolves({ data: packageObj, isError: false, errorMessage: undefined }),
+            };
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                api as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+        }
+
+        function loggingPackage(versions: string[]): Package {
+            const highest = [...versions].sort().reverse()[0]!;
+            return {
+                Id: 'Microsoft.Extensions.Logging',
+                Name: 'Microsoft.Extensions.Logging',
+                Authors: ['Microsoft'],
+                Description: '',
+                IconUrl: '',
+                LicenseUrl: '',
+                ProjectUrl: '',
+                Registration: '',
+                TotalDownloads: null,
+                Verified: null,
+                InstalledVersion: '',
+                Version: highest,
+                Versions: versions.map((version) => ({ Version: version })),
+                Tags: [],
+            };
+        }
+
+        function stubOverride(): void {
+            const get = sandbox.stub().callsFake((key: string) =>
+                key === 'allowMajorVersionOverride' ? true : undefined
+            );
+            sandbox.stub(vscode.workspace, 'getConfiguration').returns(
+                { get } as unknown as vscode.WorkspaceConfiguration
+            );
+        }
+
+        test('caps the recommended version to the row major when the store ships only cross-major', async () => {
+            stubSinglePackageFeed(loggingPackage(['10.0.13', '11.0.0-rc.3']));
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Microsoft.Extensions.Logging',
+                Prerelease: true,
+                Framework: 'net10.0',
+                ScopeTargetFrameworks: ['net8.0', 'net10.0'],
+                InstalledVersion: '10.0.13',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.Version, '10.0.13', 'arrow hidden: nothing newer on the lane');
+        });
+
+        test('recommends the newest lane version that is newer than installed', async () => {
+            stubSinglePackageFeed(loggingPackage(['10.0.13', '10.0.14', '11.0.0-rc.3']));
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Microsoft.Extensions.Logging',
+                Prerelease: true,
+                Framework: 'net10.0',
+                ScopeTargetFrameworks: ['net8.0', 'net10.0'],
+                InstalledVersion: '10.0.13',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.Version, '10.0.14');
+        });
+
+        test('recommends the overall latest when the major override is enabled', async () => {
+            stubSinglePackageFeed(loggingPackage(['10.0.13', '11.0.0-rc.3']));
+            stubOverride();
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Microsoft.Extensions.Logging',
+                Prerelease: true,
+                Framework: 'net10.0',
+                ScopeTargetFrameworks: ['net8.0', 'net10.0'],
+                InstalledVersion: '10.0.13',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.Version, '11.0.0-rc.3');
+        });
+    });
+
 
     // ----------------------------------------------------------------
     // CPM write scope

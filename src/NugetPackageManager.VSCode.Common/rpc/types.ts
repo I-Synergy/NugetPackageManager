@@ -43,6 +43,12 @@ export type GetPackageRequest = SourceContext &
   CacheControl & {
     Id: string;
     Prerelease: boolean;
+    /** Installed row's target framework; may be a condition label such as 'not net11.0'. */
+    Framework?: string;
+    /** All target frameworks in the loaded scope, used to detect a multi-.NET-major scope. */
+    ScopeTargetFrameworks?: string[];
+    /** Currently installed version of the row; the recommended version never drops below it. */
+    InstalledVersion?: string;
   };
 
 export type GetPackageDetailsRequest = SourceContext & {

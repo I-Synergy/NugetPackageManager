@@ -56,7 +56,8 @@ suite('manifest identity', () => {
         const newKeys = keys.filter((key) => key.startsWith('nugetpackagemanager.'));
         const legacyKeys = keys.filter((key) => key.startsWith('i-synergy-nugetpackagemanager.'));
 
-        assert.strictEqual(newKeys.length, 12);
+        assert.strictEqual(newKeys.length, 13);
+        assert.ok(newKeys.includes('nugetpackagemanager.allowMajorVersionOverride'));
         assert.strictEqual(legacyKeys.length, 0);
         assert.ok(newKeys.includes('nugetpackagemanager.updateCheckConcurrency'));
     });

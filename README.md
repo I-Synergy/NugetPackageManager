@@ -144,7 +144,7 @@ Shows every package installed across all selected projects. Select a package to 
 - **Remove from all projects** — removes the package reference from every project in the solution, confirms the project list first, and restores once after the removals
 - **CPM cleanup** — when the last project reference is removed, the matching `PackageVersion` entry is deleted from `Directory.Packages.props` so no stale global reference remains
 - **Version changes** — install, update, or change a package version per project without leaving the package list
-- **Update from the row** — the up arrow next to a row's version updates the package to that version across every project that uses it (a framework-scoped row updates only its framework line)
+- **Update from the row** — the up arrow next to a row's version updates the package to that version across every project that uses it (a framework-scoped row updates only its framework line, and framework-aligned rows stay on that line's major version)
 - **Framework filter** — collapses platform TFMs (windows, android, ios) to their base `.NET` line. **Shared** is a separate option, so unconditional versions are never mixed into a `.NET`-specific update run.
 
 
@@ -172,6 +172,7 @@ Lists all packages where a newer version is available on the configured sources.
 - **Local metadata cache** — NuGet registration/search responses are cached on disk for 30 minutes under the extension's global storage. **Reload** bypasses the in-memory caches and clears the HTTP cache.
 - Per-row **update button** for single-package updates
 - **Framework selector** — choose **All frameworks**, **Shared**, or a base `.NET` line such as `net10.0` / `net11.0`. Platform variants are grouped under the base line; selecting a `.NET` line excludes shared packages.
+- **Framework lanes** — framework-aligned packages stay on the row's target-framework major line. In a multi-.NET-major scope an `11.x` version is never offered to a `net10.0` row, and the *latest overall* action is hidden unless `nugetpackagemanager.allowMajorVersionOverride` is enabled (see [Multi-framework version management](#multi-framework-version-management)).
 - Tab data refreshes automatically every time you switch to it
 
 ### Consolidate
@@ -299,6 +300,7 @@ Open VS Code Settings (`Ctrl+,`) and search for **NuGet Package Manager for Visu
 | `nugetpackagemanager.statusBarLoadingIndicator` | `boolean` | `false` | Show a loading progress indicator in the VS Code status bar. |
 | `nugetpackagemanager.logLevel` | `"DEBUG"` \| `"INFO"` \| `"WARN"` \| `"ERROR"` | `"INFO"` | Minimum log level written to the NuGet Package Manager for Visual Studio Code output channel. |
 | `nugetpackagemanager.frameworkAlignedPackages` | `string[]` | `["Microsoft.Extensions.*", "Microsoft.AspNetCore.*", "Microsoft.EntityFrameworkCore.*", "Microsoft.Maui.*", "System.*"]` | Package patterns whose major version follows the target framework (net10.0 → 10.x). Keeps framework-scoped update suggestions on the matching major line. |
+| `nugetpackagemanager.allowMajorVersionOverride` | `boolean` | `false` | Allow framework-aligned packages to be updated across their target framework's major version in multi-.NET-major workspaces. |
 | `nugetpackagemanager.extraTargetFrameworks` | `string[]` | `[]` | Target frameworks added when MSBuild evaluation is unavailable or incomplete (for example `net11.0`). |
 | `nugetpackagemanager.excludeGlobs` | `string[]` | `["**/bin/**", "**/obj/**", "**/TestResults/**", "**/packages/**", "**/.git/**"]` | Glob patterns excluded from project discovery. |
 | `nugetpackagemanager.passwordScriptAllowlist` | `string[]` (machine scope) | `[]` | Directories from which password scripts may run. Workspace-provided script paths outside this list are refused; scripts also require a trusted workspace. |
@@ -379,7 +381,7 @@ NuGet Package Manager for Visual Studio Code has first-class support for [Centra
 - **Version source tracking** — each installed package shows whether its version comes from `project`, `central`, or `override`
 - **Framework-scoped versions** — conditional `<ItemGroup Condition="...">` groups are evaluated per target framework, so the same package can show and update different versions for `net10.0` and `net11.0`
 - **Property-based versions** — a version written as `$(FooBarVersion)` is resolved through MSBuild's object model instead of being read as literal text; updates keep the variable and edit the property where it is defined (see [Property-based versions](#property-based-versions))
-- **Aligned updates** — for runtime-aligned packages (`Microsoft.Extensions.*`, `Microsoft.AspNetCore.*`, `Microsoft.EntityFrameworkCore.*`, `Microsoft.Maui.*`, `System.*`), the primary update stays on the framework's major line; the overall latest version is offered as a separate action
+- **Aligned updates** — for runtime-aligned packages (`Microsoft.Extensions.*`, `Microsoft.AspNetCore.*`, `Microsoft.EntityFrameworkCore.*`, `Microsoft.Maui.*`, `System.*`), the primary update stays on the row's target-framework major line. When the projects in scope target more than one .NET major, aligned rows are offered only versions on their own major line — previews of the next major included — in both Updates and the Installed up arrow. A single-major scope (for example every project `net8.0`) keeps the historical fallback to the overall latest, and non-aligned packages are never restricted. Enable `nugetpackagemanager.allowMajorVersionOverride` (or the **Settings** checkbox *Allow framework-aligned packages to cross their target framework's major version*) to restore the explicit cross-major action.
 - **Consolidate** — understands CPM boundaries and applies consolidation correctly, scoped to the same framework group
 - **Restore handling** — uses the correct `dotnet` invocation for CPM workspaces
 - **Source mapping** — `<packageSourceMapping>` in `nuget.config` is honoured when looking up package versions
@@ -407,7 +409,11 @@ The extension evaluates each condition against the project's real target framewo
 3. writes only inside the `ItemGroup` that produced the row;
 4. batches all changes for a shared props file into a single read/write cycle.
 
-Use the framework dropdown to focus on one base `.NET` line, **Shared** for unconditional versions, or **All frameworks**; platform TFMs (windows/android/ios) are grouped under their base `.NET` line. Selecting a `.NET` line excludes shared packages, so shared versions are updated in a separate run. **Update all TFMs** remains an explicit cross-framework action. Values that do not follow the TFM major — for example a stable `10.x` package in a `net11.0` line — require the explicit *latest overall* action, which is shown with a warning.
+Use the framework dropdown to focus on one base `.NET` line, **Shared** for unconditional versions, or **All frameworks**; platform TFMs (windows/android/ios) are grouped under their base `.NET` line. Selecting a `.NET` line excludes shared packages, so shared versions are updated in a separate run. **Update all TFMs** remains an explicit cross-framework action.
+
+**Keeping aligned packages in their lane.** The projects *in scope* (the current selection, or the whole workspace when nothing is selected) decide whether lanes are enforced. When they target more than one .NET major, a framework-aligned row is offered only versions on its TFM's major line — a `net10.0` row is never offered `11.x`, not even a preview — in **Updates** and on the **Installed** up arrow, and the *latest overall* action is hidden. A **shared** (unconditional) row is capped at the lowest major among the projects that carry it, because one version must satisfy the most constrained framework. A scope with a single .NET major (for example every project `net8.0`) keeps the historical fallback: when the lane has no newer version, the overall latest is offered. Non-aligned packages are unaffected.
+
+Enable `nugetpackagemanager.allowMajorVersionOverride` (or the **Settings** checkbox *Allow framework-aligned packages to cross their target framework's major version*) to intentionally cross a major boundary; it restores the *latest overall* action in Updates and the overall-latest target on the Installed arrow.
 
 ![Installed packages grouped per target framework](docs/images/screenshot-installed-frameworks.png)
 

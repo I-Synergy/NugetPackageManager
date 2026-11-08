@@ -49,6 +49,8 @@ export class PackageViewModel {
   AllowsUpdate: boolean = true;
   Revision: number = 0;
   CpmFramework: string = "";
+  /** Row TFM used to cap cross-major recommendations; empty when the row has none. */
+  LaneFramework: string = "";
 
   constructor(model: Package, status: PackageViewModelStatus = "Detailed") {
     this._authors = model.Authors;

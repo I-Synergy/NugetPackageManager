@@ -13,6 +13,7 @@ export const CONFIG_KEYS = [
   "statusBarLoadingIndicator",
   "enableTelemetry",
   "frameworkAlignedPackages",
+  "allowMajorVersionOverride",
   "extraTargetFrameworks",
   "excludeGlobs",
   "updateCheckConcurrency",

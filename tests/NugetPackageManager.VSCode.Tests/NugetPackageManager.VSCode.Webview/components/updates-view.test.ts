@@ -531,6 +531,20 @@ suite('UpdatesView', () => {
         assert.strictEqual(host.querySelectorAll('.outdated-row').length, 2, 'the rows still render');
     });
 
+    test('shows the framework banner only when the scope spans multiple .NET majors', () => {
+        view.packages = [makePackage('', '')];
+
+        view.multiFramework = true;
+        const multiHost = document.createElement('div');
+        render(view.render() as TemplateResult, multiHost);
+        assert.ok(multiHost.querySelector('.info-banner'), 'a multi-major scope explains the lane');
+
+        view.multiFramework = false;
+        const singleHost = document.createElement('div');
+        render(view.render() as TemplateResult, singleHost);
+        assert.strictEqual(singleHost.querySelector('.info-banner'), null, 'a single-major scope has no lane to explain');
+    });
+
     test('renders one group header per framework line when two groups are present', () => {
         view.packages = [makePackage('', ''), makePackage("$(TargetFramework.StartsWith('net10.0'))", 'net10.0')];
 

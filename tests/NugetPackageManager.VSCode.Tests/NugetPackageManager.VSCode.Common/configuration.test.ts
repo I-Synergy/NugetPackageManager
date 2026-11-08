@@ -56,7 +56,8 @@ suite('configuration', () => {
     });
 
     test('exposes the complete key list used by the manifest', () => {
-        assert.strictEqual(CONFIG_KEYS.length, 12);
+        assert.strictEqual(CONFIG_KEYS.length, 13);
+        assert.ok(CONFIG_KEYS.includes('allowMajorVersionOverride'));
         assert.ok(CONFIG_KEYS.includes('sources'));
         assert.ok(CONFIG_KEYS.includes('updateCheckConcurrency'));
     });

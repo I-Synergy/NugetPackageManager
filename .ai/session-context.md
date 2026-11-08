@@ -1,12 +1,33 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-11-04
+**Last Updated:** 2026-11-08
 **Project Version:** 2.2.0
-**Branch:** main
+**Branch:** chore/openvsx-publishing
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
 
 ---
+
+## Completed: framework lanes in multi-.NET workspaces (2026-11-08)
+
+Request: in a multi-TFM library (for example `net8.0;net10.0`), framework-aligned packages must
+stay on each TFM's major line — a net10 row must not be offered `11.x`, preview included — while
+a single-major workspace (all net8.0) may still move up. Plan
+`.ai/plans/framework-lane-major-override.md`; record `.ai/completed/framework-lane-major-override.md`.
+
+- **Host scan**: `selectAvailableVersions` no longer falls back to all feed versions when the
+  scope targets more than one .NET major and the override is off. Rows carry a `laneMajor`
+  (resolution TFM, or the lowest project TFM for shared/unconditional rows) and the scan carries
+  `multiMajor`. `LatestOverallVersion`/`BlockedBy` are suppressed in strict mode.
+- **Installed arrow**: `GetPackageRequest` gained optional `Framework`, `ScopeTargetFrameworks`
+  and `InstalledVersion`; `getPackageAsync` caps `Package.Version` to the lane so the arrow hides
+  when nothing newer exists on the lane. `packages-view` supplies the row lane (lowest-major TFM
+  for shared rows) and scope TFMs.
+- **Setting**: `nugetpackagemanager.allowMajorVersionOverride` (default `false`), exposed as a
+  checkbox in Settings; enabling restores the explicit cross-major action in both surfaces.
+- **Verification**: `npm run typecheck`, `npm run lint`, `npm test` (536 passing),
+  `npm run quality` PASS 8/8. Local test artifact:
+  `releases/nugetpackagemanager-2.2.0.vsix`.
 
 ## Completed: Open VSX releases (2026-11-04)
 

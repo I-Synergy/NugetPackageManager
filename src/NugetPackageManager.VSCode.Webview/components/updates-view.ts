@@ -398,6 +398,7 @@ export class UpdatesView extends LitElement {
   } | null = null;
   @property() selectedFramework: string = "";
   @property({ type: Boolean }) prerelease: boolean = false;
+  @property({ type: Boolean }) multiFramework: boolean = false;
   @property({ attribute: false }) projectPaths: string[] = [];
   @property() sourceUrl: string = "";
   @property() filterQuery: string = "";
@@ -1342,10 +1343,10 @@ export class UpdatesView extends LitElement {
   }
 
   private renderInfoBanner(): unknown {
-    if (this.visiblePackages.length === 0) return nothing;
+    if (!this.multiFramework || this.visiblePackages.length === 0) return nothing;
     return html`<div class="info-banner">
       <span class="codicon codicon-info"></span>
-      <span>Framework-aligned packages stay on the target framework's major line. Use the separate latest-overall action only when you intend to cross it.</span>
+      <span>Framework-aligned packages stay on the target framework's major line; crossing it in a multi-.NET-major workspace requires the "allow major version override" setting.</span>
     </div>`;
   }
 

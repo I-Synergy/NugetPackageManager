@@ -131,6 +131,7 @@ export class SearchBar extends LitElement {
         Prerelease: this.prerelease,
         Sources: config.Sources,
         StatusBarLoadingIndicator: config.StatusBarLoadingIndicator,
+        AllowMajorVersionOverride: config.AllowMajorVersionOverride,
       },
     });
   }
