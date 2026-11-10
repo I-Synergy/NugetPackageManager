@@ -279,6 +279,63 @@ public class ProtocolNuGetSourceTests
         Assert.AreEqual("packageNotFound", error.Code);
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetVersionCompatibilityAsync_EvaluatesRequestedVersionsAgainstProjectFrameworks()
+    {
+        var net10 = new PackageDependencyGroup(NuGetFramework.ParseFolder("net10.0"), []);
+        var net11 = new PackageDependencyGroup(NuGetFramework.ParseFolder("net11.0"), []);
+        using var source = CreateSource(registered:
+        [
+            Metadata("11.0.0", dependencySets: [net10]),
+            Metadata("12.0.0", dependencySets: [net11]),
+        ]);
+
+        var results = await source.GetVersionCompatibilityAsync(
+            "Contoso.Sdk",
+            ["net10.0"],
+            ["11.0.0", "12.0.0"],
+            CancellationToken.None);
+
+        Assert.AreEqual(2, results.Count);
+        var byVersion = results.ToDictionary(entry => entry.Version);
+        Assert.IsTrue(byVersion["11.0.0"].Known);
+        Assert.IsTrue(byVersion["11.0.0"].Compatible);
+        Assert.IsTrue(byVersion["12.0.0"].Known);
+        Assert.IsFalse(byVersion["12.0.0"].Compatible);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetVersionCompatibilityAsync_NoDependencySets_IsUnknown()
+    {
+        using var source = CreateSource(registered: [Metadata("12.0.0")]);
+
+        var results = await source.GetVersionCompatibilityAsync(
+            "Contoso.Sdk",
+            ["net10.0"],
+            ["12.0.0"],
+            CancellationToken.None);
+
+        var result = results.Single(entry => entry.Version == "12.0.0");
+        Assert.IsFalse(result.Known);
+        Assert.IsTrue(result.Compatible);
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetVersionCompatibilityAsync_CachesDeclaredFrameworksPerId()
+    {
+        var net10 = new PackageDependencyGroup(NuGetFramework.ParseFolder("net10.0"), []);
+        var metadata = new FakeMetadataResource(_ => [Metadata("11.0.0", dependencySets: [net10])]);
+        using var source = CreateSource(metadataResource: metadata);
+
+        await source.GetVersionCompatibilityAsync("Contoso.Sdk", ["net10.0"], ["11.0.0"], CancellationToken.None);
+        await source.GetVersionCompatibilityAsync("Contoso.Sdk", ["net10.0"], ["11.0.0"], CancellationToken.None);
+
+        Assert.AreEqual(1, metadata.Calls, "the second lookup should come from the cache");
+    }
+
     private static readonly string[] stableOnly = ["12.0.1"];
 
     private const string Manifest = """

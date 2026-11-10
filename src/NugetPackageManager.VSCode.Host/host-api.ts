@@ -2168,6 +2168,23 @@ function computeLaneMajor(project: Project, tfm: string): number | null {
   return majors.length > 0 ? Math.min(...majors) : null;
 }
 
+/**
+ * The row's target frameworks that parse to a .NET major, for the compatibility gate.
+ * Uses the resolution TFM when it is a real framework name, otherwise every parseable
+ * `TargetFramework` of the contributing project.
+ */
+function collectRowFrameworks(project: Project, tfm: string): Set<string> {
+  const result = new Set<string>();
+  if (tfm && getTfmMajorVersion(tfm) !== null) {
+    result.add(tfm);
+    return result;
+  }
+  for (const framework of project.TargetFrameworks ?? []) {
+    if (getTfmMajorVersion(framework) !== null) result.add(framework);
+  }
+  return result;
+}
+
 function mergeInstalledEntry(
   project: Project,
   pkg: ProjectPackage,
@@ -2188,6 +2205,9 @@ function mergeInstalledEntry(
     if (incomingLane !== null && (existing.laneMajor === null || incomingLane < existing.laneMajor)) {
       existing.laneMajor = incomingLane;
     }
+    for (const framework of collectRowFrameworks(project, resolution.Tfm)) {
+      existing.frameworks.add(framework);
+    }
     return;
   }
 
@@ -2196,6 +2216,7 @@ function mergeInstalledEntry(
     condition: resolution.Condition,
     framework: resolution.Tfm,
     laneMajor: computeLaneMajor(project, resolution.Tfm),
+    frameworks: collectRowFrameworks(project, resolution.Tfm),
     conditionLabel: resolution.ConditionLabel,
     matched: resolution.Matched,
     projects: [projectInfo],
@@ -2234,6 +2255,8 @@ type OutdatedCandidateParams = {
   multiMajor: boolean;
   signal: AbortSignal | undefined;
   report: (stage: string, percent: number, completed?: number, total?: number) => void;
+  /** Shared across rows so two rows of the same package/version set cost one request. */
+  compatibilityCache: Map<string, Promise<Map<string, VersionCompatibility> | null>>;
 };
 
 async function collectOutdatedCandidatesAsync(params: OutdatedCandidateParams): Promise<OutdatedCandidate[]> {
@@ -2292,19 +2315,81 @@ async function buildOutdatedCandidateAsync(
   if (params.signal?.aborted) return;
   if (!latest || compareVersions(latest.version, installed.version) <= 0) return;
 
-  const available = selectAvailableVersions(latest, installed, packageId, params.settings, params.multiMajor);
+  let available = selectAvailableVersions(latest, installed, packageId, params.settings, params.multiMajor);
   if (available.length === 0) return;
   const suppressOverall = params.multiMajor
     && !params.settings.allowMajorOverride
     && installed.laneMajor !== null
     && isFrameworkAlignedPackage(packageId, params.settings.alignedPatterns);
+  let overallVersion: string | undefined = suppressOverall ? undefined : latest.version;
+
+  const gated = await applyCompatibilityGateAsync(
+    packageId,
+    installed,
+    latest.sourceUrl,
+    available,
+    overallVersion,
+    params.compatibilityCache,
+    params.signal
+  );
+  if (gated.aborted) return;
+  available = gated.available;
+  overallVersion = gated.overallVersion;
+
+  if (available.length === 0) return;
   candidates.push({
     packageId,
     installed,
     latest,
     available,
-    ...(suppressOverall ? {} : { overallVersion: latest.version }),
+    ...(overallVersion !== undefined ? { overallVersion } : {}),
   });
+}
+
+/**
+ * The Updates-scan side of the framework gate: only cross-major candidates are checked, and only
+ * when the row's frameworks are known. A version whose declared TFM cannot serve the row is
+ * dropped; a known-incompatible overall version is suppressed. Fails open (leaves the candidate
+ * set unchanged) when there is nothing to prove or the feed has no framework data.
+ */
+async function applyCompatibilityGateAsync(
+  packageId: string,
+  installed: InstalledPackageEntry,
+  sourceUrl: string,
+  available: string[],
+  overallVersion: string | undefined,
+  cache: Map<string, Promise<Map<string, VersionCompatibility> | null>>,
+  signal: AbortSignal | undefined
+): Promise<{ available: string[]; overallVersion: string | undefined; aborted: boolean }> {
+  const installedMajor = getVersionMajor(installed.version);
+  if (installedMajor === null || installed.frameworks.size === 0) {
+    return { available, overallVersion, aborted: false };
+  }
+
+  const crossMajor = new Set<string>();
+  for (const version of available) {
+    const major = getVersionMajor(version);
+    if (major !== null && major > installedMajor) crossMajor.add(version);
+  }
+  if (overallVersion !== undefined) {
+    const major = getVersionMajor(overallVersion);
+    if (major !== null && major > installedMajor) crossMajor.add(overallVersion);
+  }
+  if (crossMajor.size === 0) {
+    return { available, overallVersion, aborted: false };
+  }
+
+  const frameworks = Array.from(installed.frameworks);
+  const versions = Array.from(crossMajor).sort(compareVersions);
+  const compatibility = await getCachedCompatibilityAsync(cache, sourceUrl, packageId, frameworks, versions, signal);
+  if (signal?.aborted) return { available, overallVersion, aborted: true };
+  if (!compatibility) return { available, overallVersion, aborted: false };
+
+  const nextAvailable = available.filter((version) => !isKnownIncompatible(compatibility, version));
+  const nextOverall = overallVersion !== undefined && isKnownIncompatible(compatibility, overallVersion)
+    ? undefined
+    : overallVersion;
+  return { available: nextAvailable, overallVersion: nextOverall, aborted: false };
 }
 
 function selectAvailableVersions(
@@ -2533,6 +2618,7 @@ async function runOutdatedScanAsync(
     multiMajor: state.multiMajor,
     signal,
     report,
+    compatibilityCache: new Map(),
   });
 
   const { outdated, blocked } = await applyOutdatedConstraintsAsync({
@@ -3070,7 +3156,10 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
         }
       }
       if (result.ok) {
-        return ok({ ...result.value, Package: applyLaneCap(result.value.Package, request) });
+        return ok({
+          ...result.value,
+          Package: await applyLaneCapAsync(result.value.Package, request, result.value.SourceUrl, signal),
+        });
       }
       return result;
     },
@@ -4728,6 +4817,82 @@ async function getLatestVersionAsync(
   return best;
 }
 
+type VersionCompatibility = { Compatible: boolean; Known: boolean };
+
+/**
+ * Asks the source whether each version can be consumed by `frameworks`.
+ *
+ * Returns `null` (fail open) when there is nothing to prove: no versions, no framework that
+ * parses to a .NET major, or any error talking to the feed. The returned map is keyed by the
+ * response's own `Version` string; versions missing from it are unknown/allowed.
+ */
+async function getVersionCompatibilityAsync(
+  sourceUrl: string,
+  packageId: string,
+  frameworks: string[],
+  versions: string[],
+  signal?: AbortSignal
+): Promise<Map<string, VersionCompatibility> | null> {
+  if (versions.length === 0) return null;
+  const parsedFrameworks = frameworks.filter((framework) => getTfmMajorVersion(framework) !== null);
+  if (parsedFrameworks.length === 0) return null;
+
+  try {
+    const api = await nugetApiFactory.GetSourceApiAsync(sourceUrl);
+    const response = await api.GetVersionCompatibilityAsync(packageId, parsedFrameworks, versions, signal);
+    const map = new Map<string, VersionCompatibility>();
+    for (const entry of response.data) {
+      map.set(entry.Version, { Compatible: entry.Compatible, Known: entry.Known });
+    }
+    return map;
+  } catch (err: unknown) {
+    Logger.warn(`getVersionCompatibility: ${packageId} from ${sourceUrl} failed; failing open`, err);
+    return null;
+  }
+}
+
+/** Per-run cache of compatibility calls, keyed by source + id + frameworks + versions. */
+function getCachedCompatibilityAsync(
+  cache: Map<string, Promise<Map<string, VersionCompatibility> | null>>,
+  sourceUrl: string,
+  packageId: string,
+  frameworks: string[],
+  versions: string[],
+  signal?: AbortSignal
+): Promise<Map<string, VersionCompatibility> | null> {
+  const key = [
+    sourceUrl,
+    packageId,
+    [...frameworks].sort((a, b) => a.localeCompare(b)).join(","),
+    [...versions].sort(compareVersions).join(","),
+  ].join("\0");
+  let pending = cache.get(key);
+  if (!pending) {
+    pending = getVersionCompatibilityAsync(sourceUrl, packageId, frameworks, versions, signal);
+    cache.set(key, pending);
+  }
+  return pending;
+}
+
+/**
+ * A version is known-incompatible only when the feed proved a verdict: the entry exists,
+ * `Known` is true and `Compatible` is false. Everything else (missing, unknown, compatible)
+ * is allowed.
+ */
+function isKnownIncompatible(map: Map<string, VersionCompatibility> | null, version: string): boolean {
+  if (!map) return false;
+  let verdict = map.get(version);
+  if (!verdict) {
+    for (const [key, value] of map) {
+      if (compareVersions(key, version) === 0) {
+        verdict = value;
+        break;
+      }
+    }
+  }
+  return verdict !== undefined && verdict.Known && !verdict.Compatible;
+}
+
 /** Major version of a NuGet version string (empty for non-numeric versions). */
 function getVersionMajor(version: string): number | null {
   const release = version.split("+")[0]!.split("-")[0]!;
@@ -4772,6 +4937,50 @@ function applyLaneCap(packageObj: Package, request: GetPackageRequest): Package 
   return { ...packageObj, Version: recommended };
 }
 
+/**
+ * The Installed-tab up arrow: run the lane cap first, then lower a recommended cross-major
+ * version to one the row's framework can actually consume. Same-major versions are presumed
+ * installable and never checked; unknown framework data leaves the recommendation unchanged.
+ * `Versions` is left intact for the version picker, and the version is never raised.
+ */
+async function applyLaneCapAsync(
+  packageObj: Package,
+  request: GetPackageRequest,
+  sourceUrl: string,
+  signal?: AbortSignal
+): Promise<Package> {
+  const capped = applyLaneCap(packageObj, request);
+  const { Framework, InstalledVersion } = request;
+  if (!InstalledVersion || !Framework) return capped;
+  if (getTfmMajorVersion(Framework) === null) return capped;
+  if (compareVersions(capped.Version, InstalledVersion) <= 0) return capped;
+
+  const installedMajor = getVersionMajor(InstalledVersion);
+  if (installedMajor === null) return capped;
+
+  const allVersions = [...new Set([...capped.Versions.map((entry) => entry.Version), capped.Version])];
+  const candidates = allVersions.filter((version) => {
+    const major = getVersionMajor(version);
+    return compareVersions(version, InstalledVersion) > 0 && major !== null && major > installedMajor;
+  });
+  if (candidates.length === 0) return capped;
+
+  const compatibility = await getVersionCompatibilityAsync(sourceUrl, capped.Id, [Framework], candidates, signal);
+  if (!compatibility || !isKnownIncompatible(compatibility, capped.Version)) return capped;
+
+  // Lower to the highest newer version that is not known-incompatible, never above what the
+  // lane cap allowed. Same-major versions were not checked and are presumed installable, so
+  // they remain eligible.
+  const newerThanInstalled = allVersions
+    .filter((version) =>
+      compareVersions(version, InstalledVersion) > 0
+      && compareVersions(version, capped.Version) <= 0)
+    .sort(compareVersions);
+  const compatible = newerThanInstalled.filter((version) => !isKnownIncompatible(compatibility, version));
+  const fallback = compatible.length > 0 ? compatible[compatible.length - 1]! : InstalledVersion;
+  return { ...capped, Version: fallback };
+}
+
 // ============================================================
 // Update-suggestion constraints
 // ============================================================
@@ -4781,6 +4990,8 @@ type InstalledPackageEntry = {
   condition: string;
   framework: string;
   laneMajor: number | null;
+  /** Row target frameworks whose names parse to a .NET major; drives the compatibility gate. */
+  frameworks: Set<string>;
   conditionLabel: string;
   matched: boolean;
   projects: Array<{ Name: string; Path: string; Version: string }>;

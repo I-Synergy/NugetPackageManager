@@ -1022,6 +1022,11 @@ suite('HostAPI Tests', () => {
                 GetPackagesAsync: sandbox.stub().resolves({
                     data: [{ Name: 'Newtonsoft.Json', Id: 'Newtonsoft.Json', Version: latestVersion }],
                 }),
+                GetVersionCompatibilityAsync: sandbox.stub().callsFake(
+                    async (_id: string, _frameworks: string[], versions: string[]) => ({
+                        data: versions.map((version) => ({ Version: version, Compatible: true, Known: false })),
+                    })
+                ),
             };
             sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
                 mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
@@ -1353,6 +1358,112 @@ suite('HostAPI Tests', () => {
             assert.strictEqual(cached.value.FromCache, true);
             assert.strictEqual(cached.value.Packages.length, 0);
         });
+
+        // ---- Framework-compatibility gate over the Updates scan ----
+
+        type CompatVerdict = { Compatible: boolean; Known: boolean };
+
+        /** MediaElement-shaped feed: one package, given versions, explicit compatibility verdicts. */
+        function stubCompatibilityFeed(
+            packageId: string,
+            versions: string[],
+            verdicts: Record<string, CompatVerdict>
+        ): void {
+            const highest = [...versions].sort().slice(-1)[0]!;
+            const mockApi = {
+                GetPackagesAsync: sandbox.stub().resolves({
+                    data: [{
+                        Name: packageId,
+                        Id: packageId,
+                        Version: highest,
+                        Versions: versions.map((version) => ({ Version: version, Id: '' })),
+                    }],
+                }),
+                GetVersionCompatibilityAsync: sandbox.stub().callsFake(
+                    async (_id: string, _frameworks: string[], requested: string[]) => ({
+                        data: requested.map((version) => ({
+                            Version: version,
+                            Compatible: verdicts[version]?.Compatible ?? true,
+                            Known: verdicts[version]?.Known ?? false,
+                        })),
+                    })
+                ),
+            };
+            sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
+                mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
+            );
+        }
+
+        function stubMediaProject(version: string): void {
+            sandbox.stub(vscode.workspace, 'findFiles').resolves([makeProjectUri('/ws/app.csproj')]);
+            stubProjectParsing(() => ({
+                Name: 'app',
+                Path: '/ws/app.csproj',
+                CpmEnabled: false,
+                TargetFrameworks: ['net10.0'],
+                Packages: [{
+                    Id: 'CommunityToolkit.Maui.MediaElement',
+                    Version: version,
+                    IsPinned: false,
+                }],
+            } as unknown as Project));
+        }
+
+        test('does not offer a cross-major version whose frameworks cannot serve the row (reported bug)', async () => {
+            stubMediaProject('11.0.0');
+            stubCompatibilityFeed(
+                'CommunityToolkit.Maui.MediaElement',
+                ['11.0.0', '12.0.0'],
+                { '12.0.0': { Compatible: false, Known: true } }
+            );
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(result.ok);
+
+            const row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'CommunityToolkit.Maui.MediaElement'
+            );
+            assert.strictEqual(row, undefined, 'a net10.0 row must not be offered a net11.0-only 12.0.0');
+        });
+
+        test('offers a cross-major version that is compatible with the row framework', async () => {
+            stubMediaProject('11.0.0');
+            stubCompatibilityFeed(
+                'CommunityToolkit.Maui.MediaElement',
+                ['11.0.0', '12.0.0'],
+                { '12.0.0': { Compatible: true, Known: true } }
+            );
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(result.ok);
+
+            const row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'CommunityToolkit.Maui.MediaElement'
+            );
+            assert.ok(row, 'a compatible cross-major version is still offered');
+            assert.strictEqual(row!.LatestVersion, '12.0.0');
+        });
+
+        test('fails open when the feed publishes no framework data (Known:false)', async () => {
+            stubMediaProject('11.0.0');
+            stubCompatibilityFeed(
+                'CommunityToolkit.Maui.MediaElement',
+                ['11.0.0', '12.0.0'],
+                { '12.0.0': { Compatible: true, Known: false } }
+            );
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: false });
+            assert.ok(result.ok);
+
+            const row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'CommunityToolkit.Maui.MediaElement'
+            );
+            assert.ok(row, 'unknown compatibility must never hide an update');
+            assert.strictEqual(row!.LatestVersion, '12.0.0');
+        });
     });
 
     // ----------------------------------------------------------------
@@ -1593,8 +1704,12 @@ suite('HostAPI Tests', () => {
             ]);
         }
 
-        /** Stubs the outdated feed to publish the given versions (any order) for one package. */
-        function stubOutdatedFeed(packageId: string, versions: string[]): void {
+        /**
+         * Stubs the outdated feed to publish the given versions (any order) for one package.
+         * Versions listed in `incompatible` report a proven-incompatible framework verdict;
+         * everything else is unknown (`Known:false`, fail open).
+         */
+        function stubOutdatedFeed(packageId: string, versions: string[], incompatible: string[] = []): void {
             const highest = [...versions].sort().slice(-1)[0]!;
             const mockApi = {
                 GetPackagesAsync: sandbox.stub().resolves({
@@ -1605,6 +1720,13 @@ suite('HostAPI Tests', () => {
                         Versions: versions.map((version) => ({ Version: version, Id: '' })),
                     }],
                 }),
+                GetVersionCompatibilityAsync: sandbox.stub().callsFake(
+                    async (_id: string, _frameworks: string[], requested: string[]) => ({
+                        data: requested.map((version) => (incompatible.includes(version)
+                            ? { Version: version, Compatible: false, Known: true }
+                            : { Version: version, Compatible: true, Known: false })),
+                    })
+                ),
             };
             sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
                 mockApi as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
@@ -1872,19 +1994,48 @@ suite('HostAPI Tests', () => {
             assert.ok(row);
             assert.strictEqual(row.LatestVersion, '10.0.0', 'single-major scope may still cross majors');
         });
+
+        test('suppresses the overall latest when the override is on but the overall version is uninstallable', async () => {
+            stubNet10Net11Logging();
+            stubSingleSource();
+            stubOutdatedFeed('Microsoft.Extensions.Logging', ['10.0.14', '11.0.0-rc.3'], ['11.0.0-rc.3']);
+            stubConfig({ allowMajorVersionOverride: true });
+
+            const api = createHostAPI();
+            const result = await api.getOutdatedPackagesAsync({ ForceReload: false, Prerelease: true });
+            assert.ok(result.ok);
+
+            const net10Row = result.value.Packages.find(
+                (pkg) => pkg.Id === 'Microsoft.Extensions.Logging' && pkg.CpmFramework === 'net10.0'
+            )!;
+            assert.ok(net10Row, 'the lane version keeps the row visible');
+            assert.strictEqual(net10Row.LatestVersion, '10.0.14');
+            assert.strictEqual(
+                net10Row.LatestOverallVersion,
+                undefined,
+                'an uninstallable overall version is never offered, even with the override on'
+            );
+        });
     });
 
     // ----------------------------------------------------------------
     // getPackage lane cap
     // ----------------------------------------------------------------
     suite('getPackage lane cap', () => {
-        function stubSinglePackageFeed(packageObj: Package): void {
+        function stubSinglePackageFeed(packageObj: Package, incompatible: string[] = []): void {
             sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: '/ws' } }]);
             sandbox.stub(NuGetConfigResolver, 'GetSourcesAndDecodePasswordsAsync').resolves([
                 { Name: 'nuget.org', Url: 'https://api.nuget.org/v3/index.json' },
             ]);
             const api = {
                 GetPackageAsync: sandbox.stub().resolves({ data: packageObj, isError: false, errorMessage: undefined }),
+                GetVersionCompatibilityAsync: sandbox.stub().callsFake(
+                    async (_id: string, _frameworks: string[], versions: string[]) => ({
+                        data: versions.map((version) => (incompatible.includes(version)
+                            ? { Version: version, Compatible: false, Known: true }
+                            : { Version: version, Compatible: true, Known: false })),
+                    })
+                ),
             };
             sandbox.stub(nugetApiFactory, 'GetSourceApiAsync').resolves(
                 api as unknown as Awaited<ReturnType<typeof nugetApiFactory.GetSourceApiAsync>>
@@ -1967,6 +2118,41 @@ suite('HostAPI Tests', () => {
 
             assert.ok(result.ok, result.ok ? '' : result.error);
             assert.strictEqual(result.value.Package.Version, '11.0.0-rc.3');
+        });
+
+        test('drops an uninstallable cross-major arrow to the highest compatible newer version', async () => {
+            stubSinglePackageFeed(loggingPackage(['11.0.0', '11.0.5', '12.0.0']), ['12.0.0']);
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Microsoft.Extensions.Logging',
+                Prerelease: false,
+                Framework: 'net10.0',
+                InstalledVersion: '11.0.0',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.Version, '11.0.5', '12.0.0 is uninstallable; 11.0.5 is the safe bump');
+            assert.deepStrictEqual(
+                result.value.Package.Versions.map((entry) => entry.Version),
+                ['11.0.0', '11.0.5', '12.0.0'],
+                'the version picker still lists every version'
+            );
+        });
+
+        test('hides the arrow (falls back to the installed version) when nothing newer is compatible', async () => {
+            stubSinglePackageFeed(loggingPackage(['11.0.0', '12.0.0']), ['12.0.0']);
+
+            const result = await createHostAPI().getPackageAsync({
+                Url: '',
+                Id: 'Microsoft.Extensions.Logging',
+                Prerelease: false,
+                Framework: 'net10.0',
+                InstalledVersion: '11.0.0',
+            });
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Package.Version, '11.0.0', 'no installable newer version, arrow hidden');
         });
     });
 
