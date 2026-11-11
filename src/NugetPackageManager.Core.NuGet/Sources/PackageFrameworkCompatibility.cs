@@ -27,7 +27,6 @@ public static class PackageFrameworkCompatibility
         ArgumentNullException.ThrowIfNull(projectFrameworks);
 
         var parsed = new List<NuGetFramework>();
-        var sawNonEmpty = false;
 
         foreach (var name in projectFrameworks)
         {
@@ -35,8 +34,6 @@ public static class PackageFrameworkCompatibility
             {
                 continue;
             }
-
-            sawNonEmpty = true;
 
             NuGetFramework framework;
             try
@@ -56,7 +53,7 @@ public static class PackageFrameworkCompatibility
             parsed.Add(framework);
         }
 
-        if (!sawNonEmpty || parsed.Count == 0)
+        if (parsed.Count == 0)
         {
             return null;
         }
