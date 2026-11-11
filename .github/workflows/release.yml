@@ -60,13 +60,12 @@ jobs:
           node-version: lts/*
 
       # The quality gate below includes the C# build and tests, and packaging publishes the
-      # core into dist/core. 10.0.x carries the SDK (`.slnx` needs 9.0.200+) and the runtime
-      # the net10.0 test projects execute on.
+      # core into dist/core. The SDK version comes from `global.json` (the sidecar targets
+      # net10.0).
       - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            10.0.x
+          global-json-file: global.json
 
       - name: Resolve build number
         id: build
