@@ -14,6 +14,8 @@ namespace NugetPackageManager.Core;
 /// </summary>
 public sealed class NuGetCoreHandlers
 {
+    private const string IdRequiredMessage = "'id' is required.";
+
     private readonly IVulnerabilityReader vulnerabilityReader;
     private readonly INuGetSourceProvider sources;
 
@@ -58,7 +60,7 @@ public sealed class NuGetCoreHandlers
         var id = ReadString(parameters, "id");
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+            throw new RpcException(Constants.InvalidParams, IdRequiredMessage);
         }
 
         var prerelease = ReadBoolean(parameters, "prerelease");
@@ -76,7 +78,7 @@ public sealed class NuGetCoreHandlers
         var id = ReadString(parameters, "id");
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+            throw new RpcException(Constants.InvalidParams, IdRequiredMessage);
         }
 
         var version = ReadString(parameters, "version");
@@ -98,7 +100,7 @@ public sealed class NuGetCoreHandlers
         var id = ReadString(parameters, "id");
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+            throw new RpcException(Constants.InvalidParams, IdRequiredMessage);
         }
 
         var version = ReadString(parameters, "version");
@@ -120,7 +122,7 @@ public sealed class NuGetCoreHandlers
         var id = ReadString(parameters, "id");
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+            throw new RpcException(Constants.InvalidParams, IdRequiredMessage);
         }
 
         var projectFrameworks = ReadStringArray(parameters, "projectFrameworks") ?? [];
