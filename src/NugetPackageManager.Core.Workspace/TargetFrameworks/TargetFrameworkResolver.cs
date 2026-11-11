@@ -38,7 +38,7 @@ public sealed partial class TargetFrameworkResolver(MsBuildProcessGate? gate = n
 
     private readonly MsBuildProcessGate processGate = gate ?? MsBuildProcessGate.Shared;
     private readonly Dictionary<string, CacheEntry> cache = [];
-    private readonly object cacheLock = new();
+    private readonly System.Threading.Lock cacheLock = new();
 
     private sealed record CacheEntry(string Key, TargetFrameworkInfo Info);
 

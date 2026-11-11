@@ -198,5 +198,5 @@ public class DependencyHandlersTests
             },
         };
 
-    private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
+    private static JsonElement Parse(string json) => JsonElement.Parse(json);
 }

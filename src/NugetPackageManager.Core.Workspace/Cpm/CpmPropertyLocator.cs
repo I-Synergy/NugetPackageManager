@@ -41,7 +41,7 @@ public sealed class CpmPropertyLocator(MsBuildProcessGate? gate = null) : ICpmPr
 
     private readonly MsBuildProcessGate processGate = gate ?? MsBuildProcessGate.Shared;
     private readonly Dictionary<string, CacheEntry> cache = [];
-    private readonly object cacheLock = new();
+    private readonly System.Threading.Lock cacheLock = new();
 
     private sealed record CacheEntry(string FileStamp, PropertyDefinition? Definition);
 
