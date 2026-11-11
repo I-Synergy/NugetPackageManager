@@ -59,7 +59,7 @@ VSCode Extension Host (Node.js)          VSCode Webview (Browser)
         │
         │ sidecar JSON-RPC over stdio (nuget/core-process.ts, nuget/core-client.ts)
         ▼
-.NET core (dist/core, net8.0)
+.NET core (dist/core, net10.0)
   src/NugetPackageManager.Core            protocol + handlers
   src/NugetPackageManager.Core.NuGet      source client, config, advisories
   src/NugetPackageManager.Core.Workspace  csproj model, CPM, TFMs, dependency graph
@@ -171,7 +171,7 @@ These apply to this project specifically:
 
 ## Technology Stack
 
-- **.NET sidecar**: .NET 8 (`net8.0`, `RollForward=LatestMajor`), published to `dist/core`; MSTest
+- **.NET sidecar**: .NET 10 (`net10.0`, `RollForward=LatestMajor`), published to `dist/core`; MSTest
 - **UI Framework**: Lit 3.x (LitElement)
 - **HTTP**: axios (NuGet API, proxy/auth support)
 - **XML Parsing**: @xmldom/xmldom + xpath (.csproj/.sln files)

@@ -74,7 +74,7 @@
 
 - Visual Studio Code **1.110** or later
 - A workspace containing `.csproj`, `.fsproj`, `.vbproj`, `.sln`, or `.slnx` files
-- **.NET SDK** installed and on `PATH` (for install / update / restore operations, and to run the extension's .NET sidecar)
+- **.NET SDK 10 or newer** installed and on `PATH` (for install / update / restore operations, and to run the extension's .NET sidecar; it targets `net10.0` and rolls forward to the .NET 11 runtime)
 
 ---
 
@@ -220,7 +220,7 @@ The Cleanup tab badge counts both kinds of cleanup: unused `PackageVersion` entr
 
 - Compares global CPM versions against every `PackageReference` in the workspace
 - Groups unused entries by props file
-- Shows **used but not defined** references so missing CPM entries are visible
+- Shows **used but not defined** references and offers **Add definitions** (per row or all at once) when the version is already known — from `project.assets.json` or the reference itself. It writes the `<PackageVersion>` into the governing props file, removes a literal inline `Version` from the project, backs up every file, and restores the affected projects; rows without a concrete version (or with a conditional/property/pinned reference) stay visible with the reason instead of guessing. Packages used only by projects that do not use CPM stay listed as **Used without CPM — no definition needed**, so the used-vs-defined difference is always explainable, but no Add action is offered for them.
 - Creates a timestamped backup of each props file before removing anything
 - Removes all conditional groups for a package when the package is unused
 
@@ -546,7 +546,7 @@ Please use the [GitHub Issues](https://github.com/I-Synergy/NugetPackageManager/
 
 ### Development Setup
 
-**Prerequisites:** Node.js 19+, npm, and .NET SDK 8+ (the `NugetPackageManager.Core*` projects target `net8.0`)
+**Prerequisites:** Node.js 19+, npm, and .NET SDK 10+ (the `NugetPackageManager.Core*` projects target `net10.0`)
 
 ```bash
 # 1. Clone the repository
@@ -588,7 +588,7 @@ dotnet build NugetPackageManager.slnx -c Release   # C# core
 ```
 
 - **TypeScript strict mode** — `any` is a warning, avoid it
-- **C#** — `net8.0`, nullable enabled, warnings are errors, analyzers on (`Directory.Build.props`)
+- **C#** — `net10.0`, nullable enabled, warnings are errors, analyzers on (`Directory.Build.props`)
 - Unused variables: prefix with `_` to suppress the warning
 - CSS in Lit components uses the `css` tagged template literal and VS Code CSS variables (`--vscode-*`)
 - All written content in English: code comments, commit messages, JSDoc, documentation
@@ -699,7 +699,7 @@ The extension has two isolated contexts that communicate via a typed RPC layer o
                     │ sidecar JSON-RPC over stdio
                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│  .NET core  (dist/core, net8.0) — src/NugetPackageManager.Core*                             │
+│  .NET core  (dist/core, net10.0) — src/NugetPackageManager.Core*                            │
 │  Core: protocol + handlers      Core.NuGet: source client, config, advisories               │
 │  Core.Workspace: csproj model, CPM resolution, target frameworks, dependency graph          │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -796,7 +796,7 @@ of the props file — the cost is the .NET process plus per-request garbage, not
 
 ### Packaging
 
-The sidecar ships as a **framework-dependent .NET 8 build** (~4.4 MB, 21 files) and is launched with
+The sidecar ships as a **framework-dependent .NET 10 build** (~4.9 MB, 23 files) and is launched with
 the `dotnet` already on `PATH`, so one VSIX serves every OS and architecture. `PublishReadyToRun`
 was measured at 2.5× the size with **no** startup gain (67 ms either way), and a trimmed,
 self-contained build does not start at all because the protocol relies on reflection-based
