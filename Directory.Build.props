@@ -27,8 +27,8 @@
 
     <!--
       The sidecar is published framework-dependent so one build serves every OS and
-      architecture. RollForward=LatestMajor lets a net8.0 build run on the .NET
-      9/10/11 runtime the user already has, so the installed (patched) runtime is the
+      architecture. RollForward=LatestMajor lets a net10.0 build run on the .NET
+      11 runtime the user already has, so the installed (patched) runtime is the
       one that executes.
     -->
     <RollForward>LatestMajor</RollForward>

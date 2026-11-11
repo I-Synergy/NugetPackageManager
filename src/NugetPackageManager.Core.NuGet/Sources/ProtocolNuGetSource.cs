@@ -39,7 +39,7 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (Dictionary<string, IReadOnlyList<NuGetFramework>> Declared, DateTimeOffset StoredAt)> compatibilityCache =
         new(StringComparer.Ordinal);
-    private readonly object cacheLock = new();
+    private readonly System.Threading.Lock cacheLock = new();
     private SourceCacheContext cache = new();
 
     public ProtocolNuGetSource(SourceDescriptor source)

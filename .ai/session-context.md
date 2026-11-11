@@ -1,10 +1,113 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-11-10
+**Last Updated:** 2026-11-11
 **Project Version:** 2.2.0
-**Branch:** chore/openvsx-publishing
+**Branch:** main
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
+
+---
+
+## Completed: CPM benchmark re-run on .NET 10 (2026-11-11)
+
+Request: re-run the TypeScript-vs-.NET CPM benchmark now that the sidecar targets net10.0.
+Record with full tables: `.ai/completed/memory-cpm-ts-vs-cs-net10.md` (prior .NET 8 record:
+`memory-cpm-ts-vs-cs.md`).
+
+- **Runtime nuance**: `RollForward=LatestMajor` makes the net10.0 sidecar use the newest installed
+  major — on this machine **11.0.0**, not 10.x. Both were measured (pinned with
+  `DOTNET_ROLL_FORWARD=Minor`).
+- **Parity**: 13/13 (12 real fixtures + synthetic) identical on both runtimes.
+- **Time (10.0.15)**: synthetic parse TS 25.0 ms, C# core 4.1 ms, sidecar steady 2.4 ms; fixture
+  0.156 / 0.043 / 0.22 ms. Resolve 26.6 vs 19.0 ms. Numbers are within noise of .NET 8.
+- **Memory**: C# resolve still allocates 45.5 MiB/call synthetic (known follow-up). Sidecar RSS
+  28.3 idle, 50.6 after 50 synthetic reads, 60.3 peak / 50.3 settled over 200, 45.2 for a
+  2-package fixture. Plateau, not leak; unchanged from .NET 8.
+- **Verdict**: "faster but heavier" is unchanged by the TFM move. Cold sidecar start 125 ms pinned
+  to 10.0.15 / 80 ms on 11.0.0.
+- **Open**: decide whether `RollForward=LatestMajor` is intended (silently runs on 11).
+
+---
+
+## Completed: Add missing central package definitions (2026-11-11)
+
+Request: Cleanup's **Used but not defined** section only listed ids; add a button that remedies it.
+User decisions: only add when a concrete version is known (assets or the reference), otherwise show
+why. Plan `.ai/plans/add-missing-cpm-definitions.md`; record
+`.ai/completed/add-missing-cpm-definitions.md`. Follow-up
+`.ai/completed/missing-non-cpm-visibility.md` restored visibility for packages used only by
+non-CPM projects (informational row, no Add).
+
+- **Report**: `CleanupReport.Missing` is now `MissingDefinition[]` (`Id`, `Version`, `Projects`,
+  `PropsFiles`, `Actionable`, `Reason`). Every used package with no central definition is listed;
+  one used only by non-CPM projects is `nonCpmOnly`, not actionable. `Unused` still considers every
+  project. Version comes from the package model, else the project's `obj/project.assets.json`.
+  Reasons: `noVersion` (any project unresolved), `multipleVersions`, `pinnedVersion`, `noPropsFile`,
+  `conditionalReference`, `propertyVersion`, `unreadableProject`, `nonCpmOnly`.
+- **Writers** (`utilities/cpm-definitions.ts`, pure): `AddUnconditionalPackageVersions` (first
+  unconditional `ItemGroup`; creates one after `<Project>`; idempotent; CRLF/indent preserved) and
+  `InspectPackageReference` / `RemoveInlinePackageVersion` (literal `Version` only; refuses
+  Condition/`$(`). `VersionOverride` is left alone.
+- **Job** `addMissingDefinitions` + `startAddMissingDefinitionsAsync`: re-validates the report,
+  snapshots every props/csproj target, writes `.backup.<stamp>` copies, adds entries, strips inline
+  versions, restores affected projects, rolls back on failure, invalidates all caches.
+- **UI**: each row shows the using project's file name (`+N` when several, full paths in the
+  tooltip), per-row **Add** and header **Add definitions (N)** with confirmation, cancel, status
+  and reason text; disabled when nothing is actionable.
+- **Verification**: 572 TS tests passing (13 writer + 10 host + 4 component added), `npm run quality`
+  PASS 8/8. No C# changes.
+- **Not covered**: conditional CPM groups (rows are refused), feed-latest lookup for unknown
+  versions, consolidating multiple versions.
+
+---
+
+## Completed: NU1301 shown as a version conflict (2026-11-11)
+
+Request: package updates failed with `NU1301 — The local source 'C:\Program Files (x86)\Microsoft
+SDKs\NuGetPackages\' doesn't exist`, but the failure card suggested pinning a contested package.
+Plan `.ai/plans/nu1301-classification.md`; record `.ai/completed/nu1301-classification.md`.
+
+- **Root cause (machine)**: the user-level `%APPDATA%\NuGet\NuGet.Config` lists `Microsoft Visual
+  Studio Offline Packages` → that missing folder. `dotnet restore` fails with NU1301. The source is
+  now **disabled** at user level (`dotnet nuget disable source ...`; reversible with `enable`), and a
+  plain restore of the solution succeeds.
+- **Root cause (code)**: `RestoreOutput.Parse` turns every `error NUxxxx:` line into a
+  `RestoreConflict`, and `DotnetFailureClassifier` tested `ClassifyRestoreFailure` before
+  `ClassifyEnvironmentFailure`, so NU1301 produced the NU1107 "pin the contested package" hint.
+- **Fix**: environment failures are classified before conflicts; NU1301 with a missing local folder
+  names the path and explains how to disable the source (`dotnet nuget list source` →
+  `dotnet nuget disable source <name>`); URL failures keep the network/proxy/credentials hint.
+  `RestoreOutput.Parse` and restore behaviour are unchanged.
+- **Verification**: `Core.Tests` 112 passed (two new classifier regressions), `npm run quality`
+  PASS 8/8.
+
+---
+
+## Completed: sidecar on .NET 10 LTS (2026-11-11)
+
+Request: keep the universal framework-dependent packaging but move the C# sidecar off .NET 8.
+Decision (user): target `net10.0` (LTS), framework-dependent, not self-contained. Plan
+`.ai/plans/sidecar-net10.md`; record `.ai/completed/sidecar-net10.md`.
+
+- **Target**: the four sidecar projects and the four test/utility projects are `net10.0`.
+  `RollForward=LatestMajor` keeps one build runnable on .NET 10 and 11.
+- **NuGet 8.0.0**: `NuGet.Frameworks` / `NuGet.Protocol` / `NuGet.Versioning` moved to 8.0.0
+  (their assets target `net10.0` + `net472`, which is why net8 could not consume them).
+  `System.Security.Cryptography.Pkcs` is pinned to 8.0.2 because 8.0.1 (pulled by
+  NuGet.Protocol 8.0.0) trips the NuGet audit with warnings-as-errors.
+- **net10 analyzer fallout**: `System.Threading.Lock` replaces `object` cache locks in five
+  classes + one test helper; `JsonElement.Parse` in two test helpers;
+  `IPackageSearchMetadata.Title` is now non-nullable in the test fake.
+- **CI**: both workflows install only `10.0.x`; the net8 runtime entry and comments are gone.
+  The user's untracked local `global.json` pins SDK 11.0.100 — leave it untracked.
+- **Requirement**: users need .NET SDK 10+ (`dotnet` on PATH); .NET 8/9-only machines can no
+  longer start the sidecar. Documented in README/AGENTS/CLAUDE and the CHANGELOG.
+- **Verification**: `npm run quality` PASS 8/8; published `dist/core` is framework-dependent
+  net10.0 (4.9 MB, 23 files) and answers `ping`.
+- **Open follow-ups**: (1) Installed-tab arrow can still advertise a cross-major version that
+  Updates hides when the row has no single installed version (`Multiple`); (2) `getLatestVersionAsync`
+  silently swallows search failures, so a transient feed error reports "up to date";
+  (3) `README` line about the self-contained measurement stays valid (79.6 MB for one RID).
 
 ---
 

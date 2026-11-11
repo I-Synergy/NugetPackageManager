@@ -1,4 +1,5 @@
 import type {
+  AddMissingDefinitionsResponse,
   BatchUpdateResponse,
   CleanupUnusedResponse,
   GetJobResponse,
@@ -26,6 +27,7 @@ export class OperationJobs {
   public static readonly Project = new JobRegistry<UpdateProjectResponse>("projectUpdate");
   public static readonly Consolidate = new JobRegistry<void>("consolidate");
   public static readonly Cleanup = new JobRegistry<CleanupUnusedResponse>("cleanup");
+  public static readonly AddMissingDefinitions = new JobRegistry<AddMissingDefinitionsResponse>("addMissingDefinitions");
   public static readonly Workspace = new JobRegistry<GetProjectsResponse>("workspaceScan");
   public static readonly OutdatedScan = new JobRegistry<GetOutdatedPackagesResponse>("outdatedScan");
 
@@ -43,6 +45,9 @@ export class OperationJobs {
     const cleanup = OperationJobs.Cleanup.Get(jobId);
     if (cleanup) return { Kind: "cleanup", ...cleanup };
 
+    const addMissing = OperationJobs.AddMissingDefinitions.Get(jobId);
+    if (addMissing) return { Kind: "addMissingDefinitions", ...addMissing };
+
     const workspace = OperationJobs.Workspace.Get(jobId);
     if (workspace) return { Kind: "workspaceScan", ...workspace };
 
@@ -57,6 +62,7 @@ export class OperationJobs {
       || OperationJobs.Project.Cancel(jobId)
       || OperationJobs.Consolidate.Cancel(jobId)
       || OperationJobs.Cleanup.Cancel(jobId)
+      || OperationJobs.AddMissingDefinitions.Cancel(jobId)
       || OperationJobs.Workspace.Cancel(jobId)
       || OperationJobs.OutdatedScan.Cancel(jobId);
   }
@@ -67,6 +73,7 @@ export class OperationJobs {
     OperationJobs.Project.Reset();
     OperationJobs.Consolidate.Reset();
     OperationJobs.Cleanup.Reset();
+    OperationJobs.AddMissingDefinitions.Reset();
     OperationJobs.Workspace.Reset();
     OperationJobs.OutdatedScan.Reset();
   }

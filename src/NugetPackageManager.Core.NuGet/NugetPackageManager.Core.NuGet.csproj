@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>NugetPackageManager.Core.NuGet</RootNamespace>
   </PropertyGroup>
 
@@ -12,6 +12,9 @@
   <!-- Versions come from Directory.Packages.props. -->
   <ItemGroup>
     <PackageReference Include="NuGet.Protocol" />
+    <!-- Security pin (see Directory.Packages.props): lift the transitive Pkcs 8.0.1 that
+         NuGet.Protocol 8.0.0 brings in to the patched 8.0.2. -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
   </ItemGroup>
 
 </Project>

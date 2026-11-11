@@ -30,7 +30,7 @@ The NuGet domain is implemented in C# and shipped as a sidecar process:
 | `src/NugetPackageManager.Core.NuGet` | NuGet source client — search, registration, dependency groups, advisories; `nuget.config` discovery, parsing and merging |
 | `src/NugetPackageManager.Core.Workspace` | Project model — csproj reading, CPM resolution per framework, target-framework evaluation, CPM writer, dependency graph |
 
-- Published by `npm run build:core` to `dist/core` (`NugetPackageManager.Core.dll`), framework-dependent `net8.0` with `RollForward=LatestMajor`.
+- Published by `npm run build:core` to `dist/core` (`NugetPackageManager.Core.dll`), framework-dependent `net10.0` with `RollForward=LatestMajor`.
 - Started once per extension host by `src/NugetPackageManager.VSCode.Host/nuget/core-process.ts`; calls go through `CoreClient` (`core-client.ts`) as JSON-RPC over stdio.
 - A missing runtime or binary surfaces as a `CoreError` with code `unavailable`; callers report it instead of crashing.
 - The TypeScript half keeps only host plumbing: VS Code activation, RPC jobs, status bar, local `.nupkg` feed, SDK install/workload commands, and thin core adapters (`cpm-reader.ts`, `cpm-writer.ts`, `dotnet-failure.ts`, `global-json.ts`).

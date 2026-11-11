@@ -1236,7 +1236,7 @@ public class WorkspaceModelServiceTests
     private sealed class CollectingProgress : IProgress<ProjectParseProgress>
     {
         private readonly List<ProjectParseProgress> reports = [];
-        private readonly object gate = new();
+        private readonly System.Threading.Lock gate = new();
 
         public IReadOnlyList<ProjectParseProgress> Reports
         {

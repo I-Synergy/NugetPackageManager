@@ -46,7 +46,7 @@ internal sealed class FakePackageMetadata : IPackageSearchMetadata
         init => versions = value;
     }
 
-    public string? Title => Identity.Id;
+    public string Title => Identity.Id;
 
     public string? Summary => null;
 

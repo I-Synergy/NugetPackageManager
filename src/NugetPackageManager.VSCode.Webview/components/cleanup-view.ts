@@ -4,8 +4,8 @@ import codicon from "@/web/styles/codicon.css";
 import { scrollableBase } from "@/web/styles/base.css";
 import { sharedStyles } from "@/web/styles/shared.css";
 import { hostApi } from "@/web/registrations";
-import { runCleanupJobAsync } from "@/web/jobs";
-import type { CleanupReport } from "@/common/rpc/types";
+import { runCleanupJobAsync, runAddMissingDefinitionsJobAsync } from "@/web/jobs";
+import type { CleanupReport, MissingDefinition } from "@/common/rpc/types";
 import "./dependency-issues";
 import type { DependencyIssues } from "./dependency-issues";
 
@@ -111,6 +111,53 @@ export class CleanupView extends LitElement {
         font-weight: 600;
         margin-bottom: 4px;
       }
+
+      .missing-card .missing-hint {
+        margin-bottom: 6px;
+      }
+
+      .missing-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        color: var(--vscode-foreground);
+      }
+
+      .missing-row .missing-id {
+        flex: 1;
+        min-width: 0;
+        font-weight: 600;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .missing-row .missing-version {
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .missing-row .missing-reason {
+        color: var(--vscode-descriptionForeground);
+        font-style: italic;
+      }
+
+      .missing-row .file-name {
+        color: var(--vscode-descriptionForeground);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+
+      .missing-row .project-name {
+        color: var(--vscode-descriptionForeground);
+        font-size: 10px;
+        max-width: 160px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
     `,
   ];
 
@@ -120,10 +167,12 @@ export class CleanupView extends LitElement {
   @state() private report: CleanupReport | null = null;
   @state() private isLoading = false;
   @state() private isRemoving = false;
+  @state() private isAdding = false;
   @state() private statusText = "";
   @state() private errorMessage = "";
   @state() private dependencyCount = 0;
   private _jobId = "";
+  private _addJobId = "";
 
   async LoadCleanupReportAsync(): Promise<void> {
     this.isLoading = true;
@@ -229,6 +278,101 @@ export class CleanupView extends LitElement {
     }
   }
 
+  private async cancelAddAsync(): Promise<void> {
+    if (!this._addJobId) return;
+    this.statusText = "Cancelling add…";
+    const result = await hostApi.cancelJobAsync({ JobId: this._addJobId });
+    if (!result.ok) {
+      this.errorMessage = `Failed to cancel: ${result.error}`;
+    }
+    this.requestUpdate();
+  }
+
+  private async AddDefinitionsAsync(entries: MissingDefinition[]): Promise<void> {
+    if (this.isAdding || this.isRemoving || entries.length === 0) return;
+    const actionable = entries.filter((entry) => entry.Actionable);
+    if (actionable.length === 0) return;
+
+    const versions = actionable.map((entry) => `${entry.Id} → v${entry.Version}`);
+    const files = [...new Set(actionable.flatMap((entry) => entry.PropsFiles))];
+    const confirm = await hostApi.showConfirmationAsync({
+      Message: `Add ${actionable.length} PackageVersion ${actionable.length === 1 ? "definition" : "definitions"}?`,
+      Detail: [
+        "A timestamped backup of each file will be created and the affected projects restored.",
+        ...versions,
+        ...files,
+      ].join("\n"),
+    });
+    if (!confirm.ok || !confirm.value.Confirmed) return;
+
+    this.isAdding = true;
+    this.statusText = "";
+    this.errorMessage = "";
+    this.requestUpdate();
+    try {
+      const result = await runAddMissingDefinitionsJobAsync(
+        { PackageIds: actionable.map((entry) => entry.Id) },
+        { onStarted: (jobId) => { this._addJobId = jobId; this.requestUpdate(); } }
+      );
+      if (!result.ok) {
+        if (/cancelled/i.test(result.error)) {
+          this.statusText = result.error;
+        } else {
+          this.errorMessage = result.error;
+        }
+        return;
+      }
+      const { Added, Backups, Skipped } = result.value;
+      const definitionWord = Added.length === 1 ? "definition" : "definitions";
+      const backupWord = Backups.length === 1 ? "backup" : "backups";
+      if (Added.length > 0) {
+        this.statusText =
+          `Added ${Added.length} ${definitionWord}. ${Backups.length} ${backupWord} created.` +
+          (Skipped.length > 0 ? ` ${Skipped.length} skipped.` : "");
+      } else {
+        this.statusText = "No definitions were added.";
+      }
+      await this.LoadCleanupReportAsync();
+      this.dispatchEvent(new CustomEvent("cleanup-completed", { bubbles: true, composed: true }));
+    } finally {
+      this._addJobId = "";
+      this.isAdding = false;
+      this.requestUpdate();
+    }
+  }
+
+  private missingReasonText(entry: MissingDefinition): string {
+    switch (entry.Reason) {
+      case "noVersion": return "No version found — add it manually";
+      case "multipleVersions": return "Projects use different versions — consolidate first";
+      case "noPropsFile": return "No Directory.Packages.props governs this project";
+      case "conditionalReference": return "Conditional reference — add a conditional PackageVersion manually";
+      case "propertyVersion": return "Version comes from an MSBuild property — move it manually";
+      case "pinnedVersion": return "Pinned version — add it manually";
+      case "unreadableProject": return "Could not read the project file — add it manually";
+      case "nonCpmOnly": return "Used without CPM — no definition needed";
+      default: return "Cannot add automatically";
+    }
+  }
+
+  /** Row tooltip: the reason (when not actionable) plus every project path that uses the package. */
+  private missingTooltip(entry: MissingDefinition): string {
+    const parts: string[] = [];
+    if (!entry.Actionable) parts.push(this.missingReasonText(entry));
+    if (entry.Projects.length > 0) parts.push(entry.Projects.join("\n"));
+    return parts.join("\n");
+  }
+
+  private filesLabel(count: number): string {
+    return `${count} file${count === 1 ? "" : "s"}`;
+  }
+
+  /** Visible project label: first using project's file name plus a "+N" hint for the rest. */
+  private projectLabel(projects: string[]): string {
+    const first = this.fileName(projects[0] ?? "");
+    return projects.length > 1 ? `${first} +${projects.length - 1}` : first;
+  }
+
   private fileName(filePath: string): string {
     return filePath.split(/[\\/]/).pop() ?? filePath;
   }
@@ -236,10 +380,11 @@ export class CleanupView extends LitElement {
   override render(): unknown {
     const report = this.report;
     const unused = report?.Unused ?? [];
+    const actionableMissing = report?.Missing.filter((entry) => entry.Actionable) ?? [];
     const propsWithUnused = report?.PropsFiles.filter((file) => file.Unused.length > 0) ?? [];
 
     return html`
-      <div class="cleanup-container" aria-busy=${this.isLoading || this.isRemoving}>
+      <div class="cleanup-container" aria-busy=${this.isLoading || this.isRemoving || this.isAdding}>
         <div class="list-header">
           <div>
             <div class="list-title">Cleanup unused packages</div>
@@ -249,7 +394,7 @@ export class CleanupView extends LitElement {
             </div>
           </div>
           <div class="list-actions">
-            <button class="ghost-btn" ?disabled=${this.isLoading || this.isRemoving} @click=${async () => await this.RefreshAsync()}>
+            <button class="ghost-btn" ?disabled=${this.isLoading || this.isRemoving || this.isAdding} @click=${async () => await this.RefreshAsync()}>
               Refresh
             </button>
             ${this.isRemoving
@@ -259,7 +404,17 @@ export class CleanupView extends LitElement {
                   </button>
                 `
               : nothing}
-            <button class="primary-btn" ?disabled=${this.isLoading || this.isRemoving || unused.length === 0} @click=${async () => await this.RemoveUnusedAsync()}>
+            ${this.isAdding
+              ? html`
+                  <button class="ghost-btn" ?disabled=${!this._addJobId} @click=${async () => await this.cancelAddAsync()}>
+                    Cancel
+                  </button>
+                `
+              : nothing}
+            <button class="primary-btn" ?disabled=${this.isLoading || this.isRemoving || this.isAdding || actionableMissing.length === 0} @click=${async () => await this.AddDefinitionsAsync(actionableMissing)}>
+              Add definitions${actionableMissing.length > 0 ? ` (${actionableMissing.length})` : ""}
+            </button>
+            <button class="primary-btn" ?disabled=${this.isLoading || this.isRemoving || this.isAdding || unused.length === 0} @click=${async () => await this.RemoveUnusedAsync()}>
               Remove unused${unused.length > 0 ? ` (${unused.length})` : ""}
             </button>
           </div>
@@ -315,8 +470,29 @@ export class CleanupView extends LitElement {
           ${report && report.Missing.length > 0
             ? html`<div class="missing-card">
                 <div class="missing-title">Used but not defined (${report.Missing.length})</div>
-                ${report.Missing.join(", ")}
-                <div>These package references are not covered by Directory.Packages.props.</div>
+                <div class="missing-hint">These package references are not covered by Directory.Packages.props.</div>
+                ${report.Missing.map((entry) => html`
+                  <div class="missing-row" title=${this.missingTooltip(entry)}>
+                    <span class="codicon codicon-package"></span>
+                    <span class="missing-id" title=${entry.Id}>${entry.Id}</span>
+                    <span class="missing-version ${entry.Actionable ? "" : "missing-reason"}" title=${entry.Actionable ? entry.Version : this.missingReasonText(entry)}>
+                      ${entry.Actionable ? `v${entry.Version}` : this.missingReasonText(entry)}
+                    </span>
+                    ${entry.Projects.length > 0
+                      ? html`<span class="project-name" title=${entry.Projects.join("\n")}>
+                          ${this.projectLabel(entry.Projects)}
+                        </span>`
+                      : nothing}
+                    ${entry.PropsFiles.length > 0
+                      ? html`<span class="file-name" title=${entry.PropsFiles.join("\n")}>
+                          ${this.filesLabel(entry.PropsFiles.length)}
+                        </span>`
+                      : nothing}
+                    ${entry.Actionable
+                      ? html`<button class="ghost-btn" ?disabled=${this.isAdding || this.isRemoving} @click=${async () => await this.AddDefinitionsAsync([entry])}>Add</button>`
+                      : nothing}
+                  </div>
+                `)}
               </div>`
             : nothing}
         </div>

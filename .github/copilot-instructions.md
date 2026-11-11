@@ -273,8 +273,9 @@ npm run quality:coverage # same, and writes coverage/lcov.info for the SonarClou
 npm run package          # produce .vsix in releases/
 ```
 
-Requirements: Node.js 19+ (for `globalThis.crypto.randomUUID()`), .NET SDK 8+ (the sidecar
-targets `net8.0` with `RollForward=LatestMajor`), and the `dotnet` CLI on PATH — the extension
+Requirements: Node.js 19+ (for `globalThis.crypto.randomUUID()`), .NET SDK 10+ (the sidecar
+targets `net10.0` with `RollForward=LatestMajor`, so the same build runs on 10 and 11), and the
+`dotnet` CLI on PATH — the extension
 also shells out to it for restore, install/update, vulnerability and target-framework work.
 
 `NugetPackageManager.slnx` also lists the TypeScript entry points and configs under

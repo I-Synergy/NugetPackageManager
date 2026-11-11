@@ -2,7 +2,7 @@
 
 ## Runtime & Language
 
-- **Runtime**: Node.js v19+ (host), Browser (webview), .NET 8 (sidecar core, `net8.0` with `RollForward=LatestMajor`)
+- **Runtime**: Node.js v19+ (host), Browser (webview), .NET 10 (sidecar core, `net10.0` with `RollForward=LatestMajor`)
 - **Languages**: TypeScript 5.x (`strict: true`) for the extension; C# (`LangVersion=latest`, nullable enabled, warnings as errors) for the core
 - **Node.js requirement**: v19+ for `globalThis.crypto.randomUUID()`
 

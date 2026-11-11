@@ -77,6 +77,46 @@ public class DotnetFailureClassifierTests
 
     [TestMethod]
     [TestCategory("Unit")]
+    public void Classify_Nu1301MissingLocalSource_WinsOverAParsedConflict()
+    {
+        // Arrange: a stale local source and a NU1107 chain in the same output.
+        const string output =
+            "C:\\ws\\Sample.csproj : error NU1301: The local source 'C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\' doesn't exist.\n" +
+            "C:\\ws\\Sample.csproj : error NU1107: Version conflict detected for Microsoft.EntityFrameworkCore.Relational. Install/reference Microsoft.EntityFrameworkCore.Relational 11.0.0 directly to project Sample to resolve this issue.\n" +
+            "C:\\ws\\Sample.csproj :  Sample.Api -> Npgsql.EntityFrameworkCore.PostgreSQL 11.0.0 -> Microsoft.EntityFrameworkCore.Relational (= 11.0.0).";
+
+        // Act
+        var failure = DotnetFailureClassifier.Classify(output);
+
+        // Assert
+        Assert.AreEqual("SourceUnavailable", failure.Kind);
+        Assert.AreNotEqual("RestoreConflict", failure.Kind);
+        StringAssert.Contains(failure.Summary, "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\");
+        StringAssert.Contains(failure.Summary, "does not exist");
+        StringAssert.Contains(failure.Hint, "dotnet nuget disable source");
+        StringAssert.Contains(failure.Detail, "NU1301");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public void Classify_Nu1301UnreachableUrl_KeepsTheNetworkHint()
+    {
+        // Arrange
+        const string output =
+            "error NU1301: Unable to load the service index for source https://feed.example/v3/index.json.";
+
+        // Act
+        var failure = DotnetFailureClassifier.Classify(output);
+
+        // Assert
+        Assert.AreEqual("SourceUnavailable", failure.Kind);
+        StringAssert.Contains(failure.Summary, "https://feed.example/v3/index.json");
+        StringAssert.Contains(failure.Hint, "network/proxy");
+        StringAssert.Contains(failure.Hint, "credentials");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
     public void Classify_MissingPinnedSdk_NamesTheVersionAndGlobalJson()
     {
         // Act

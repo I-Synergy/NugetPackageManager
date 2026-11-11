@@ -39,13 +39,12 @@ jobs:
         with:
           node-version: lts/*
 
-      # 10.0.x provides the SDK (the `.slnx` solution needs 9.0.200+); 8.0.x provides the
-      # runtime the net8.0 test projects execute on.
+      # 10.0.x provides the SDK (the `.slnx` solution needs 9.0.200+) and the runtime the
+      # net10.0 test projects execute on.
       - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: |
-            8.0.x
             10.0.x
 
       - name: Install dependencies

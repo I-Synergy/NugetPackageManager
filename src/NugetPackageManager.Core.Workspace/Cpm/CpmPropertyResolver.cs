@@ -27,7 +27,7 @@ public sealed class CpmPropertyResolver : IDisposable
     private const string PropertyReference = "$(";
 
     private readonly Dictionary<string, CacheEntry> cache = [];
-    private readonly object cacheLock = new();
+    private readonly System.Threading.Lock cacheLock = new();
     private int chainReads;
 
     /// <summary>
