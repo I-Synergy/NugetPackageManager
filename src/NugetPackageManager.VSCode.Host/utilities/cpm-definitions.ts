@@ -179,7 +179,7 @@ export function InspectPackageReference(content: string, packageId: string): Pac
     while ((match = pattern.exec(content)) !== null) {
         const attributes = match[1] ?? "";
         const include = readAttribute(attributes, "Include");
-        if (!include || include.toLowerCase() !== wanted) continue;
+        if (include?.toLowerCase() !== wanted) continue;
         return {
             Found: true,
             HasCondition: readAttribute(attributes, "Condition") !== null,
@@ -204,7 +204,7 @@ export function RemoveInlinePackageVersion(content: string, packageId: string): 
     while ((match = pattern.exec(content)) !== null) {
         const attributes = match[1] ?? "";
         const include = readAttribute(attributes, "Include");
-        if (!include || include.toLowerCase() !== wanted) continue;
+        if (include?.toLowerCase() !== wanted) continue;
 
         if (readAttribute(attributes, "Condition") !== null) {
             return { Content: content, Changed: false, Reason: "conditionalReference" };
