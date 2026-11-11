@@ -6,7 +6,9 @@ import type {
   GetPackageFrameworksResponse,
   GetPackageResponse,
   GetPackagesResponse,
+  GetVersionCompatibilityResponse,
   INuGetSourceApi,
+  PackageVersionCompatibility,
 } from "./source-api";
 
 /**
@@ -94,6 +96,24 @@ export default class SidecarSourceApi implements INuGetSourceApi {
     const data = await this.CallAsync<PackageFrameworks>(
       "getPackageFrameworks",
       { id: packageId, version },
+      signal
+    );
+    return { data };
+  }
+
+  /**
+   * Always goes through the core, local sources included: compatibility is evaluated from the
+   * registration metadata the same way the feed serves it.
+   */
+  public async GetVersionCompatibilityAsync(
+    packageId: string,
+    projectFrameworks: string[],
+    versions: string[],
+    signal?: AbortSignal
+  ): Promise<GetVersionCompatibilityResponse> {
+    const data = await this.CallAsync<PackageVersionCompatibility[]>(
+      "getPackageVersionCompatibility",
+      { id: packageId, projectFrameworks, versions },
       signal
     );
     return { data };

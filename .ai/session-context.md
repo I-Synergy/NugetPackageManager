@@ -1,10 +1,37 @@
 # TheNugetPackageManager — Session Context
 
-**Last Updated:** 2026-11-08
+**Last Updated:** 2026-11-10
 **Project Version:** 2.2.0
 **Branch:** chore/openvsx-publishing
 **Written By:** Reasonix Code
 **Next Session May Use:** Any
+
+---
+
+## Completed: framework-compatible update candidates (2026-11-10)
+
+Request: after the .NET 11 rollout a `net10.0` row was offered `CommunityToolkit.Maui.MediaElement`
+`12.0.0`, which only ships `net11.0*` assets. Plan `.ai/plans/framework-compatible-updates.md`;
+record `.ai/completed/framework-compatible-updates.md`.
+
+- **Core**: new sidecar method `getPackageVersionCompatibility` (`{ id, projectFrameworks,
+  versions? }` → `[{ Version, Compatible, Known }]`). `PackageFrameworkCompatibility` evaluates
+  a version's declared frameworks (registration metadata dependency groups) against the project
+  TFMs with `DefaultCompatibilityProvider`; no `.nupkg` download. Declared frameworks are cached
+  per id and cleared with the package cache. Fail-open: no framework data / unparseable TFM →
+  `Known:false`.
+- **Host**: only cross-major candidates are checked, so ordinary patch scans cost no extra
+  request. The scan drops known-incompatible versions and suppresses a known-incompatible
+  `LatestOverallVersion`; the Installed arrow (`applyLaneCapAsync`) lowers an uninstallable
+  cross-major recommendation to the highest compatible newer version, or to the installed
+  version. Row frameworks come from the resolution TFM, else the project's TFMs. The gate is
+  independent of `allowMajorVersionOverride` (policy ≠ installability).
+- **Docs**: CHANGELOG Unreleased fix entry; README Updates bullet.
+- **Verification**: `npm run quality` PASS 8/8; Core.NuGet 67, Core 110, TS 546 passing.
+- **Known limitation**: the Installed arrow checks only the row's `Framework` (the lowest-major
+  TFM for a shared row); a shared row spanning majors can still be offered a version that only
+  serves the higher major there. Same-major candidates are not framework-checked in either
+  surface by design (cost).
 
 ---
 

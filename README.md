@@ -173,6 +173,7 @@ Lists all packages where a newer version is available on the configured sources.
 - Per-row **update button** for single-package updates
 - **Framework selector** — choose **All frameworks**, **Shared**, or a base `.NET` line such as `net10.0` / `net11.0`. Platform variants are grouped under the base line; selecting a `.NET` line excludes shared packages.
 - **Framework lanes** — framework-aligned packages stay on the row's target-framework major line. In a multi-.NET-major scope an `11.x` version is never offered to a `net10.0` row, and the *latest overall* action is hidden unless `nugetpackagemanager.allowMajorVersionOverride` is enabled (see [Multi-framework version management](#multi-framework-version-management)).
+- **Framework compatibility** — a version is only offered when its declared target frameworks can actually serve the row's target framework. This is proven from the package's own metadata through NuGet's compatibility rules, so a `net10.0` row is never offered a `12.0.0` that only ships `net11.0` assets. The check applies to cross-major candidates and fails open — a version whose framework data is unknown is never hidden.
 - Tab data refreshes automatically every time you switch to it
 
 ### Consolidate

@@ -28,6 +28,12 @@ export type GetPackageFrameworksResponse = {
   data: PackageFrameworks;
 };
 
+export type PackageVersionCompatibility = { Version: string; Compatible: boolean; Known: boolean };
+
+export type GetVersionCompatibilityResponse = {
+  data: PackageVersionCompatibility[];
+};
+
 export interface INuGetSourceApi {
   GetPackagesAsync(
     filter: string,
@@ -58,6 +64,20 @@ export interface INuGetSourceApi {
     version: string,
     signal?: AbortSignal
   ): Promise<GetPackageFrameworksResponse>;
+
+  /**
+   * Whether each requested version can be consumed by the given project frameworks, read from
+   * the version's own declared target frameworks in the feed's registration metadata (no
+   * `.nupkg` download). `Known:false` marks a verdict that cannot be proven - the feed publishes
+   * no framework data - and callers must treat it as allowed. Versions missing from the response
+   * are likewise unknown/allowed.
+   */
+  GetVersionCompatibilityAsync(
+    packageId: string,
+    projectFrameworks: string[],
+    versions: string[],
+    signal?: AbortSignal
+  ): Promise<GetVersionCompatibilityResponse>;
 
   GetVulnerabilitiesAsync(signal?: AbortSignal): Promise<Map<string, VulnerabilityEntry[]>>;
 

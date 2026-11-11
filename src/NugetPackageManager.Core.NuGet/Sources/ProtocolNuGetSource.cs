@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using NuGet.Common;
 using NuGet.Configuration;
 using NuGet.Packaging;
+using NuGet.Frameworks;
 using NuGet.Packaging.Core;
 using NuGet.Protocol.Core.Types;
 using NuGet.Versioning;
@@ -35,6 +36,8 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
     private readonly ConcurrentDictionary<string, (Package Package, DateTimeOffset StoredAt)> packageCache =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (PackageFrameworks Frameworks, DateTimeOffset StoredAt)> frameworksCache =
+        new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (Dictionary<string, IReadOnlyList<NuGetFramework>> Declared, DateTimeOffset StoredAt)> compatibilityCache =
         new(StringComparer.Ordinal);
     private readonly object cacheLock = new();
     private SourceCacheContext cache = new();
@@ -238,12 +241,88 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
         return frameworks;
     }
 
+    /// <summary>
+    /// Whether each requested version can be consumed by the project frameworks, derived only
+    /// from the registration metadata's dependency groups — no <c>.nupkg</c> is downloaded.
+    ///
+    /// The declared frameworks are cached per id (<c>packageCacheTtl</c>) so two rows of the same
+    /// package share one metadata call. Versions the feed does not list are omitted; an
+    /// unprovable answer is reported as <c>Known:false, Compatible:true</c> (fail open).
+    /// </summary>
+    public async Task<IReadOnlyList<PackageVersionCompatibility>> GetVersionCompatibilityAsync(
+        string id,
+        IReadOnlyList<string> projectFrameworks,
+        IReadOnlyList<string>? versions,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(projectFrameworks);
+
+        var declared = await GetDeclaredFrameworksAsync(id, cancellationToken).ConfigureAwait(false);
+        var parsed = PackageFrameworkCompatibility.ParseProjectFrameworks(projectFrameworks);
+
+        var requested = versions is { Count: > 0 } ? versions : [.. declared.Keys];
+
+        var results = new List<PackageVersionCompatibility>(requested.Count);
+        foreach (var version in requested)
+        {
+            // A version the feed does not list has no framework data; the host treats the
+            // missing entry as unknown/allowed, so it is simply omitted here.
+            if (!declared.TryGetValue(version, out var declaredFrameworks))
+            {
+                continue;
+            }
+
+            results.Add(PackageFrameworkCompatibility.Evaluate(version, declaredFrameworks, parsed));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Maps each listed version of the package to the target frameworks its dependency groups
+    /// declare, caching the answer per id. A version with no dependency groups maps to an empty
+    /// list, which <see cref="PackageFrameworkCompatibility.Evaluate"/> reads as unknown.
+    /// </summary>
+    private async Task<Dictionary<string, IReadOnlyList<NuGetFramework>>> GetDeclaredFrameworksAsync(
+        string id,
+        CancellationToken cancellationToken)
+    {
+        var key = id.ToLowerInvariant();
+        if (compatibilityCache.TryGetValue(key, out var cached)
+            && DateTimeOffset.UtcNow - cached.StoredAt < packageCacheTtl)
+        {
+            return cached.Declared;
+        }
+
+        var metadata = await RequireAsync(metadataResource, nameof(PackageMetadataResource), cancellationToken)
+            .ConfigureAwait(false);
+
+        var all = await metadata
+            .GetMetadataAsync(id, includePrerelease: true, includeUnlisted: false, CurrentCache(), NullLogger.Instance, cancellationToken)
+            .ConfigureAwait(false);
+
+        var declared = new Dictionary<string, IReadOnlyList<NuGetFramework>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in all)
+        {
+            var frameworks = entry.DependencySets?
+                .Select(set => set.TargetFramework)
+                .Where(framework => framework is not null)
+                .ToList() ?? [];
+            declared[entry.Identity.Version.ToNormalizedString()] = frameworks;
+        }
+
+        compatibilityCache[key] = (declared, DateTimeOffset.UtcNow);
+        return declared;
+    }
+
     public void ClearPackageCache(string? packageId = null)
     {
         if (packageId is null)
         {
             packageCache.Clear();
             frameworksCache.Clear();
+            compatibilityCache.Clear();
         }
         else
         {
@@ -260,6 +339,8 @@ public sealed class ProtocolNuGetSource : INuGetSource, IDisposable
             {
                 frameworksCache.TryRemove(key, out _);
             }
+
+            compatibilityCache.TryRemove(packageId.ToLowerInvariant(), out _);
         }
 
         // Bypass NuGet.Protocol's own in-memory/HTTP cache for the next call.

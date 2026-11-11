@@ -34,6 +34,7 @@ public sealed class NuGetCoreHandlers
             ["getPackage"] = HandleGetPackageAsync,
             ["getPackageDetails"] = HandleGetPackageDetailsAsync,
             ["getPackageFrameworks"] = HandleGetPackageFrameworksAsync,
+            ["getPackageVersionCompatibility"] = HandleGetPackageVersionCompatibilityAsync,
             ["clearPackageCache"] = HandleClearPackageCacheAsync,
             ["clearVulnerabilityCache"] = HandleClearVulnerabilityCacheAsync,
         };
@@ -111,6 +112,25 @@ public sealed class NuGetCoreHandlers
             .GetPackageFrameworksAsync(id, version, cancellationToken)).ConfigureAwait(false);
     }
 
+    private async Task<object?> HandleGetPackageVersionCompatibilityAsync(
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        var source = ReadSource(parameters);
+        var id = ReadString(parameters, "id");
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new RpcException(Constants.InvalidParams, "'id' is required.");
+        }
+
+        var projectFrameworks = ReadStringArray(parameters, "projectFrameworks") ?? [];
+        var versions = ReadStringArray(parameters, "versions");
+
+        return await GuardAsync(() => sources
+            .GetSource(source)
+            .GetVersionCompatibilityAsync(id, projectFrameworks, versions, cancellationToken)).ConfigureAwait(false);
+    }
+
     private Task<object?> HandleClearPackageCacheAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
         _ = cancellationToken;
@@ -180,6 +200,27 @@ public sealed class NuGetCoreHandlers
             Password = ReadString(source, "password"),
             Proxy = ReadString(source, "proxy"),
         };
+    }
+
+    private static List<string>? ReadStringArray(JsonElement element, string property)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty(property, out var value)
+            || value.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var items = new List<string>();
+        foreach (var item in value.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String && item.GetString() is { } text)
+            {
+                items.Add(text);
+            }
+        }
+
+        return items;
     }
 
     private static string? ReadString(JsonElement element, string property) =>

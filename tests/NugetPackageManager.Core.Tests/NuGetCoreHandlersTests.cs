@@ -285,6 +285,59 @@ public class NuGetCoreHandlersTests
         Assert.IsTrue(output.ToString().Contains("\"pong\":true", StringComparison.Ordinal));
     }
 
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageVersionCompatibility_PassesSourceIdFrameworksAndVersionsToTheSource()
+    {
+        // Arrange
+        var source = new Mock<INuGetSource>();
+        source
+            .Setup(x => x.GetVersionCompatibilityAsync(
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<IReadOnlyList<string>?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(
+            [
+                new PackageVersionCompatibility { Version = "12.0.0", Compatible = false, Known = true },
+            ]);
+        var handlers = CreateHandlers(noEntries, source.Object);
+        var parameters = Parse(
+            """{"source":{"url":"https://feed.example/v3/index.json","username":"u","password":"p"},"id":"Contoso.Maui","projectFrameworks":["net10.0"],"versions":["12.0.0"]}""");
+
+        // Act
+        var result = await handlers["getPackageVersionCompatibility"](parameters, CancellationToken.None);
+
+        // Assert
+        source.Verify(
+            x => x.GetVersionCompatibilityAsync(
+                "Contoso.Maui",
+                It.Is<IReadOnlyList<string>>(f => f.Count == 1 && f[0] == "net10.0"),
+                It.Is<IReadOnlyList<string>?>(v => v != null && v.Count == 1 && v[0] == "12.0.0"),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+
+        var json = JsonSerializer.Serialize(result, ProtocolJson.Options);
+        StringAssert.Contains(json, "\"Version\":\"12.0.0\"");
+        StringAssert.Contains(json, "\"Compatible\":false");
+        StringAssert.Contains(json, "\"Known\":true");
+    }
+
+    [TestMethod]
+    [TestCategory("Unit")]
+    public async Task GetPackageVersionCompatibility_WithoutId_ReportsInvalidParams()
+    {
+        // Arrange
+        var handlers = CreateHandlers(noEntries, Mock.Of<INuGetSource>());
+
+        // Act
+        var error = await Assert.ThrowsExactlyAsync<RpcException>(
+            () => handlers["getPackageVersionCompatibility"](validParameters, CancellationToken.None));
+
+        // Assert
+        Assert.AreEqual("invalidParams", error.Code);
+    }
+
     private static Dictionary<string, RpcHandler> CreateHandlers(
         Dictionary<string, List<VulnerabilityEntry>> entries,
         INuGetSource? source = null)
