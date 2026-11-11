@@ -32,8 +32,8 @@ public static partial class DotnetFailureClassifier
 
         return ClassifySdkFailure(output, baseInfo, context)
             ?? ClassifyVulnerabilityAudit(output, baseInfo)
-            ?? ClassifyRestoreFailure(output, baseInfo)
             ?? ClassifyEnvironmentFailure(output, baseInfo)
+            ?? ClassifyRestoreFailure(output, baseInfo)
             ?? UnknownFailure(output, baseInfo);
     }
 
@@ -154,11 +154,27 @@ public static partial class DotnetFailureClassifier
     {
         if (SourceUnavailable().IsMatch(output))
         {
+            // NU1301 names a local source whose folder is gone ("The local source '<path>' doesn't
+            // exist."); prefer that over the generic URL advice, which cannot fix a stale path.
+            var localSource = ExtractMissingLocalSource(output);
+            if (localSource is not null)
+            {
+                return Build(
+                    baseInfo,
+                    "SourceUnavailable",
+                    $"The NuGet source '{localSource}' does not exist.",
+                    $"Remove or disable that source and restore again: run `dotnet nuget list source` to find its name, then `dotnet nuget disable source <name>`, or fix `packageSources` in nuget.config.");
+            }
+
+            var sourceUrl = ExtractServiceIndexSource(output);
+            var urlLabel = sourceUrl is null ? "the source URL" : sourceUrl;
             return Build(
                 baseInfo,
                 "SourceUnavailable",
-                "A NuGet source could not be reached.",
-                "Check the source URL, network/proxy settings and feed credentials, then restore again.");
+                sourceUrl is null
+                    ? "A NuGet source could not be reached."
+                    : $"The NuGet source '{sourceUrl}' could not be reached.",
+                $"Check {urlLabel}, network/proxy settings and feed credentials, then restore again.");
         }
 
         if (!PasswordScript().IsMatch(output))
@@ -246,6 +262,18 @@ public static partial class DotnetFailureClassifier
         return null;
     }
 
+    private static string? ExtractMissingLocalSource(string output)
+    {
+        var match = MissingLocalSource().Match(output);
+        return match.Success ? match.Groups[1].Value.Trim() : null;
+    }
+
+    private static string? ExtractServiceIndexSource(string output)
+    {
+        var match = ServiceIndexSource().Match(output);
+        return match.Success ? TrimTrailingPunctuation(match.Groups[1].Value) : null;
+    }
+
     private static string? ExtractConflictingPack(string output)
     {
         var match = ConflictingPack().Match(output);
@@ -324,6 +352,17 @@ public static partial class DotnetFailureClassifier
         @"\bNU1301\b|\bNU1801\b|Unable to load the service index|No such host is known|ECONNREFUSED|ETIMEDOUT|407 Proxy Authentication",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SourceUnavailable();
+
+    /// <summary><c>The local source '&lt;path&gt;' doesn't exist.</c> — tolerates "does not exist".</summary>
+    [GeneratedRegex(
+        @"The local source '([^']+)' (?:doesn't|does not) exist",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex MissingLocalSource();
+
+    [GeneratedRegex(
+        @"Unable to load the service index for source (https?://\S+)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ServiceIndexSource();
 
     [GeneratedRegex(
         @"password script|credential provider .*failed",
