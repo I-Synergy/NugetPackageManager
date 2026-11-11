@@ -185,10 +185,39 @@ export type ConsolidateRequest = {
   Scope?: "group" | "unconditional" | "all" | "first";
 };
 
+/** Why a used-but-undefined package cannot be added automatically. */
+export type MissingDefinitionReason =
+  | "noVersion"
+  | "multipleVersions"
+  | "noPropsFile"
+  | "conditionalReference"
+  | "propertyVersion"
+  | "pinnedVersion"
+  | "unreadableProject"
+  | "nonCpmOnly";
+
+/** One package a project uses but no props file defines. */
+export type MissingDefinition = {
+  Id: string;
+  /** The single version known for it, or "" when unknown or ambiguous. */
+  Version: string;
+  /** Every project that uses it (CPM and non-CPM). */
+  Projects: string[];
+  /** Governing Directory.Packages.props files, deduped. Empty for non-CPM-only entries. */
+  PropsFiles: string[];
+  /**
+   * True when a CPM project uses it, a concrete version is known and every using CPM project has a
+   * props file. Always false for entries used only by non-CPM projects (`nonCpmOnly`).
+   */
+  Actionable: boolean;
+  /** Present when the entry cannot be added automatically. */
+  Reason?: MissingDefinitionReason;
+};
+
 export type CleanupReport = {
   PropsFiles: Array<{ Path: string; Defined: string[]; Unused: string[] }>;
   Used: string[];
-  Missing: string[];
+  Missing: MissingDefinition[];
   Unused: string[];
 };
 
@@ -201,6 +230,23 @@ export type CleanupUnusedResponse = {
   Removed: string[];
   Backups: string[];
   Errors: string[];
+};
+
+/** Adds central `PackageVersion` entries for packages that are used but not defined. */
+export type AddMissingDefinitionsRequest = {
+  /** Package ids to add; omitted means every currently-actionable entry. */
+  PackageIds?: string[];
+};
+
+export type AddMissingDefinitionsResponse = {
+  /** The entries written to a props file. */
+  Added: Array<{ Id: string; Version: string; PropsFile: string }>;
+  /** Every file whose contents changed, props files and .csproj files alike. */
+  ChangedFiles: string[];
+  /** Timestamped `*.backup.*` copies created before writing. */
+  Backups: string[];
+  /** Requested ids that were not added, with the reason. */
+  Skipped: Array<{ Id: string; Reason: string }>;
 };
 
 export type UpdateConfigurationRequest = {
@@ -324,6 +370,7 @@ export type JobKind =
   | "projectUpdate"
   | "consolidate"
   | "cleanup"
+  | "addMissingDefinitions"
   | "workspaceScan"
   | "outdatedScan";
 
@@ -355,6 +402,7 @@ export type GetJobResponse =
   | JobStatus<"projectUpdate", UpdateProjectResponse>
   | JobStatus<"consolidate", void>
   | JobStatus<"cleanup", CleanupUnusedResponse>
+  | JobStatus<"addMissingDefinitions", AddMissingDefinitionsResponse>
   | JobStatus<"workspaceScan", GetProjectsResponse>
   | JobStatus<"outdatedScan", GetOutdatedPackagesResponse>;
 
@@ -685,6 +733,7 @@ export interface HostAPI {
   startProjectUpdateAsync(req: UpdateProjectRequest): Promise<Result<StartJobResponse>>;
   startConsolidateAsync(req: ConsolidateRequest): Promise<Result<StartJobResponse>>;
   startCleanupAsync(req: CleanupUnusedRequest): Promise<Result<StartJobResponse>>;
+  startAddMissingDefinitionsAsync(req: AddMissingDefinitionsRequest): Promise<Result<StartJobResponse>>;
   startWorkspaceScanAsync(req: CacheControl): Promise<Result<StartJobResponse>>;
   startOutdatedScanAsync(req: GetOutdatedPackagesRequest): Promise<Result<StartJobResponse>>;
   getJobAsync(req: JobRequest): Promise<Result<GetJobResponse>>;

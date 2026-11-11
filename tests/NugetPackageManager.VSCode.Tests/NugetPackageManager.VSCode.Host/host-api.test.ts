@@ -3667,4 +3667,372 @@ suite('HostAPI Tests', () => {
             }]);
         });
     });
+
+    // ----------------------------------------------------------------
+    // Cleanup missing definitions
+    // ----------------------------------------------------------------
+    suite('Cleanup missing definitions', () => {
+        let workspaceDir: string;
+
+        /** Wires findFiles so discovery sees the given projects and props files. */
+        function stubWorkspaceFiles(projectFiles: string[], propsFiles: string[]): void {
+            const toUris = (paths: string[]): vscode.Uri[] => paths.map((fsPath) => ({ fsPath }) as vscode.Uri);
+            sandbox.stub(vscode.workspace, 'findFiles').callsFake(async (pattern: vscode.GlobPattern) => {
+                const glob = String(pattern);
+                if (glob.includes('Directory.Packages.props')) return toUris(propsFiles);
+                if (glob.includes('csproj')) return toUris(projectFiles);
+                return [];
+            });
+        }
+
+        function stubSettings(): void {
+            sandbox.stub(vscode.workspace, 'getConfiguration').returns({
+                get: () => undefined,
+            } as unknown as vscode.WorkspaceConfiguration);
+        }
+
+        function cpmProject(
+            projectPath: string,
+            packages: Array<{ Id: string; Version: string; IsPinned?: boolean; VersionSource?: 'project' | 'central' | 'override' }>
+        ): Project {
+            return {
+                Name: path.basename(projectPath, '.csproj'),
+                Path: projectPath,
+                CpmEnabled: true,
+                Packages: packages.map((pkg) => ({
+                    Id: pkg.Id,
+                    Version: pkg.Version,
+                    IsPinned: pkg.IsPinned ?? false,
+                    VersionSource: pkg.VersionSource ?? 'project',
+                })),
+            } as Project;
+        }
+
+        setup(() => {
+            workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-missing-'));
+        });
+
+        teardown(() => {
+            fs.rmSync(workspaceDir, { recursive: true, force: true });
+        });
+
+        test('reports a package used only by a non-CPM project as nonCpmOnly', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() => ({
+                Name: 'App',
+                Path: projectPath,
+                CpmEnabled: false,
+                Packages: [{ Id: 'Pkg.Loose', Version: '1.0.0', IsPinned: false, VersionSource: 'project' }],
+            } as Project));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Missing.length, 1);
+            const entry = result.value.Missing[0]!;
+            assert.strictEqual(entry.Id, 'Pkg.Loose');
+            assert.strictEqual(entry.Reason, 'nonCpmOnly');
+            assert.strictEqual(entry.Actionable, false);
+            assert.deepStrictEqual(entry.PropsFiles, []);
+            assert.deepStrictEqual(entry.Projects, [projectPath]);
+            assert.deepStrictEqual(result.value.Used, ['Pkg.Loose']);
+        });
+
+        test('keeps a mixed CPM + non-CPM package actionable and lists both projects', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const cpmPath = path.join(workspaceDir, 'Cpm.csproj');
+            const loosePath = path.join(workspaceDir, 'Loose.csproj');
+            fs.writeFileSync(
+                cpmPath,
+                '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Shared" Version="4.0.0" /></ItemGroup></Project>'
+            );
+            stubSettings();
+            stubWorkspaceFiles([cpmPath, loosePath], [propsFile]);
+            stubProjectParsing((projectPath) => {
+                if (projectPath === cpmPath) return cpmProject(cpmPath, [{ Id: 'Pkg.Shared', Version: '4.0.0' }]);
+                return {
+                    Name: 'Loose',
+                    Path: loosePath,
+                    CpmEnabled: false,
+                    Packages: [{ Id: 'Pkg.Shared', Version: '1.0.0', IsPinned: false, VersionSource: 'project' }],
+                } as Project;
+            });
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            const entry = result.value.Missing.find((candidate) => candidate.Id === 'Pkg.Shared')!;
+            assert.strictEqual(entry.Actionable, true);
+            // Only the CPM project's version decides the definition; the non-CPM version is ignored.
+            assert.strictEqual(entry.Version, '4.0.0');
+            assert.deepStrictEqual([...entry.Projects].sort(), [cpmPath, loosePath].sort());
+            assert.deepStrictEqual(entry.PropsFiles, [propsFile]);
+        });
+
+        test('resolves the version from project.assets.json when the reference has none', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            fs.mkdirSync(path.join(workspaceDir, 'obj'), { recursive: true });
+            fs.writeFileSync(
+                path.join(workspaceDir, 'obj', 'project.assets.json'),
+                JSON.stringify({
+                    libraries: { 'Pkg.Missing/3.0.0': { type: 'package' } },
+                    targets: { 'net10.0': { 'Pkg.Missing/3.0.0': {} } },
+                })
+            );
+
+            fs.writeFileSync(
+                projectPath,
+                '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Missing" /></ItemGroup></Project>'
+            );
+
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() => cpmProject(projectPath, [{ Id: 'Pkg.Missing', Version: '' }]));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            assert.strictEqual(result.value.Missing.length, 1);
+            const entry = result.value.Missing[0]!;
+            assert.strictEqual(entry.Id, 'Pkg.Missing');
+            assert.strictEqual(entry.Version, '3.0.0');
+            assert.strictEqual(entry.Actionable, true);
+        });
+
+        test('reports noVersion and multipleVersions with the right reason', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectA = path.join(workspaceDir, 'A.csproj');
+            const projectB = path.join(workspaceDir, 'B.csproj');
+            const projectC = path.join(workspaceDir, 'C.csproj');
+
+            stubSettings();
+            stubWorkspaceFiles([projectA, projectB, projectC], [propsFile]);
+            stubProjectParsing((projectPath) => {
+                if (projectPath === projectA) return cpmProject(projectA, [{ Id: 'Pkg.Diverge', Version: '1.0.0' }]);
+                if (projectPath === projectB) return cpmProject(projectB, [{ Id: 'Pkg.Diverge', Version: '2.0.0' }]);
+                return cpmProject(projectC, [{ Id: 'Pkg.NoVersion', Version: '' }]);
+            });
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            const diverge = result.value.Missing.find((entry) => entry.Id === 'Pkg.Diverge');
+            const noVersion = result.value.Missing.find((entry) => entry.Id === 'Pkg.NoVersion');
+            assert.strictEqual(diverge?.Reason, 'multipleVersions');
+            assert.strictEqual(diverge?.Actionable, false);
+            assert.strictEqual(diverge?.Version, '');
+            assert.strictEqual(noVersion?.Reason, 'noVersion');
+            assert.strictEqual(noVersion?.Actionable, false);
+        });
+
+        test('reports noVersion when any CPM project using the package has no resolvable version', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectA = path.join(workspaceDir, 'A.csproj');
+            const projectB = path.join(workspaceDir, 'B.csproj');
+            fs.writeFileSync(
+                projectA,
+                '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Mixed" Version="1.0.0" /></ItemGroup></Project>'
+            );
+            fs.writeFileSync(
+                projectB,
+                '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Mixed" /></ItemGroup></Project>'
+            );
+
+            stubSettings();
+            stubWorkspaceFiles([projectA, projectB], [propsFile]);
+            stubProjectParsing((projectPath) => {
+                if (projectPath === projectA) return cpmProject(projectA, [{ Id: 'Pkg.Mixed', Version: '1.0.0' }]);
+                return cpmProject(projectB, [{ Id: 'Pkg.Mixed', Version: '' }]);
+            });
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            const entry = result.value.Missing.find((candidate) => candidate.Id === 'Pkg.Mixed')!;
+            // One project resolves a version, the other does not: centralising the single known
+            // version would silently pin the wrong version for the project without one.
+            assert.strictEqual(entry.Actionable, false);
+            assert.strictEqual(entry.Reason, 'noVersion');
+        });
+
+        test('groups every CPM project under one governing props file', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectA = path.join(workspaceDir, 'A.csproj');
+            const projectB = path.join(workspaceDir, 'B.csproj');
+
+            const reference = '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Shared" Version="4.0.0" /></ItemGroup></Project>';
+            fs.writeFileSync(projectA, reference);
+            fs.writeFileSync(projectB, reference);
+
+            stubSettings();
+            stubWorkspaceFiles([projectA, projectB], [propsFile]);
+            stubProjectParsing((projectPath) =>
+                cpmProject(projectPath, [{ Id: 'Pkg.Shared', Version: '4.0.0' }])
+            );
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            const entry = result.value.Missing.find((candidate) => candidate.Id === 'Pkg.Shared')!;
+            assert.deepStrictEqual(entry.PropsFiles, [propsFile]);
+            assert.deepStrictEqual([...entry.Projects].sort(), [projectA, projectB].sort());
+            assert.strictEqual(entry.Actionable, true);
+        });
+
+        test('reports unreadableProject when the project file cannot be read', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            // The csproj is declared in the workspace but never written, so the safety check
+            // cannot read it and the row must not be actionable.
+            const projectPath = path.join(workspaceDir, 'Missing.csproj');
+
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() => cpmProject(projectPath, [{ Id: 'Pkg.Unreadable', Version: '1.0.0' }]));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+
+            const api = createHostAPI();
+            const result = await api.getCleanupReportAsync({});
+
+            assert.ok(result.ok, result.ok ? '' : result.error);
+            const entry = result.value.Missing.find((candidate) => candidate.Id === 'Pkg.Unreadable')!;
+            assert.strictEqual(entry.Actionable, false);
+            assert.strictEqual(entry.Reason, 'unreadableProject');
+        });
+
+        test('adds the definition, backs up, restores and invalidates the snapshot', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            const propsContent = '<Project>\n  <ItemGroup>\n  </ItemGroup>\n</Project>\n';
+            const projectContent = '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Missing" Version="2.0.0" /></ItemGroup></Project>';
+            fs.writeFileSync(propsFile, propsContent);
+            fs.writeFileSync(projectPath, projectContent);
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() => cpmProject(projectPath, [{ Id: 'Pkg.Missing', Version: '2.0.0' }]));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+            const restoreStub = sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').resolves();
+            const invalidate = sandbox.spy(workspaceSnapshot, 'invalidate');
+
+            const api = createHostAPI();
+            const started = await api.startAddMissingDefinitionsAsync({});
+            assert.ok(started.ok, started.ok ? '' : started.error);
+            const status = await waitForJobAsync(api, started.value.JobId);
+
+            assert.ok(status.ok);
+            assert.strictEqual(status.value.Kind, 'addMissingDefinitions');
+            assert.strictEqual(status.value.State, 'completed');
+            if (status.value.Kind !== 'addMissingDefinitions') return;
+
+            const response = status.value.Response!;
+            assert.deepStrictEqual(response.Added, [{ Id: 'Pkg.Missing', Version: '2.0.0', PropsFile: propsFile }]);
+            // The props file and the .csproj whose inline version is stripped are both backed up.
+            assert.strictEqual(response.Backups.length, 2);
+            assert.ok(response.Backups[0]!.startsWith(propsFile + '.backup.'));
+            assert.ok(response.Backups[1]!.startsWith(projectPath + '.backup.'));
+
+            assert.match(fs.readFileSync(propsFile, 'utf8'), /<PackageVersion Include="Pkg\.Missing" Version="2\.0\.0" \/>/);
+            assert.strictEqual(
+                fs.readFileSync(projectPath, 'utf8'),
+                '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Missing" /></ItemGroup></Project>'
+            );
+            assert.ok(restoreStub.called, 'the affected projects are restored');
+            assert.ok(invalidate.called, 'the snapshot is invalidated after the mutation');
+        });
+
+        test('rolls back every file when the restore fails', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            const propsContent = '<Project>\n  <ItemGroup>\n  </ItemGroup>\n</Project>\n';
+            const projectContent = '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Missing" Version="2.0.0" /></ItemGroup></Project>';
+            fs.writeFileSync(propsFile, propsContent);
+            fs.writeFileSync(projectPath, projectContent);
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() => cpmProject(projectPath, [{ Id: 'Pkg.Missing', Version: '2.0.0' }]));
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').rejects(
+                new DotnetError('dotnet exited with code 1', 'error NU1101: unable to find package')
+            );
+
+            const api = createHostAPI();
+            const started = await api.startAddMissingDefinitionsAsync({});
+            assert.ok(started.ok, started.ok ? '' : started.error);
+            const status = await waitForJobAsync(api, started.value.JobId);
+
+            assert.ok(status.ok);
+            assert.strictEqual(status.value.State, 'failed');
+            // Every file is back to its pre-write content.
+            assert.strictEqual(fs.readFileSync(propsFile, 'utf8'), propsContent);
+            assert.strictEqual(fs.readFileSync(projectPath, 'utf8'), projectContent);
+            // The backups stay behind for inspection.
+            const backups = fs.readdirSync(workspaceDir).filter((name) => name.includes('.backup.'));
+            assert.ok(backups.length >= 1);
+        });
+
+        test('re-validates requested ids and skips unknown or non-actionable ones', async () => {
+            const propsFile = path.join(workspaceDir, 'Directory.Packages.props');
+            const projectPath = path.join(workspaceDir, 'App.csproj');
+            fs.writeFileSync(propsFile, '<Project>\n  <ItemGroup>\n  </ItemGroup>\n</Project>\n');
+            fs.writeFileSync(projectPath, '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><PackageReference Include="Pkg.Missing" Version="2.0.0" /><PackageReference Include="Pkg.None" /></ItemGroup></Project>');
+            sandbox.stub(vscode.workspace, 'workspaceFolders').value([{ uri: { fsPath: workspaceDir } }]);
+
+            stubSettings();
+            stubWorkspaceFiles([projectPath], [propsFile]);
+            stubProjectParsing(() =>
+                cpmProject(projectPath, [
+                    { Id: 'Pkg.Missing', Version: '2.0.0' },
+                    { Id: 'Pkg.None', Version: '' },
+                ])
+            );
+            sandbox.stub(CpmReader, 'FindCpmFilePathAsync').resolves(propsFile);
+            sandbox.stub(CpmReader, 'ParseCpmFileAsync').resolves(cpmMap({}));
+            sandbox.stub(TaskExecutorDefault, 'ExecuteCommandAsync').resolves();
+
+            const api = createHostAPI();
+            const started = await api.startAddMissingDefinitionsAsync({
+                PackageIds: ['Pkg.Missing', 'Pkg.None', 'Pkg.Absent'],
+            });
+            assert.ok(started.ok, started.ok ? '' : started.error);
+            const status = await waitForJobAsync(api, started.value.JobId);
+
+            assert.ok(status.ok);
+            assert.strictEqual(status.value.State, 'completed');
+            if (status.value.Kind !== 'addMissingDefinitions') return;
+            const response = status.value.Response!;
+
+            assert.deepStrictEqual(response.Added.map((entry) => entry.Id), ['Pkg.Missing']);
+            const skipped = new Map(response.Skipped.map((entry) => [entry.Id, entry.Reason] as const));
+            assert.strictEqual(skipped.get('Pkg.None'), 'noVersion');
+            assert.strictEqual(skipped.get('Pkg.Absent'), 'unknown');
+        });
+    });
 });

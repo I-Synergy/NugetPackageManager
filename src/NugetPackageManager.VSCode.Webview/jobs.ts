@@ -1,5 +1,7 @@
 import { CANCELLED_ERROR, fail, ok, type Result } from "@/common/rpc/result";
 import type {
+  AddMissingDefinitionsRequest,
+  AddMissingDefinitionsResponse,
   BatchUpdateRequest,
   BatchUpdateResponse,
   CacheControl,
@@ -143,6 +145,25 @@ export async function runCleanupJobAsync(
   if (job.Kind !== "cleanup") return fail(`Unexpected job kind: ${job.Kind}`);
   if (job.State === "cancelled") {
     return fail("The cleanup was cancelled — packages removed so far stay removed (backups were created)");
+  }
+  if (job.State === "completed" && job.Response) return ok(job.Response);
+  return fail(job.Error ?? failureMessage(job.State));
+}
+
+export async function runAddMissingDefinitionsJobAsync(
+  request: AddMissingDefinitionsRequest,
+  options: JobRunOptions = {}
+): Promise<Result<AddMissingDefinitionsResponse>> {
+  const started = await startJobAsync(hostApi.startAddMissingDefinitionsAsync(request), options);
+  if (!started.ok) return started;
+
+  const status = await waitForJobAsync(started.value, options);
+  if (!status.ok) return status;
+
+  const job = status.value;
+  if (job.Kind !== "addMissingDefinitions") return fail(`Unexpected job kind: ${job.Kind}`);
+  if (job.State === "cancelled") {
+    return fail("The add was cancelled — any changes it had written were rolled back");
   }
   if (job.State === "completed" && job.Response) return ok(job.Response);
   return fail(job.Error ?? failureMessage(job.State));

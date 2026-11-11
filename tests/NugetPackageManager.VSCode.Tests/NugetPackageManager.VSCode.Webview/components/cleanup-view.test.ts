@@ -231,4 +231,209 @@ suite('CleanupView Component', () => {
         await waitForAsync(() => /cancelled/i.test(state.statusText), 2000);
     });
 
+
+    // ---- used-but-not-defined (missing definitions) ----
+
+    function missingReport(missing: unknown[]): unknown {
+        return { PropsFiles: [], Used: [], Missing: missing, Unused: [] };
+    }
+
+    const notActionableEntry = {
+        Id: 'Pkg.NoVersion',
+        Version: '',
+        Projects: ['/ws/App.csproj'],
+        PropsFiles: [],
+        Actionable: false,
+        Reason: 'noVersion',
+    };
+
+    const actionableEntry = {
+        Id: 'Pkg.Missing',
+        Version: '2.0.0',
+        Projects: ['/ws/App.csproj'],
+        PropsFiles: ['/ws/Directory.Packages.props'],
+        Actionable: true,
+    };
+
+    test('disables Add definitions when nothing is actionable', async () => {
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => ok(missingReport([notActionableEntry])),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const button = [...(view.shadowRoot?.querySelectorAll('button') ?? [])]
+            .find((candidate) => candidate.textContent?.includes('Add definitions'));
+        assert.ok(button, 'Add definitions button should be present');
+        assert.strictEqual(button!.disabled, true, 'disabled when no entry is actionable');
+    });
+
+    test('renders the reason for a non-actionable entry', async () => {
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => ok(missingReport([notActionableEntry])),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        assert.ok(view.shadowRoot?.textContent?.includes('No version found — add it manually'));
+    });
+
+    test('renders the nonCpmOnly reason and omits the file count when there are no props files', async () => {
+        const nonCpmEntry = {
+            Id: 'Pkg.Loose',
+            Version: '1.0.0',
+            Projects: ['/ws/App.csproj'],
+            PropsFiles: [],
+            Actionable: false,
+            Reason: 'nonCpmOnly',
+        };
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => ok(missingReport([nonCpmEntry])),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        assert.ok(view.shadowRoot?.textContent?.includes('Used without CPM — no definition needed'));
+        assert.strictEqual(
+            view.shadowRoot?.querySelector('.file-name'),
+            null,
+            'no file count should render when the entry has no props files'
+        );
+    });
+
+    test('shows the first using project name and a +N overflow hint', async () => {
+        const multiProjectEntry = {
+            Id: 'Pkg.Shared',
+            Version: '1.2.3',
+            Projects: ['/ws/src/App/App.csproj', '/ws/src/Lib/Lib.csproj'],
+            PropsFiles: ['/ws/Directory.Packages.props'],
+            Actionable: true,
+        };
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => ok(missingReport([multiProjectEntry])),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const projectName = view.shadowRoot?.querySelector('.missing-row .project-name');
+        assert.ok(projectName, 'a project label should render');
+        assert.strictEqual(projectName!.textContent?.trim(), 'App.csproj +1');
+        assert.strictEqual(
+            projectName!.getAttribute('title'),
+            '/ws/src/App/App.csproj\n/ws/src/Lib/Lib.csproj'
+        );
+    });
+
+    test('confirms, runs the job, refreshes the report and reports status', async () => {
+        let reportCalls = 0;
+        let addCalls = 0;
+        let confirmCalls = 0;
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => {
+                    reportCalls++;
+                    return ok(missingReport([actionableEntry]));
+                },
+                showConfirmationAsync: async () => {
+                    confirmCalls++;
+                    return ok({ Confirmed: true });
+                },
+                startAddMissingDefinitionsAsync: async () => {
+                    addCalls++;
+                    return ok({ JobId: 'job-add' });
+                },
+                getJobAsync: async () => ok({
+                    Kind: 'addMissingDefinitions',
+                    State: 'completed',
+                    Stage: 'Completed',
+                    Percent: 100,
+                    Response: {
+                        Added: [{ Id: 'Pkg.Missing', Version: '2.0.0', PropsFile: '/ws/Directory.Packages.props' }],
+                        ChangedFiles: ['/ws/Directory.Packages.props'],
+                        Backups: ['/ws/Directory.Packages.props.backup.test'],
+                        Skipped: [],
+                    },
+                }),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        let completed = false;
+        view.addEventListener('cleanup-completed', () => { completed = true; });
+
+        const button = [...(view.shadowRoot?.querySelectorAll('button') ?? [])]
+            .find((candidate) => candidate.textContent?.includes('Add definitions'));
+        assert.ok(button);
+        button!.click();
+
+        await waitForAsync(() => addCalls === 1 && reportCalls >= 2, 2000);
+        assert.strictEqual(confirmCalls, 1, 'a confirmation is shown');
+        assert.strictEqual(addCalls, 1, 'the job is started');
+        assert.ok(reportCalls >= 2, 'the report is refreshed');
+        assert.strictEqual(completed, true, 'cleanup-completed is dispatched');
+
+        const state = view as unknown as { statusText: string };
+        assert.match(state.statusText, /Added 1 definition/);
+        assert.match(state.statusText, /backup/);
+    });
+
+    test('offers a per-row Add button for actionable entries', async () => {
+        Object.defineProperty(registrations, 'hostApi', {
+            value: {
+                getCleanupReportAsync: async () => ok(missingReport([actionableEntry, notActionableEntry])),
+                getDependencyIssuesAsync: async () => ok({
+                    Issues: [], ProjectsScanned: 0, ProjectsSkipped: 0, SkippedProjectPaths: [],
+                }),
+            },
+            writable: true,
+            configurable: true,
+        });
+
+        await view.LoadCleanupReportAsync();
+        await view.updateComplete;
+
+        const rows = view.shadowRoot?.querySelectorAll('.missing-row');
+        assert.strictEqual(rows?.length, 2);
+        const addRowButtons = [...(view.shadowRoot?.querySelectorAll('.missing-row button') ?? [])];
+        assert.strictEqual(addRowButtons.length, 1, 'only the actionable row offers Add');
+    });
 });

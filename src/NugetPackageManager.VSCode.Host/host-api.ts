@@ -35,6 +35,9 @@ import type {
   GetInconsistentPackagesResponse,
   ConsolidateRequest,
   CleanupReport,
+  MissingDefinitionReason,
+  AddMissingDefinitionsRequest,
+  AddMissingDefinitionsResponse,
   CleanupUnusedRequest,
   CleanupUnusedResponse,
   GetVulnerablePackagesRequest,
@@ -106,6 +109,12 @@ import { ResolveDotnetCommand, ResolveDotnetContext, ResolveWorkingDirectory } f
 import { RunWorkloadCommandAsync } from "./utilities/workload-commands";
 import { ScopeProjectFiles } from "./utilities/project-scope";
 import { ApplyConditionalPackageVersions } from "./utilities/cpm-conditional";
+import {
+  AddUnconditionalPackageVersions,
+  InspectPackageReference,
+  RemoveInlinePackageVersion,
+  type PackageVersionEntry,
+} from "./utilities/cpm-definitions";
 import StatusBarUtils from "./utilities/status-bar-utils";
 import { Logger } from "@/common/logger";
 import { getConfiguration, getSetting } from "@/common/configuration";
@@ -1289,6 +1298,212 @@ async function removeUnusedFromPropsAsync(
       acc.errors.push(`Failed to remove ${packageId} from ${propsFile.Path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/**
+ * Adds central `PackageVersion` entries for packages that are used by CPM projects but not
+ * defined. The report is recomputed here so the webview's ids and versions are never trusted;
+ * only entries that are still actionable are written. Every file is snapshotted and backed up
+ * first, and any failure (write or restore) rolls them all back so a half-written workspace
+ * never survives.
+ */
+async function runAddMissingDefinitionsAsync(
+  request: AddMissingDefinitionsRequest,
+  signal?: AbortSignal,
+  report: JobReporter = () => {}
+): Promise<Result<AddMissingDefinitionsResponse>> {
+  let snapshots: Map<string, FileSnapshot> | undefined;
+  try {
+    report("Scanning projects for missing definitions…", 5);
+    const cleanupReport = await buildCleanupReportAsync(signal);
+    const { targets, skipped } = selectMissingTargets(cleanupReport.Missing, request.PackageIds);
+    if (targets.length === 0) {
+      return ok({ Added: [], ChangedFiles: [], Backups: [], Skipped: skipped });
+    }
+
+    const plan = await planDefinitionWritesAsync(targets, signal);
+    const changedPropsFiles = [...plan.propsWrites.keys()];
+    const changedCsprojFiles = [...plan.csprojWrites.keys()];
+    const filesToWrite = [...changedPropsFiles, ...changedCsprojFiles];
+
+    report("Snapshotting files…", 20);
+    snapshots = await snapshotFilesAsync(filesToWrite);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backups: string[] = [];
+    for (const filePath of filesToWrite) {
+      const backupPath = `${filePath}.backup.${stamp}`;
+      await fs.copyFile(filePath, backupPath);
+      backups.push(backupPath);
+    }
+
+    const added = await writeMissingDefinitionsAsync(plan, report, signal);
+
+    if (!getSetting<boolean>("skipRestore", false)) {
+      report("Restoring updated projects…", 80);
+      const affectedProjects = [...new Set(targets.flatMap((entry) => entry.Projects))];
+      const restoreFailure = await restoreProjectsInternalAsync(affectedProjects, signal, false);
+      if (restoreFailure) throw new Error(`Restore failed: ${restoreFailure.message}`);
+    }
+
+    invalidateAfterMutation();
+    report("Completed", 100);
+    return ok({ Added: added, ChangedFiles: filesToWrite, Backups: backups, Skipped: skipped });
+  } catch (err) {
+    if (snapshots) await rollbackFilesAsync(snapshots);
+    return fail(`Failed to add missing definitions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+type MissingTargets = {
+  targets: CleanupReport["Missing"];
+  skipped: Array<{ Id: string; Reason: string }>;
+};
+
+/** Re-validates the requested ids against the freshly computed report. */
+function selectMissingTargets(
+  missing: CleanupReport["Missing"],
+  requestedIds: string[] | undefined
+): MissingTargets {
+  const requested = requestedIds ? new Set(requestedIds.map((id) => id.toLowerCase())) : null;
+  const targets: CleanupReport["Missing"] = [];
+  const skipped: Array<{ Id: string; Reason: string }> = [];
+
+  for (const entry of missing) {
+    const key = entry.Id.toLowerCase();
+    if (requested && !requested.has(key)) continue;
+    requested?.delete(key);
+    if (entry.Actionable) targets.push(entry);
+    else skipped.push({ Id: entry.Id, Reason: entry.Reason ?? "notActionable" });
+  }
+
+  if (requested) {
+    const originalById = new Map((requestedIds ?? []).map((id) => [id.toLowerCase(), id] as const));
+    for (const id of requested) {
+      skipped.push({ Id: originalById.get(id) ?? id, Reason: "unknown" });
+    }
+  }
+  return { targets, skipped };
+}
+
+type DefinitionWritePlan = {
+  /** Entries to add to each props file. */
+  propsWrites: Map<string, PackageVersionEntry[]>;
+  /** `PackageReference` files whose literal inline versions must be stripped, with new contents. */
+  csprojWrites: Map<string, string>;
+};
+
+/** Reads each governing file once and computes the exact writes, without touching disk. */
+async function planDefinitionWritesAsync(
+  targets: CleanupReport["Missing"],
+  signal?: AbortSignal
+): Promise<DefinitionWritePlan> {
+  const propsWrites = new Map<string, PackageVersionEntry[]>();
+  const csprojState = new Map<string, { original: string; current: string }>();
+  const contents = new Map<string, Promise<string | null>>();
+
+  for (const entry of targets) {
+    if (signal?.aborted) throw new Error("cancelled");
+    addPropsEntries(propsWrites, entry);
+    await stripInlineVersionForEntryAsync(entry, csprojState, contents);
+  }
+
+  return { propsWrites, csprojWrites: collectCsprojWrites(csprojState) };
+}
+
+function addPropsEntries(
+  propsWrites: Map<string, PackageVersionEntry[]>,
+  entry: CleanupReport["Missing"][number]
+): void {
+  for (const propsFile of entry.PropsFiles) {
+    const list = propsWrites.get(propsFile) ?? [];
+    list.push({ PackageId: entry.Id, Version: entry.Version });
+    propsWrites.set(propsFile, list);
+  }
+}
+
+async function stripInlineVersionForEntryAsync(
+  entry: CleanupReport["Missing"][number],
+  csprojState: Map<string, { original: string; current: string }>,
+  contents: Map<string, Promise<string | null>>
+): Promise<void> {
+  for (const projectPath of entry.Projects) {
+    const state = await csprojStateFor(projectPath, csprojState, contents);
+    if (!state) continue;
+    const removal = RemoveInlinePackageVersion(state.current, entry.Id);
+    if (removal.Changed) state.current = removal.Content;
+  }
+}
+
+function collectCsprojWrites(
+  csprojState: Map<string, { original: string; current: string }>
+): Map<string, string> {
+  const writes = new Map<string, string>();
+  for (const [projectPath, state] of csprojState) {
+    if (state.current !== state.original) writes.set(projectPath, state.current);
+  }
+  return writes;
+}
+
+async function csprojStateFor(
+  projectPath: string,
+  states: Map<string, { original: string; current: string }>,
+  contents: Map<string, Promise<string | null>>
+): Promise<{ original: string; current: string } | null> {
+  const existing = states.get(projectPath);
+  if (existing) return existing;
+  const original = await readFileOrNullAsync(projectPath, contents);
+  if (original === null) return null;
+  const state = { original, current: original };
+  states.set(projectPath, state);
+  return state;
+}
+
+/** Writes the props files (verifying each id lands) and the inline-version removals. */
+async function writeMissingDefinitionsAsync(
+  plan: DefinitionWritePlan,
+  report: JobReporter,
+  signal: AbortSignal | undefined
+): Promise<Array<{ Id: string; Version: string; PropsFile: string }>> {
+  const added: Array<{ Id: string; Version: string; PropsFile: string }> = [];
+  const propsEntries = [...plan.propsWrites.entries()];
+  for (const [index, [propsFile, entries]] of propsEntries.entries()) {
+    if (signal?.aborted) throw new Error("cancelled");
+    report(
+      `Adding definitions to ${path.basename(propsFile)}…`,
+      25 + (index / Math.max(1, propsEntries.length)) * 40
+    );
+
+    const original = await fs.readFile(propsFile, "utf8");
+    const result = AddUnconditionalPackageVersions(original, entries);
+    if (result.Changed) await fs.writeFile(propsFile, result.Content, "utf8");
+
+    const verify = await fs.readFile(propsFile, "utf8");
+    for (const entry of entries) {
+      if (!hasPackageVersion(verify, entry.PackageId)) {
+        throw new Error(`Failed to add ${entry.PackageId} to ${propsFile}`);
+      }
+      added.push({ Id: entry.PackageId, Version: entry.Version, PropsFile: propsFile });
+    }
+  }
+
+  report("Stripping inline versions…", 70);
+  for (const [projectPath, newContent] of plan.csprojWrites) {
+    if (signal?.aborted) throw new Error("cancelled");
+    await fs.writeFile(projectPath, newContent, "utf8");
+  }
+
+  return added;
+}
+
+function hasPackageVersion(content: string, packageId: string): boolean {
+  const pattern = /<PackageVersion\b[^>]*?\bInclude\s*=\s*("([^"]*)"|'([^']*)')/gi;
+  const wanted = packageId.toLowerCase();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    const id = match[2] ?? match[3] ?? "";
+    if (id.toLowerCase() === wanted) return true;
+  }
+  return false;
 }
 /**
  * Shared implementation of `consolidatePackagesAsync` and the consolidation
@@ -3392,6 +3607,15 @@ export function createHostAPI(context?: vscode.ExtensionContext): HostAPI {
       return Promise.resolve(ok({ JobId: jobId }));
     },
 
+    startAddMissingDefinitionsAsync(request: AddMissingDefinitionsRequest): Promise<Result<StartJobResponse>> {
+      const jobId = globalThis.crypto.randomUUID();
+      OperationJobs.AddMissingDefinitions.Start(jobId, (jobSignal, jobReport) =>
+        runAddMissingDefinitionsAsync(request, jobSignal, jobReport)
+      );
+      Logger.info(`addMissingDefinitions: Started job ${jobId}`);
+      return Promise.resolve(ok({ JobId: jobId }));
+    },
+
     /**
      * Starts the `workspaceScan` job: discovery plus one core parse of the whole workspace, with
      * the solution restriction applied like `getProjectsAsync`.
@@ -4390,14 +4614,22 @@ function FormatRestoreConflictInfo(conflicts: RestoreConflictInfo[]): string {
   return [...new Set(entries)].join(" | ");
 }
 
+/** Per-package usage captured while building the report, keyed by lowercased id. */
+type CleanupUsage = {
+  Id: string;
+  /** Every project that references the package, keyed by normalized path, with a CPM flag. */
+  Projects: Map<string, { Package: Project["Packages"][number]; CpmEnabled: boolean }>;
+};
+
 /**
- * Removes a PackageVersion entry from every Directory.Packages.props file whose
- * projects no longer reference the package. Called after an uninstall so CPM
- * does not accumulate stale global references.
+ * Builds the Cleanup report. `Used`/`Unused` come from a global map (so an entry used by any
+ * project is never reported unused), while `Missing` reports every used package no props file
+ * defines. An entry used only by non-CPM projects is shown but is not actionable, because no
+ * central definition is needed for it.
  */
 async function buildCleanupReportAsync(signal?: AbortSignal): Promise<CleanupReport> {
   const settings = getCpmSettings();
-  const used = await collectUsedPackagesAsync(undefined, signal);
+  const { used, usage } = await collectUsedPackagesAsync(undefined, signal);
 
   const propsFiles = applyExcludeGlobs(
     await vscode.workspace.findFiles(
@@ -4411,7 +4643,7 @@ async function buildCleanupReportAsync(signal?: AbortSignal): Promise<CleanupRep
   return {
     PropsFiles: propsReports,
     Used: sortedValues(used),
-    Missing: collectMissing(used, defined),
+    Missing: await collectMissingAsync(usage, defined, signal),
     Unused: collectUnused(defined, used),
   };
 }
@@ -4420,8 +4652,9 @@ async function buildCleanupReportAsync(signal?: AbortSignal): Promise<CleanupRep
 async function collectUsedPackagesAsync(
   projectPaths: string[] | undefined,
   signal?: AbortSignal
-): Promise<Map<string, string>> {
+): Promise<{ used: Map<string, string>; usage: Map<string, CleanupUsage> }> {
   const used = new Map<string, string>();
+  const usage = new Map<string, CleanupUsage>();
   const { projects, projectFiles, failedPaths } = await loadSnapshotProjectsAsync({
     ...(projectPaths?.length ? { projectPaths } : {}),
     ...(signal !== undefined && { signal }),
@@ -4436,11 +4669,19 @@ async function collectUsedPackagesAsync(
 
   for (const project of projects) {
     for (const pkg of project.Packages) {
-      used.set(pkg.Id.toLowerCase(), pkg.Id);
+      const key = pkg.Id.toLowerCase();
+      if (!used.has(key)) used.set(key, pkg.Id);
+
+      let entry = usage.get(key);
+      if (!entry) {
+        entry = { Id: pkg.Id, Projects: new Map() };
+        usage.set(key, entry);
+      }
+      entry.Projects.set(path.normalize(project.Path), { Package: pkg, CpmEnabled: project.CpmEnabled });
     }
   }
 
-  return used;
+  return { used, usage };
 }
 
 async function collectDefinedPackagesAsync(
@@ -4485,11 +4726,167 @@ function collectUnused(defined: Map<string, string>, used: Map<string, string>):
     .sort((a, b) => a.localeCompare(b));
 }
 
-function collectMissing(used: Map<string, string>, defined: Map<string, string>): string[] {
-  return [...used.entries()]
-    .filter(([key]) => !defined.has(key))
-    .map(([, id]) => id)
+/** Builds one `MissingDefinition` per used id that no parsed props file defines. */
+async function collectMissingAsync(
+  usage: Map<string, CleanupUsage>,
+  defined: Map<string, string>,
+  signal?: AbortSignal
+): Promise<CleanupReport["Missing"]> {
+  const graphs = new Map<string, Promise<ProjectDependencyGraph | null>>();
+  const projectContents = new Map<string, Promise<string | null>>();
+
+  const missing: CleanupReport["Missing"] = [];
+  for (const [key, use] of [...usage.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (defined.has(key)) continue;
+    if (signal?.aborted) break;
+    missing.push(await inspectMissingAsync(use, graphs, projectContents, signal));
+  }
+  return missing;
+}
+
+async function inspectMissingAsync(
+  use: CleanupUsage,
+  graphs: Map<string, Promise<ProjectDependencyGraph | null>>,
+  projectContents: Map<string, Promise<string | null>>,
+  signal?: AbortSignal
+): Promise<CleanupReport["Missing"][number]> {
+  // Report every using project so the UI can show where the package is used, but run the
+  // version, props-file and safety checks against the CPM-enabled subset only.
+  const allProjects = [...use.Projects.keys()].sort((a, b) => a.localeCompare(b));
+  const cpmProjects = [...use.Projects.entries()]
+    .filter(([, info]) => info.CpmEnabled)
+    .map(([projectPath]) => projectPath)
     .sort((a, b) => a.localeCompare(b));
+
+  // No CPM-enabled project uses the package, so no central definition is needed: show it as an
+  // informational row instead of dropping it. The single inline version is kept when the uses
+  // agree, otherwise the version is left unknown (the UI only shows the reason for these rows).
+  if (cpmProjects.length === 0) {
+    const versions = new Set<string>();
+    for (const info of use.Projects.values()) {
+      if (info.Package.Version) versions.add(info.Package.Version);
+    }
+    return {
+      Id: use.Id,
+      Version: versions.size === 1 ? [...versions][0]! : "",
+      Projects: allProjects,
+      PropsFiles: [],
+      Actionable: false,
+      Reason: "nonCpmOnly",
+    };
+  }
+
+  const acc: MissingAccumulator = {
+    versions: new Set<string>(),
+    anyPinned: false,
+    anyUnknownVersion: false,
+    propsFiles: new Set<string>(),
+    anyPropsMissing: false,
+    safetyReason: undefined,
+  };
+
+  for (const projectPath of cpmProjects) {
+    if (signal?.aborted) break;
+    await accumulateMissingFactsAsync(acc, projectPath, use, graphs, projectContents);
+  }
+
+  const reason = resolveMissingReason(acc);
+  return {
+    Id: use.Id,
+    Version: acc.versions.size === 1 ? [...acc.versions][0]! : "",
+    Projects: allProjects,
+    PropsFiles: [...acc.propsFiles].sort((a, b) => a.localeCompare(b)),
+    Actionable: reason === undefined,
+    ...(reason && { Reason: reason }),
+  };
+}
+
+type MissingAccumulator = {
+  versions: Set<string>;
+  anyPinned: boolean;
+  anyUnknownVersion: boolean;
+  propsFiles: Set<string>;
+  anyPropsMissing: boolean;
+  safetyReason: MissingDefinitionReason | undefined;
+};
+
+/** Reads one CPM project's facts and folds them into the aggregate. */
+async function accumulateMissingFactsAsync(
+  acc: MissingAccumulator,
+  projectPath: string,
+  use: CleanupUsage,
+  graphs: Map<string, Promise<ProjectDependencyGraph | null>>,
+  projectContents: Map<string, Promise<string | null>>
+): Promise<void> {
+  const pkg = use.Projects.get(projectPath)!.Package;
+  const version = pkg.Version || (await resolveAssetsVersionAsync(projectPath, use.Id, graphs));
+  if (version) acc.versions.add(version);
+  // Any project without a resolvable version blocks centralising a single known version:
+  // it would silently pin the wrong version for that project.
+  else acc.anyUnknownVersion = true;
+  if (pkg.IsPinned) acc.anyPinned = true;
+
+  const propsFile = await CpmReader.FindCpmFilePathAsync(projectPath);
+  if (propsFile) acc.propsFiles.add(propsFile);
+  else acc.anyPropsMissing = true;
+
+  // A reference with a Condition or a property version cannot be expressed as a single
+  // unconditional PackageVersion; a literal inline version is fine (the add strips it).
+  // The first reference-safety problem wins; later projects cannot make it actionable again.
+  if (pkg.VersionSource === "project" && !acc.safetyReason) {
+    acc.safetyReason = await inspectReferenceSafetyAsync(projectPath, use.Id, projectContents);
+  }
+}
+
+function resolveMissingReason(input: MissingAccumulator): MissingDefinitionReason | undefined {
+  if (input.versions.size === 0 || input.anyUnknownVersion) return "noVersion";
+  if (input.versions.size > 1) return "multipleVersions";
+  if (input.anyPinned) return "pinnedVersion";
+  if (input.anyPropsMissing) return "noPropsFile";
+  return input.safetyReason;
+}
+
+async function resolveAssetsVersionAsync(
+  projectPath: string,
+  packageId: string,
+  graphs: Map<string, Promise<ProjectDependencyGraph | null>>
+): Promise<string | null> {
+  let pending = graphs.get(projectPath);
+  if (!pending) {
+    pending = loadProjectDependencyGraphAsync(projectPath);
+    graphs.set(projectPath, pending);
+  }
+  const graph = await pending;
+  return graph?.packageVersions.get(packageId.toLowerCase()) ?? null;
+}
+
+/** `conditionalReference` / `propertyVersion` for the reference, read once per project. */
+async function inspectReferenceSafetyAsync(
+  projectPath: string,
+  packageId: string,
+  projectContents: Map<string, Promise<string | null>>
+): Promise<MissingDefinitionReason | undefined> {
+  const content = await readFileOrNullAsync(projectPath, projectContents);
+  if (content === null) return "unreadableProject";
+  const inspection = InspectPackageReference(content, packageId);
+  if (!inspection.Found) return undefined;
+  if (inspection.HasCondition) return "conditionalReference";
+  if (inspection.Version?.includes("$(") || inspection.VersionOverride?.includes("$(")) {
+    return "propertyVersion";
+  }
+  return undefined;
+}
+
+async function readFileOrNullAsync(
+  filePath: string,
+  cache: Map<string, Promise<string | null>>
+): Promise<string | null> {
+  let pending = cache.get(filePath);
+  if (!pending) {
+    pending = fs.readFile(filePath, "utf8").catch(() => null);
+    cache.set(filePath, pending);
+  }
+  return pending;
 }
 
 async function cleanupUnusedCpmPackageAsync(packageId: string, signal?: AbortSignal): Promise<void> {
